@@ -1,0 +1,9 @@
+[package]
+name = "fake-ssh"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Scriptable stand-in for `ssh`, used by supervisor tests"
+publish = false
+
+[dependencies]

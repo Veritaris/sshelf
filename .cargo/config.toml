@@ -1,0 +1,9 @@
+# Windows/MSVC: do not emit PDBs.
+#
+# The failure `LNK1171: cannot load mspdbcore.dll (error 1455)` is
+# ERROR_COMMITMENT_LIMIT — link.exe cannot load the PDB engine when the machine
+# is low on *commit* memory. `/DEBUG:NONE` skips PDB generation entirely, so the
+# linker never loads mspdbcore.dll — builds then survive commit pressure and link
+# faster with less memory. Applies to the final binaries AND to build scripts.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "link-arg=/DEBUG:NONE"]
