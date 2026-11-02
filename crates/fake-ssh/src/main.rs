@@ -21,6 +21,13 @@
 //!   - `fail-auth*`: `Permission denied (publickey).`, exit 255
 //!   - `die-later*`: up, then the connection drops after 1 s (exit 255)
 //!   - `noisy*`: 500 log lines first, then up
+//!   - `changed*`: the "REMOTE HOST IDENTIFICATION HAS CHANGED" failure
+//!   - `unknownkey*`: `Host key verification failed.` (unknown key)
+//! - Host keys: `-G` prints `~/.ssh/known_hosts` paths, and a `proxyjump`
+//!   `<prefix>-jump` for `<prefix>-via-*` aliases. A key fetch
+//!   (`-o UserKnownHostsFile=… -o StrictHostKeyChecking=accept-new … exit`)
+//!   writes [`NEW_KEY`] for `newkey*`/`changed*` hosts, then fails auth like a
+//!   real server; `unreachable*` hosts time out.
 
 use std::env;
 use std::fs::OpenOptions;
@@ -31,6 +38,9 @@ use std::thread;
 use std::time::Duration;
 
 const VERSION_LINE: &str = "OpenSSH_fake_1.0, fake-ssh";
+/// Public part of a throwaway key: the "server's current" host key.
+const NEW_KEY: &str =
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIO/867Gn6gWVC9L/2TosddbUBIfUwN1FA755XCQA20kG";
 
 fn env_port(name: &str) -> Option<u16> {
     env::var(name).ok().and_then(|v| v.parse().ok())
@@ -87,6 +97,14 @@ fn main() -> ExitCode {
         }
         println!("host {alias}\nhostname {alias}.example.com\nport 22\nuser fake");
         println!("identityfile ~/.ssh/id_ed25519\nidentityfile ~/.ssh/id_rsa");
+        println!("userknownhostsfile ~/.ssh/known_hosts ~/.ssh/known_hosts2");
+        println!("globalknownhostsfile ~/.ssh/global_known_hosts");
+        if let Some((prefix, _)) = alias.split_once("-via-") {
+            println!("proxyjump {prefix}-jump");
+        }
+    }
+    if let Some(code) = fetch_key(&args) {
+        return code;
     }
 
     if args.iter().any(|a| a == "-N") {
@@ -100,9 +118,65 @@ fn main() -> ExitCode {
     ExitCode::from(code)
 }
 
+/// Value of `-o Name=value` (quotes removed).
+fn option<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
+    args.windows(2)
+        .filter(|w| w[0] == "-o")
+        .find_map(|w| w[1].strip_prefix(name)?.strip_prefix('='))
+        .map(|v| v.trim_matches('"'))
+}
+
+/// A host key fetch (SPEC.md §9): writes the "server's" key to the temp file.
+fn fetch_key(args: &[String]) -> Option<ExitCode> {
+    if option(args, "StrictHostKeyChecking") != Some("accept-new") {
+        return None;
+    }
+    let file = option(args, "UserKnownHostsFile")?;
+    let destination = args
+        .iter()
+        .position(|a| a == "--")
+        .and_then(|i| args.get(i + 1))?;
+    let host = destination.rsplit('@').next().unwrap_or(destination);
+    if host.starts_with("unreachable") {
+        eprintln!("ssh: connect to host {host}.example.com port 22: Connection timed out");
+        return Some(ExitCode::from(255));
+    }
+    if host.starts_with("newkey") || host.starts_with("changed") {
+        let port = args
+            .windows(2)
+            .find(|w| w[0] == "-p")
+            .and_then(|w| w[1].parse::<u16>().ok())
+            .unwrap_or(22);
+        let name = if port == 22 {
+            format!("{host}.example.com")
+        } else {
+            format!("[{host}.example.com]:{port}")
+        };
+        std::fs::write(file, format!("{name} {NEW_KEY}\n")).expect("writing the fetched key");
+        eprintln!("Warning: Permanently added '{name}' (ED25519) to the list of known hosts.");
+    }
+    eprintln!("{destination}: Permission denied (publickey).");
+    Some(ExitCode::from(255))
+}
+
 fn tunnel(args: &[String]) -> ExitCode {
     let alias = args.last().map(String::as_str).unwrap_or_default();
     eprintln!("debug1: Connecting to {alias} [192.0.2.1] port 22.");
+    if alias.starts_with("changed") {
+        eprintln!("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@");
+        eprintln!("@    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @");
+        eprintln!("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@");
+        eprintln!("IT IS POSSIBLE THAT SOMEONE IS DOING SOMETHING NASTY!");
+        eprintln!(
+            "Host key for {alias}.example.com has changed and you have requested strict checking."
+        );
+        eprintln!("Host key verification failed.");
+        return ExitCode::from(255);
+    }
+    if alias.starts_with("unknownkey") {
+        eprintln!("Host key verification failed.");
+        return ExitCode::from(255);
+    }
     if alias.starts_with("fail-auth") {
         eprintln!("{alias}: Permission denied (publickey).");
         return ExitCode::from(255);

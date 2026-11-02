@@ -235,15 +235,24 @@ pub fn atomic_write(dir: &Path, path: &Path, bytes: &[u8]) -> Result<(), Storage
             path: path.to_path_buf(),
         });
     }
-    let io_err = |source| StorageError::Io {
+    replace_file(path, bytes).map_err(|source| StorageError::Io {
         path: path.to_path_buf(),
         source,
-    };
-    fs::create_dir_all(dir).map_err(io_err)?;
-    let mut tmp = tempfile::NamedTempFile::new_in(dir).map_err(io_err)?;
-    tmp.write_all(bytes).map_err(io_err)?;
-    tmp.as_file().sync_all().map_err(io_err)?;
-    tmp.persist(path).map_err(|e| io_err(e.error))?;
+    })
+}
+
+/// Atomically replaces `path` (temp file in the same directory, then rename),
+/// creating its directory if needed. Only for files outside the app dir that
+/// sshelf is allowed to change (`known_hosts`, SPEC.md §9).
+pub(crate) fn replace_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let dir = path
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no directory"))?;
+    fs::create_dir_all(dir)?;
+    let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
+    tmp.write_all(bytes)?;
+    tmp.as_file().sync_all()?;
+    tmp.persist(path).map_err(|e| e.error)?;
     Ok(())
 }
 

@@ -10,6 +10,7 @@ pub mod child;
 pub mod core;
 pub mod hints;
 pub mod history;
+pub mod hostkeys;
 pub mod metadata;
 pub mod orphans;
 pub mod paths;
