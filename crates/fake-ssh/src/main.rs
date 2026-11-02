@@ -14,6 +14,13 @@
 //!   with `fail` exit 255 with an error, like a bad config.
 //! - `--record <file>`: append all arguments (one line, `\x1f`-separated) to
 //!   `file`, so tests can see how it was launched.
+//! - `-N … <alias>`: a tunnel. Binds every `-L`/`-D` port (exits like
+//!   `ExitOnForwardFailure` if one is taken), logs like `ssh -v`, then:
+//!   - `ok*`: stays up after `Entering interactive session.`
+//!   - `slow*`: the same after 1.5 s
+//!   - `fail-auth*`: `Permission denied (publickey).`, exit 255
+//!   - `die-later*`: up, then the connection drops after 1 s (exit 255)
+//!   - `noisy*`: 500 log lines first, then up
 
 use std::env;
 use std::fs::OpenOptions;
@@ -82,9 +89,115 @@ fn main() -> ExitCode {
         println!("identityfile ~/.ssh/id_ed25519\nidentityfile ~/.ssh/id_rsa");
     }
 
+    if args.iter().any(|a| a == "-N") {
+        return tunnel(&args);
+    }
+
     let code = env::var("FAKE_SSH_EXIT")
         .ok()
         .and_then(|v| v.parse::<u8>().ok())
         .unwrap_or(0);
     ExitCode::from(code)
+}
+
+fn tunnel(args: &[String]) -> ExitCode {
+    let alias = args.last().map(String::as_str).unwrap_or_default();
+    eprintln!("debug1: Connecting to {alias} [192.0.2.1] port 22.");
+    if alias.starts_with("fail-auth") {
+        eprintln!("{alias}: Permission denied (publickey).");
+        return ExitCode::from(255);
+    }
+    if alias.starts_with("slow") {
+        thread::sleep(Duration::from_millis(1500));
+    }
+    if alias.starts_with("noisy") {
+        for i in 0..500 {
+            eprintln!("debug1: noisy line {i}");
+        }
+    }
+    eprintln!("Authenticated to {alias} ([192.0.2.1]:22) using \"publickey\".");
+
+    let mut listeners = Vec::new();
+    for (flag, spec) in args.iter().zip(args.iter().skip(1)) {
+        let listen = match flag.as_str() {
+            "-L" => listen_of(spec, 2),
+            "-D" => listen_of(spec, 0),
+            "-R" => {
+                eprintln!("debug1: remote forward success for: listen {spec}");
+                continue;
+            }
+            _ => continue,
+        };
+        let Some((addr, port)) = listen else {
+            eprintln!("Bad forwarding specification '{spec}'");
+            return ExitCode::from(255);
+        };
+        match TcpListener::bind((addr.as_str(), port)) {
+            Ok(listener) => {
+                eprintln!("debug1: Local forwarding listening on {addr} port {port}.");
+                listeners.push(listener);
+            }
+            Err(_) => {
+                eprintln!("bind [{addr}]:{port}: Address already in use");
+                eprintln!("channel_setup_fwd_listener_tcpip: cannot listen to port: {port}");
+                eprintln!("Could not request local forwarding.");
+                return ExitCode::from(255);
+            }
+        }
+    }
+    eprintln!("debug1: Entering interactive session.");
+
+    if alias.starts_with("die-later") {
+        thread::sleep(Duration::from_millis(1000));
+        eprintln!("Connection to {alias} closed by remote host.");
+        return ExitCode::from(255);
+    }
+    loop {
+        thread::sleep(Duration::from_secs(3600));
+    }
+}
+
+/// Listen address and port of a `-L`/`-D` spec whose last `target_parts`
+/// `:`-separated parts are the target.
+fn listen_of(spec: &str, target_parts: usize) -> Option<(String, u16)> {
+    let (bind, rest) = match spec.strip_prefix('[') {
+        Some(inner) => {
+            let (bind, rest) = inner.split_once("]:")?;
+            (Some(bind.to_string()), rest)
+        }
+        None => (None, spec),
+    };
+    let parts: Vec<&str> = rest.split(':').collect();
+    let listen = parts.len().checked_sub(target_parts)?;
+    let (bind, port) = match (bind, &parts[..listen]) {
+        (Some(bind), [port]) => (bind, *port),
+        (None, [port]) => ("127.0.0.1".to_string(), *port),
+        (None, [bind, port]) => (bind.to_string(), *port),
+        _ => return None,
+    };
+    Some((bind, port.parse().ok()?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn at(addr: &str, port: u16) -> Option<(String, u16)> {
+        Some((addr.to_string(), port))
+    }
+
+    #[test]
+    fn forward_specs() {
+        assert_eq!(
+            listen_of("127.0.0.1:6443:localhost:6443", 2),
+            at("127.0.0.1", 6443)
+        );
+        assert_eq!(listen_of("6443:localhost:6443", 2), at("127.0.0.1", 6443));
+        assert_eq!(listen_of("[::1]:6443:localhost:6443", 2), at("::1", 6443));
+        assert_eq!(listen_of("1080", 0), at("127.0.0.1", 1080));
+        assert_eq!(listen_of("0.0.0.0:1080", 0), at("0.0.0.0", 1080));
+        assert_eq!(listen_of("[::1]:1080", 0), at("::1", 1080));
+        assert_eq!(listen_of("x:y:z:w:v", 2), None);
+        assert_eq!(listen_of("abc", 0), None);
+    }
 }
