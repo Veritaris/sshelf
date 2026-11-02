@@ -9,8 +9,12 @@
 //! - `-V`: print a version line on stderr, like ssh.
 //! - `-G [--] <alias>`: print a resolved config for `alias`; aliases starting
 //!   with `fail` exit 255 with an error, like a bad config.
+//! - `--record <file>`: append all arguments (one line, `\x1f`-separated) to
+//!   `file`, so tests can see how it was launched.
 
 use std::env;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::process::ExitCode;
 use std::thread;
 use std::time::Duration;
@@ -28,6 +32,16 @@ fn main() -> ExitCode {
     }
     if let Ok(text) = env::var("FAKE_SSH_STDERR") {
         eprintln!("{text}");
+    }
+    if let Some(i) = args.iter().position(|a| a == "--record")
+        && let Some(path) = args.get(i + 1)
+    {
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .expect("opening the record file");
+        writeln!(file, "{}", args.join("\x1f")).expect("writing the record file");
     }
 
     if args.iter().any(|a| a == "-V") {

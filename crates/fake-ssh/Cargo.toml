@@ -10,3 +10,4 @@ publish = false
 
 [dev-dependencies]
 sshelf-core = { path = "../sshelf-core" }
+tempfile = { version = "3.27.0" }

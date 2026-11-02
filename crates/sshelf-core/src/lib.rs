@@ -6,6 +6,7 @@
 //! egui; the UI talks to it through commands and events. See SPEC.md §2–§9.
 
 pub mod agent_service;
+pub mod core;
 pub mod history;
 pub mod metadata;
 pub mod orphans;
