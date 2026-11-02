@@ -7,3 +7,6 @@ description = "Scriptable stand-in for `ssh`, used by supervisor tests"
 publish = false
 
 [dependencies]
+
+[dev-dependencies]
+sshelf-core = { path = "../sshelf-core" }

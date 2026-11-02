@@ -15,6 +15,39 @@ use crate::process::{self, Output};
 
 /// Limit for `ssh -V` and `ssh-add -l`.
 pub const QUICK_TIMEOUT: Duration = Duration::from_secs(5);
+/// Limit for `ssh -G`, which may run `Match exec` commands from the config.
+pub const RESOLVE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Effective configuration from `ssh -G <alias>`, in ssh's output order.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Resolved {
+    /// `(keyword, value)`; keywords are lowercase, repeated keywords
+    /// (e.g. `identityfile`) appear once per value.
+    pub options: Vec<(String, String)>,
+}
+
+impl Resolved {
+    pub fn parse(stdout: &str) -> Self {
+        let options = stdout
+            .lines()
+            .map(str::trim_end)
+            .filter(|l| !l.is_empty())
+            .map(|line| match line.split_once(' ') {
+                Some((key, value)) => (key.to_string(), value.to_string()),
+                None => (line.to_string(), String::new()),
+            })
+            .collect();
+        Self { options }
+    }
+
+    /// First value of `key` (lowercase).
+    pub fn get(&self, key: &str) -> Option<&str> {
+        self.options
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolSource {
@@ -97,6 +130,23 @@ impl SshTools {
         first_line(&out.stderr)
             .or_else(|| first_line(&out.stdout))
             .ok_or_else(|| format!("`ssh -V` printed nothing (exit code {:?})", out.code))
+    }
+
+    /// `ssh -G -- <alias>`: the effective configuration as ssh itself
+    /// resolves it (SPEC.md §1.6). Never connects.
+    pub fn resolve(&self, alias: &str) -> Result<Resolved, String> {
+        let mut cmd = process::command(&self.ssh);
+        cmd.args(["-G", "--", alias]);
+        let out = process::run(cmd, RESOLVE_TIMEOUT).map_err(|e| e.to_string())?;
+        if out.code != Some(0) {
+            let message = out.stderr.trim();
+            return Err(if message.is_empty() {
+                format!("`ssh -G {alias}` failed with exit code {:?}", out.code)
+            } else {
+                message.to_string()
+            });
+        }
+        Ok(Resolved::parse(&out.stdout))
     }
 
     /// Agent reachability and loaded keys, via `ssh-add -l`.
@@ -196,6 +246,26 @@ mod tests {
             fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
         }
         path
+    }
+
+    #[test]
+    fn resolved_output_parsing() {
+        let resolved = Resolved::parse(
+            "host web\nhostname web.example.com\nport 2222\nidentityfile ~/.ssh/a\n\
+             identityfile ~/.ssh/b\nproxycommand ssh -W %h:%p jump\nforwardagent no\nbare\n\n",
+        );
+        assert_eq!(resolved.get("hostname"), Some("web.example.com"));
+        assert_eq!(resolved.get("proxycommand"), Some("ssh -W %h:%p jump"));
+        assert_eq!(resolved.get("bare"), Some(""));
+        assert_eq!(resolved.get("missing"), None);
+        let identities: Vec<_> = resolved
+            .options
+            .iter()
+            .filter(|(k, _)| k == "identityfile")
+            .map(|(_, v)| v.as_str())
+            .collect();
+        assert_eq!(identities, ["~/.ssh/a", "~/.ssh/b"]);
+        assert_eq!(resolved.options.len(), 8);
     }
 
     #[test]

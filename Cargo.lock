@@ -1021,6 +1021,9 @@ dependencies = [
 [[package]]
 name = "fake-ssh"
 version = "0.1.0"
+dependencies = [
+ "sshelf-core",
+]
 
 [[package]]
 name = "fastrand"
