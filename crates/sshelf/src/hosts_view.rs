@@ -367,6 +367,23 @@ mod tests {
     }
 
     #[test]
+    fn new_tunnel_from_host_detail_names_the_host() {
+        let (config, data) = fixture();
+        let mut harness = harness(config, data);
+        harness.step();
+        harness.get_by_label("web").click();
+        harness.step();
+        harness.step();
+        harness.get_by_label("+ New tunnel").click();
+        harness.step();
+        assert_eq!(
+            harness.state_mut().0.detail.take_new_tunnel().as_deref(),
+            Some("web")
+        );
+        assert_eq!(harness.state_mut().0.detail.take_new_tunnel(), None);
+    }
+
+    #[test]
     fn search_filters_by_alias_and_tag() {
         let (config, data) = fixture();
         let mut harness = harness(config, data);

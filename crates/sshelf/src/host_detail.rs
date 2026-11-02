@@ -40,6 +40,8 @@ pub struct HostDetail {
     resolved: HashMap<String, (u64, Result<Resolved, String>)>,
     requested: HashSet<(String, u64)>,
     filter: String,
+    /// "New tunnel" was clicked for this host; the app opens the editor.
+    new_tunnel: Option<String>,
 }
 
 #[derive(Default, Clone, PartialEq)]
@@ -82,6 +84,11 @@ impl Draft {
 }
 
 impl HostDetail {
+    /// The host "New tunnel" was clicked for, once.
+    pub fn take_new_tunnel(&mut self) -> Option<String> {
+        self.new_tunnel.take()
+    }
+
     pub fn on_resolved(
         &mut self,
         alias: String,
@@ -200,6 +207,13 @@ impl HostDetail {
                 .on_disabled_hover_text(tools_error.unwrap_or_default());
             if button.clicked() {
                 commands.push(Command::Connect(host.primary().to_string()));
+            }
+            if ui
+                .button("+ New tunnel")
+                .on_hover_text("Create a tunnel through this host")
+                .clicked()
+            {
+                self.new_tunnel = Some(host.primary().to_string());
             }
             let last = match data.history.last_launch(host) {
                 Some(time) => format!("Last launched from sshelf {}", util::ago(time)),

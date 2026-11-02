@@ -11,7 +11,7 @@ use sshelf_core::supervisor::Snapshot;
 
 use crate::groups_view::GroupsView;
 use crate::hosts_view::HostsView;
-use crate::orphans_window::OrphansWindow;
+use crate::orphans_window::{self, OrphansWindow};
 use crate::settings_view::SettingsView;
 use crate::sidebar::{self, View};
 use crate::theme::{self, Palette};
@@ -140,8 +140,8 @@ impl eframe::App for SshelfApp {
 
         let orphans = self
             .data
-            .as_ref()
-            .map(|d| d.orphans.clone())
+            .as_deref()
+            .map(orphans_window::descriptions)
             .unwrap_or_default();
         let orphans_clicked = egui::Panel::left("sidebar")
             .resizable(false)
@@ -188,7 +188,19 @@ impl eframe::App for SshelfApp {
         if self.orphans.open
             && let Some(data) = &self.data
         {
-            commands.extend(self.orphans.show(ui.ctx(), data));
+            let hosts: Vec<String> = self
+                .config
+                .as_deref()
+                .and_then(|c| c.hosts())
+                .map(|h| h.hosts.iter().map(|e| e.primary().to_string()).collect())
+                .unwrap_or_default();
+            commands.extend(self.orphans.show(ui.ctx(), data, &hosts));
+        }
+        if let Some(host) = self.hosts.detail.take_new_tunnel()
+            && let Some(data) = &self.data
+        {
+            self.view = View::Tunnels;
+            self.tunnels.new_tunnel(&host, &data.tunnels);
         }
         self.send(commands);
     }
