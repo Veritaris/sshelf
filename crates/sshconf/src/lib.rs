@@ -16,7 +16,8 @@ pub use error::{Error, Result};
 pub use file::{Block, ConfigFile};
 pub use hosts::{HostEntry, HostList, PatternEntry, PatternKind};
 pub use include::{
-    ConfigSet, Diagnostic, FileId, HeaderRef, LineRef, MAX_INCLUDE_DEPTH, ResolveOptions, Severity,
+    ConfigSet, Diagnostic, FileId, HeaderRef, IncludeTarget, LineRef, MAX_INCLUDE_DEPTH,
+    ResolveOptions, Severity, WatchDir,
 };
 pub use line::{
     Directive, Eol, HostHeader, HostPattern, Include, Invalid, Line, LineKind, MatchHeader,

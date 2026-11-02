@@ -126,7 +126,8 @@ The read-only "resolved" panel shows `ssh -G <alias>` output for the selected ho
 
 ### External changes
 
-- Watch the main config and all included files; reload on change.
+- Watch **directories**, not files: the parent directory of every loaded file, plus the deepest non-wildcard directory of every `Include` glob (e.g. `~/.ssh/conf.d` for `Include conf.d/*.conf`; recursive when a directory component has wildcards). This catches newly added files that match an `Include` and editors that save by renaming a temp file over the original. A directory that does not exist yet is watched through its nearest existing ancestor. `sshconf` computes the list (`ConfigSet::watch_dirs`); the watcher itself lives in `sshelf-core`.
+- On a change, debounce (~200 ms), then reload the whole config set.
 - If the file changed on disk while there are unsaved in-app edits, do not overwrite: show the conflict (diff) and let the user choose.
 
 ---

@@ -4,7 +4,7 @@
 //! matching nothing is skipped silently, and nesting is limited to 16 levels.
 //! An `Include` inside a `Host`/`Match` block is conditional on that block.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -78,7 +78,30 @@ pub struct ConfigSet {
     /// Each file once, in first-reached order; `files[0]` is the main file.
     pub files: Vec<ConfigFile>,
     pub headers: Vec<HeaderRef>,
+    /// Every resolved `Include` argument, in evaluation order.
+    pub includes: Vec<IncludeTarget>,
     pub diagnostics: Vec<Diagnostic>,
+}
+
+/// One resolved `Include` argument.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IncludeTarget {
+    /// The `Include` line.
+    pub at: LineRef,
+    /// Literal directory the glob is relative to (home or ssh dir); empty when
+    /// the argument is an absolute path.
+    pub base: PathBuf,
+    /// The glob as written, without a leading `~/`.
+    pub pattern: String,
+}
+
+/// A directory to watch for changes that affect a [`ConfigSet`]. It may not
+/// exist yet; the watcher then has to watch its nearest existing ancestor.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct WatchDir {
+    pub path: PathBuf,
+    /// A directory component of an `Include` glob has wildcards.
+    pub recursive: bool,
 }
 
 impl ConfigSet {
@@ -91,6 +114,7 @@ impl ConfigSet {
             set: ConfigSet {
                 files: Vec::new(),
                 headers: Vec::new(),
+                includes: Vec::new(),
                 diagnostics: Vec::new(),
             },
             ids: HashMap::new(),
@@ -104,6 +128,28 @@ impl ConfigSet {
 
     pub fn line(&self, at: LineRef) -> &Line {
         &self.files[at.file].lines[at.line]
+    }
+
+    /// Directories whose changes can affect this set: the parent of every
+    /// loaded file and the deepest literal directory of every `Include` glob.
+    /// Watching directories rather than files also catches newly added files
+    /// and editors that save by renaming a temp file over the original.
+    pub fn watch_dirs(&self) -> Vec<WatchDir> {
+        let mut dirs: BTreeMap<PathBuf, bool> = BTreeMap::new();
+        for file in &self.files {
+            let parent = match file.path.parent() {
+                Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+                _ => PathBuf::from("."),
+            };
+            dirs.entry(parent).or_insert(false);
+        }
+        for target in &self.includes {
+            let (dir, recursive) = literal_dir(&target.base, &target.pattern);
+            *dirs.entry(dir).or_insert(false) |= recursive;
+        }
+        dirs.into_iter()
+            .map(|(path, recursive)| WatchDir { path, recursive })
+            .collect()
     }
 
     /// `path:line` for messages.
@@ -177,7 +223,7 @@ impl Loader<'_> {
                 ),
             );
         }
-        let Some(pattern) = self.pattern(raw) else {
+        let Some((base, glob)) = self.target(raw) else {
             self.diag(
                 Severity::Warning,
                 at,
@@ -185,6 +231,12 @@ impl Loader<'_> {
             );
             return;
         };
+        let pattern = glob_pattern(&base, &glob);
+        self.set.includes.push(IncludeTarget {
+            at,
+            base,
+            pattern: glob,
+        });
         let options = MatchOptions {
             case_sensitive: !cfg!(windows),
             require_literal_separator: true,
@@ -255,26 +307,20 @@ impl Loader<'_> {
         self.walk(id, depth, conditions);
     }
 
-    /// Glob pattern for an `Include` argument. The base directory is escaped so
-    /// glob characters in e.g. the home path are taken literally.
-    fn pattern(&self, raw: &str) -> Option<String> {
-        let (base, rest) = if raw == "~" {
-            (&self.opts.home, "")
+    /// Splits an `Include` argument into its literal base directory and the
+    /// glob written by the user; `None` for unsupported `~user` paths.
+    fn target(&self, raw: &str) -> Option<(PathBuf, String)> {
+        if raw == "~" {
+            Some((self.opts.home.clone(), String::new()))
         } else if let Some(rest) = raw.strip_prefix("~/").or_else(|| raw.strip_prefix("~\\")) {
-            (&self.opts.home, rest)
+            Some((self.opts.home.clone(), rest.to_string()))
         } else if raw.starts_with('~') {
-            return None;
+            None
         } else if Path::new(raw).is_absolute() || Path::new(raw).has_root() {
-            return Some(raw.to_string());
+            Some((PathBuf::new(), raw.to_string()))
         } else {
-            (&self.opts.ssh_dir, raw)
-        };
-        let base = Pattern::escape(&base.to_string_lossy());
-        Some(if rest.is_empty() {
-            base
-        } else {
-            format!("{base}/{rest}")
-        })
+            Some((self.opts.ssh_dir.clone(), raw.to_string()))
+        }
     }
 
     fn diag(&mut self, severity: Severity, at: LineRef, message: String) {
@@ -286,7 +332,92 @@ impl Loader<'_> {
     }
 }
 
+/// The glob for `base` + `glob`. The base is escaped so glob characters in e.g.
+/// the home path are taken literally.
+fn glob_pattern(base: &Path, glob: &str) -> String {
+    if base.as_os_str().is_empty() {
+        return glob.to_string();
+    }
+    let base = Pattern::escape(&base.to_string_lossy());
+    if glob.is_empty() {
+        base
+    } else {
+        format!("{base}/{glob}")
+    }
+}
+
+/// Deepest directory of `base` + `glob` without wildcards, and whether a
+/// directory component of `glob` has wildcards (so the watch must be recursive).
+fn literal_dir(base: &Path, glob: &str) -> (PathBuf, bool) {
+    let is_sep = |c: char| c == '/' || (cfg!(windows) && c == '\\');
+    let mut starts = Vec::new();
+    let mut offset = 0;
+    for part in glob.split(is_sep) {
+        starts.push((offset, part));
+        offset += part.len() + 1;
+    }
+    // The last component is the file name; only directories are watched.
+    let last = starts.len() - 1;
+    let wild = starts[..last]
+        .iter()
+        .position(|(_, part)| part.contains(['*', '?', '[']));
+    let (end, _) = starts[wild.unwrap_or(last)];
+    let prefix = &glob[..end];
+    let dir = if base.as_os_str().is_empty() {
+        PathBuf::from(prefix)
+    } else {
+        base.join(prefix)
+    };
+    (dir, wild.is_some())
+}
+
 /// Key for "same file": canonical path when it exists, else the path as given.
 fn identity(path: &Path) -> PathBuf {
     fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dir(base: &str, glob: &str) -> (PathBuf, bool) {
+        literal_dir(Path::new(base), glob)
+    }
+
+    #[test]
+    fn literal_dir_of_relative_globs() {
+        let base = Path::new("ssh");
+        assert_eq!(dir("ssh", "conf.d/*.conf"), (base.join("conf.d"), false));
+        assert_eq!(dir("ssh", "other.conf"), (base.to_path_buf(), false));
+        assert_eq!(dir("ssh", "*.conf"), (base.to_path_buf(), false));
+        assert_eq!(dir("ssh", ""), (base.to_path_buf(), false));
+        assert_eq!(dir("ssh", "a/b/c.conf"), (base.join("a/b"), false));
+    }
+
+    #[test]
+    fn wildcard_directory_makes_watch_recursive() {
+        let base = Path::new("ssh");
+        assert_eq!(dir("ssh", "*/x.conf"), (base.to_path_buf(), true));
+        assert_eq!(dir("ssh", "hosts/*/x/*.conf"), (base.join("hosts"), true));
+        assert_eq!(dir("ssh", "h[0-9]/x.conf"), (base.to_path_buf(), true));
+    }
+
+    #[test]
+    fn literal_dir_of_absolute_globs() {
+        assert_eq!(
+            dir("", "/etc/ssh/ssh_config.d/*.conf"),
+            (PathBuf::from("/etc/ssh/ssh_config.d"), false)
+        );
+        assert_eq!(dir("", "/x.conf"), (PathBuf::from("/"), false));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn literal_dir_of_windows_paths() {
+        assert_eq!(
+            dir("", r"C:\Users\me\.ssh\conf.d\*.conf"),
+            (PathBuf::from(r"C:\Users\me\.ssh\conf.d"), false)
+        );
+        assert_eq!(dir("", "C:/x.conf"), (PathBuf::from(r"C:\"), false));
+    }
 }

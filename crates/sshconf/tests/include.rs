@@ -3,7 +3,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use sshconf::{ConfigSet, Error, LineKind, LineRef, MAX_INCLUDE_DEPTH, ResolveOptions, Severity};
+use sshconf::{
+    ConfigSet, Error, LineKind, LineRef, MAX_INCLUDE_DEPTH, ResolveOptions, Severity, WatchDir,
+};
 
 fn fixture(case: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -191,6 +193,73 @@ fn absolute_paths_escaped_base_and_problem_files() {
     assert_eq!(warnings.len(), 2, "{warnings:?}");
     assert!(warnings[0].contains("`%d/x`"), "{warnings:?}");
     assert!(warnings[1].contains("`~user`"), "{warnings:?}");
+}
+
+#[test]
+fn watch_dirs_cover_file_parents_and_include_globs() {
+    let dir = fixture("glob");
+    let set = load("glob");
+    assert_eq!(
+        set.watch_dirs(),
+        [
+            WatchDir {
+                path: dir.clone(),
+                recursive: false
+            },
+            WatchDir {
+                path: dir.join("conf.d"),
+                recursive: false
+            },
+        ]
+    );
+}
+
+#[test]
+fn watch_dirs_include_missing_and_wildcard_directories() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ssh = tmp.path().join("ssh");
+    let other = tmp.path().join("other");
+    fs::create_dir_all(&ssh).unwrap();
+    let abs = other.to_string_lossy().replace('\\', "/");
+    fs::write(
+        ssh.join("config"),
+        format!(
+            "Include missing/*.conf\nInclude hosts/*/x.conf\nInclude ~/home.d/*.conf\nInclude \"{abs}/*.conf\"\n"
+        ),
+    )
+    .unwrap();
+    let opts = ResolveOptions {
+        home: tmp.path().to_path_buf(),
+        ssh_dir: ssh.clone(),
+        max_depth: MAX_INCLUDE_DEPTH,
+    };
+    let set = ConfigSet::load(&ssh.join("config"), &opts).unwrap();
+    assert_eq!(set.includes.len(), 4);
+
+    let mut expected = vec![
+        WatchDir {
+            path: ssh.clone(),
+            recursive: false,
+        },
+        WatchDir {
+            path: ssh.join("missing"),
+            recursive: false,
+        },
+        WatchDir {
+            path: ssh.join("hosts"),
+            recursive: true,
+        },
+        WatchDir {
+            path: tmp.path().join("home.d"),
+            recursive: false,
+        },
+        WatchDir {
+            path: other,
+            recursive: false,
+        },
+    ];
+    expected.sort();
+    assert_eq!(set.watch_dirs(), expected);
 }
 
 #[test]
