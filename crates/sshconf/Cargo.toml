@@ -7,3 +7,6 @@ description = "Lossless ssh_config parser and editor"
 
 [dependencies]
 thiserror = { version = "2.0.21" }
+
+[dev-dependencies]
+proptest = { version = "1.12.0" }

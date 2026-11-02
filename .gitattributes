@@ -1,0 +1,2 @@
+# Parser test inputs must reach the tests byte-for-byte: no line-ending conversion.
+crates/sshconf/tests/corpus/** -text

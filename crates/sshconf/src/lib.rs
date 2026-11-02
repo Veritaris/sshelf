@@ -6,6 +6,12 @@
 //! See SPEC.md §4.
 
 mod error;
+mod file;
 pub mod lexer;
+mod line;
 
 pub use error::{Error, Result};
+pub use file::{Block, ConfigFile};
+pub use line::{
+    Directive, Eol, HostHeader, HostPattern, Include, Invalid, Line, LineKind, MatchHeader,
+};

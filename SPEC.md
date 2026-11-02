@@ -79,13 +79,16 @@ Rules:
 ### Parser model
 
 A line-oriented concrete syntax tree. Each line is one of:
-`Blank`, `Comment`, `HostHeader`, `MatchHeader`, `Include`, `Directive`.
+`Blank`, `Comment`, `HostHeader`, `MatchHeader`, `Include`, `Directive`, `Invalid`.
 Each node stores the **original raw text** plus parsed key/value(s), the **source file**, and its **position**. Blocks group a header with its following lines.
+
+`Invalid` is a line ssh would reject (unterminated quote, `Host`/`Match`/`Include` without arguments, empty host pattern, missing keyword). It is kept verbatim, round-trips like any other line and is reported as an error diagnostic. Syntax problems never make parsing fail; only I/O errors and non-UTF-8 files do (a non-UTF-8 file is shown as an error and never written). A UTF-8 BOM is preserved. Lines split on `\n`; `\r\n` is recorded per line, a lone `\r` stays in the line text.
 
 Tokenization follows OpenSSH `readconf.c` (verified against OpenSSH_for_Windows 9.5p1 with `ssh -G`):
 - Trailing ` \t\r\f` is ignored for parsing.
 - Keyword, then whitespace and/or at most one `=`.
 - Arguments split like `argv_split`: `"…"`/`'…'` quotes anywhere in a word, escapes `\"`, `\'`, `\\`, `\ `; a `#` at the start of a word begins a trailing comment (OpenSSH ≥ 8.7 semantics).
+- `ProxyCommand`, `RemoteCommand`, `LocalCommand`, `KnownHostsCommand` take the raw rest of the line as one value (`#` and quotes are part of the command).
 
 Must handle:
 - Case-insensitive keywords, `Key value` and `Key=value` syntax, tabs, trailing whitespace, CRLF and LF.
