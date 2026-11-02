@@ -1,0 +1,4 @@
+Host bastion
+    HostName bastion.example.com
+    Include work.conf
+Host after

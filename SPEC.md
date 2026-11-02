@@ -97,6 +97,12 @@ Must handle:
 - `Match` blocks (preserved and displayed; not edited structurally).
 - `Include` with globs, relative paths resolved against `~/.ssh`, `Include` inside a `Host` block (conditional), recursion limits.
 
+`Include` resolution:
+- Several paths per line, each glob-expanded in sorted order; `*` does not match a leading `.`; directories are skipped. A path matching nothing is skipped silently (info diagnostic), like ssh.
+- `~/` expands to the home directory; relative paths resolve against the ssh dir (`~/.ssh`), not the including file. `~user`, `%` tokens and `${VAR}` are not expanded (ssh 9.5p1 uses them literally); a warning is shown.
+- Nesting is limited to 16 levels (ssh's `READCONF_MAX_DEPTH`); include cycles are reported and not followed. A file included twice is parsed once.
+- Headers reached through an `Include` inside a `Host`/`Match` block are marked **conditional**.
+
 ### Host list semantics
 
 - Concrete aliases (no wildcards) are listed as **hosts**.
