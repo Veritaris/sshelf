@@ -17,5 +17,15 @@ thiserror = { version = "2.0.21" }
 toml = { version = "1.1.8" }
 
 [target.'cfg(windows)'.dependencies]
-# Service Control Manager: read-only query of the `ssh-agent` service.
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Services"] }
+# Service Control Manager (read-only `ssh-agent` query) and Job Objects
+# (stopping a tunnel's whole process tree).
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Services",
+] }
+
+[target.'cfg(unix)'.dependencies]
+# Signals to a whole process group.
+libc = { version = "0.2.191" }
