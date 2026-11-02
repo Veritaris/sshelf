@@ -9,7 +9,8 @@ use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
 use sshelf_core::supervisor::{
-    GroupState, LOG_LINES, Owner, Request, Snapshot, Supervisor, SupervisorEvent, TunnelState,
+    FailureKind, GroupState, LOG_LINES, Owner, Request, Snapshot, Supervisor, SupervisorEvent,
+    TunnelState,
 };
 use sshelf_core::tunnels::{DEFAULT_BIND, Forward, ForwardKind, Group, Tunnel};
 
@@ -192,6 +193,7 @@ fn partial_failure_degrades_the_group_and_retry_restarts_only_failures() {
         panic!("not failed: {:?}", s.state("bad"));
     };
     assert!(reason.contains("Permission denied"), "{reason}");
+    assert_eq!(s.tunnels["bad"].failure, Some(FailureKind::Auth));
     let pid = s.tunnels["ok"].pid;
 
     // "Retry failed" is starting the group again.
@@ -273,6 +275,21 @@ fn slow_tunnels_start_then_run_and_drops_fail_with_ssh_message() {
     assert!(
         s.tunnels["dies"].owners.contains(&Owner::Manual),
         "owners survive failure"
+    );
+}
+
+#[test]
+fn changed_host_keys_are_recognised() {
+    let mut h = Harness::new();
+    h.send(Request::Start {
+        tunnel: tunnel("c", "changed-host", free_port()),
+        owner: Owner::Manual,
+    });
+    let s = h.until("failed", |s| matches!(s.state("c"), TunnelState::Failed(_)));
+    assert_eq!(s.tunnels["c"].failure, Some(FailureKind::HostKeyChanged));
+    assert_eq!(
+        s.state("c"),
+        TunnelState::Failed("Host key verification failed.".into())
     );
 }
 

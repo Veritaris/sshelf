@@ -307,6 +307,7 @@ mod tests {
                 .collect::<BTreeSet<_>>(),
             log: VecDeque::new(),
             pid: None,
+            failure: None,
         }
     }
 

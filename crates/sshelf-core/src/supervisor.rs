@@ -58,6 +58,46 @@ pub struct TunnelStatus {
     pub owners: BTreeSet<Owner>,
     pub log: VecDeque<LogLine>,
     pub pid: Option<u32>,
+    /// Why the last run failed, while the state is `Failed`.
+    pub failure: Option<FailureKind>,
+}
+
+/// What a failed run ran into, from ssh's messages (SPEC.md §8, §9).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailureKind {
+    /// The server's key differs from the stored one.
+    HostKeyChanged,
+    /// No stored key (e.g. for a jump host).
+    HostKeyUnknown,
+    /// No offered key was accepted (BatchMode: agent or passphrase-less keys only).
+    Auth,
+    Other,
+}
+
+/// Classifies the last run in `log` (the lines after the last start).
+pub fn classify_failure(log: &VecDeque<LogLine>) -> FailureKind {
+    let start = log
+        .iter()
+        .rposition(|l| l.text.starts_with("starting ssh"))
+        .map_or(0, |i| i + 1);
+    let run: Vec<&str> = log.iter().skip(start).map(|l| l.text.as_str()).collect();
+    let any = |needles: &[&str]| run.iter().any(|l| needles.iter().any(|n| l.contains(n)));
+    if any(&[
+        "REMOTE HOST IDENTIFICATION HAS CHANGED",
+        "has changed and you have requested strict checking",
+    ]) {
+        FailureKind::HostKeyChanged
+    } else if any(&["Host key verification failed"]) {
+        FailureKind::HostKeyUnknown
+    } else if any(&[
+        "Permission denied (publickey",
+        "Too many authentication failures",
+        "No more authentication methods",
+    ]) {
+        FailureKind::Auth
+    } else {
+        FailureKind::Other
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -380,6 +420,7 @@ impl Worker {
                     owners: BTreeSet::new(),
                     log: VecDeque::new(),
                     pid: None,
+                    failure: None,
                 },
                 process: None,
                 restart: false,
@@ -470,6 +511,7 @@ impl Worker {
             killer: spawned.killer,
         });
         entry.status.state = TunnelState::Starting;
+        entry.status.failure = None;
         entry.status.pid = Some(pid);
         push_log(&mut entry.status.log, format!("starting ssh (pid {pid})"));
         self.changed = true;
@@ -479,6 +521,7 @@ impl Worker {
         if let Some(entry) = self.entries.get_mut(id) {
             push_log(&mut entry.status.log, reason.clone());
             entry.status.state = TunnelState::Failed(reason);
+            entry.status.failure = Some(FailureKind::Other);
             entry.status.pid = None;
             self.changed = true;
         }
@@ -535,6 +578,7 @@ impl Worker {
             .map(|l| l.text.clone())
             .unwrap_or_else(|| format!("ssh exited with code {code:?}"));
         entry.status.state = TunnelState::Failed(reason);
+        entry.status.failure = Some(classify_failure(&entry.status.log));
         self.changed = true;
     }
 
@@ -598,7 +642,41 @@ mod tests {
             owners: owners.iter().map(|o| (*o).clone()).collect(),
             log: VecDeque::new(),
             pid: None,
+            failure: None,
         }
+    }
+
+    fn log(lines: &[&str]) -> VecDeque<LogLine> {
+        let mut log = VecDeque::new();
+        for line in lines {
+            push_log(&mut log, line.to_string());
+        }
+        log
+    }
+
+    #[test]
+    fn failures_are_classified_from_the_last_run() {
+        let changed = log(&[
+            "starting ssh (pid 1)",
+            "@    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @",
+            "Host key verification failed.",
+        ]);
+        assert_eq!(classify_failure(&changed), FailureKind::HostKeyChanged);
+        let unknown = log(&["starting ssh (pid 1)", "Host key verification failed."]);
+        assert_eq!(classify_failure(&unknown), FailureKind::HostKeyUnknown);
+        let auth = log(&[
+            "starting ssh (pid 1)",
+            "web: Permission denied (publickey).",
+        ]);
+        assert_eq!(classify_failure(&auth), FailureKind::Auth);
+        // An earlier run's messages do not count.
+        let retried = log(&[
+            "starting ssh (pid 1)",
+            "web: Permission denied (publickey).",
+            "starting ssh (pid 2)",
+            "Error: remote port forwarding failed for listen port 6443",
+        ]);
+        assert_eq!(classify_failure(&retried), FailureKind::Other);
     }
 
     #[test]

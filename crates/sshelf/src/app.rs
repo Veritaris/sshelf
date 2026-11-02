@@ -169,6 +169,7 @@ impl eframe::App for SshelfApp {
                     self.config.as_deref(),
                     self.data.as_deref(),
                     self.tunnel_states.as_deref(),
+                    self.ssh.as_deref(),
                 );
             }
             View::Groups => {

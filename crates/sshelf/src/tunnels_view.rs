@@ -3,9 +3,9 @@
 
 use egui::RichText;
 use sshconf::HostList;
-use sshelf_core::core::{AppData, Command, ConfigSnapshot};
+use sshelf_core::core::{AppData, Command, ConfigSnapshot, SshInfo};
 use sshelf_core::hints;
-use sshelf_core::supervisor::{Owner, Snapshot, TunnelState, TunnelStatus};
+use sshelf_core::supervisor::{FailureKind, Owner, Snapshot, TunnelState, TunnelStatus};
 use sshelf_core::tunnels::{DEFAULT_BIND, Forward, ForwardKind, Tunnel, TunnelsFile};
 
 use crate::theme::Palette;
@@ -72,6 +72,7 @@ impl TunnelsView {
         config: Option<&ConfigSnapshot>,
         data: Option<&AppData>,
         states: Option<&Snapshot>,
+        ssh: Option<&SshInfo>,
     ) -> Vec<Command> {
         let mut commands = Vec::new();
         let Some(data) = data else {
@@ -104,7 +105,7 @@ impl TunnelsView {
                 .and_then(|id| data.tunnels.tunnel(id))
                 .cloned()
             {
-                self.detail(ui, &tunnel, data, states, &mut commands);
+                self.detail(ui, &tunnel, data, states, ssh, &mut commands);
             } else {
                 ui.add_space(24.0);
                 ui.vertical_centered(|ui| {
@@ -165,6 +166,7 @@ impl TunnelsView {
         tunnel: &Tunnel,
         data: &AppData,
         states: &Snapshot,
+        ssh: Option<&SshInfo>,
         commands: &mut Vec<Command>,
     ) {
         let p = &Palette::ONE_DARK;
@@ -182,7 +184,15 @@ impl TunnelsView {
         ui.label(RichText::new(format!("via {}", tunnel.host)).color(p.dim));
         if let TunnelState::Failed(reason) = &state {
             ui.colored_label(p.red, reason);
-            if let Some(hint) = hints::failure_hint(reason) {
+            let hint = match status.and_then(|s| s.failure) {
+                Some(FailureKind::Auth) => Some(hints::auth_hint(
+                    ssh.and_then(|s| s.agent.as_ref()),
+                    ssh.and_then(|s| s.service.as_ref())
+                        .and_then(|s| s.as_ref().ok()),
+                )),
+                _ => hints::failure_hint(reason).map(String::from),
+            };
+            if let Some(hint) = hint {
                 ui.label(RichText::new(hint).color(p.dim));
             }
         }
@@ -483,6 +493,7 @@ mod tests {
         config: Arc<ConfigSnapshot>,
         data: Arc<AppData>,
         states: Arc<Snapshot>,
+        ssh: Option<SshInfo>,
     }
 
     fn tunnel() -> Tunnel {
@@ -521,6 +532,7 @@ mod tests {
                 },
             ]),
             pid: Some(1),
+            failure: None,
         };
         Fixture {
             config: Arc::new(ConfigSnapshot {
@@ -532,7 +544,33 @@ mod tests {
             states: Arc::new(Snapshot {
                 tunnels: [("t-1".to_string(), status)].into(),
             }),
+            ssh: None,
         }
+    }
+
+    #[test]
+    fn auth_failure_explains_the_agent() {
+        let mut f = fixture(TunnelState::Failed(
+            "bastion: Permission denied (publickey).".into(),
+        ));
+        let mut states = (*f.states).clone();
+        states.tunnels.get_mut("t-1").unwrap().failure = Some(FailureKind::Auth);
+        f.states = Arc::new(states);
+        f.ssh = Some(SshInfo {
+            tools: Err("not needed".into()),
+            version: None,
+            agent: Some(sshelf_core::ssh::AgentStatus::Keys(0)),
+            service: None,
+            terminal: None,
+        });
+        let view = TunnelsView {
+            selected: Some("t-1".into()),
+            ..TunnelsView::default()
+        };
+        let mut harness = harness(f, view);
+        harness.step();
+        harness.get_by_label_contains("ssh-add");
+        harness.get_by_label_contains("no keys loaded");
     }
 
     fn harness(f: Fixture, view: TunnelsView) -> Harness<'static, (TunnelsView, Vec<Command>)> {
@@ -540,7 +578,13 @@ mod tests {
             .with_size([1200.0, 800.0])
             .build_ui_state(
                 move |ui, (view, commands): &mut (TunnelsView, Vec<Command>)| {
-                    commands.extend(view.show(ui, Some(&f.config), Some(&f.data), Some(&f.states)));
+                    commands.extend(view.show(
+                        ui,
+                        Some(&f.config),
+                        Some(&f.data),
+                        Some(&f.states),
+                        f.ssh.as_ref(),
+                    ));
                 },
                 (view, Vec::new()),
             )
