@@ -1,26 +1,31 @@
 //! Host list semantics (SPEC.md §4): blocks with concrete aliases are hosts;
 //! wildcard-only, negation-only and `Match` blocks are patterns.
 //!
-//! Each `Host` block is one entry. A block mixing concrete aliases and
-//! wildcards (`Host web1 *.corp`) is a host with only its concrete aliases and
-//! `has_wildcards` set. An alias defined by several blocks is reported; lookups
-//! return the first block in ssh's evaluation order.
+//! Every concrete alias belongs to exactly one host: the first block (in ssh's
+//! evaluation order) that names it. A later block naming an already-owned alias
+//! does not create a second entry for it; it is recorded in the owner's
+//! [`HostEntry::also_in`] (ssh merges such blocks, first value wins). A block
+//! mixing concrete aliases and wildcards (`Host web1 *.corp`) is a host with
+//! only its concrete aliases and `has_wildcards` set.
 
 use std::collections::{HashMap, HashSet};
 
-use crate::include::{ConfigSet, Diagnostic, LineRef, Severity};
+use crate::include::{ConfigSet, LineRef};
 use crate::line::{HostPattern, LineKind};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostEntry {
-    /// Concrete (non-wildcard, non-negated) aliases in written order.
+    /// Concrete aliases this host owns, in written order: the block's
+    /// non-wildcard, non-negated patterns not owned by an earlier block.
     pub aliases: Vec<String>,
-    /// The `Host` line.
+    /// The `Host` line that defines the entry.
     pub at: LineRef,
+    /// Later `Host` lines that also name one of [`Self::aliases`].
+    pub also_in: Vec<LineRef>,
     /// Reached through an `Include` inside a `Host`/`Match` block, so ssh
     /// applies it only when the enclosing block matches too.
     pub conditional: bool,
-    /// The block also has wildcard patterns.
+    /// The defining block also has wildcard patterns.
     pub has_wildcards: bool,
 }
 
@@ -49,8 +54,6 @@ pub struct PatternEntry {
 pub struct HostList {
     pub hosts: Vec<HostEntry>,
     pub patterns: Vec<PatternEntry>,
-    /// Aliases defined by more than one block.
-    pub diagnostics: Vec<Diagnostic>,
 }
 
 impl HostList {
@@ -58,7 +61,8 @@ impl HostList {
         let mut list = HostList::default();
         // A file included twice yields its headers twice; list each block once.
         let mut seen = HashSet::new();
-        let mut owners: HashMap<String, LineRef> = HashMap::new();
+        // Alias → index into `list.hosts`.
+        let mut owners: HashMap<String, usize> = HashMap::new();
 
         for header in &set.headers {
             if !seen.insert(header.at) {
@@ -67,13 +71,13 @@ impl HostList {
             let conditional = !header.conditions.is_empty();
             match &set.line(header.at).kind {
                 LineKind::HostHeader(h) => {
-                    let positive = h.patterns.iter().filter(|p| !p.negated);
-                    let aliases: Vec<String> = positive
-                        .clone()
-                        .filter(|p| !p.is_wildcard())
-                        .map(|p| p.pattern.clone())
-                        .collect();
-                    if aliases.is_empty() {
+                    let mut concrete: Vec<&str> = Vec::new();
+                    for p in h.patterns.iter().filter(|p| !p.negated && !p.is_wildcard()) {
+                        if !concrete.contains(&p.pattern.as_str()) {
+                            concrete.push(&p.pattern);
+                        }
+                    }
+                    if concrete.is_empty() {
                         list.patterns.push(PatternEntry {
                             at: header.at,
                             conditional,
@@ -81,28 +85,32 @@ impl HostList {
                         });
                         continue;
                     }
-                    for alias in &aliases {
+
+                    let mut fresh = Vec::new();
+                    for alias in concrete {
                         match owners.get(alias) {
-                            // Repeated within the same block (`Host a a`).
-                            Some(&first) if first == header.at => {}
-                            Some(&first) => list.diagnostics.push(Diagnostic {
-                                severity: Severity::Info,
-                                at: header.at,
-                                message: format!(
-                                    "`{alias}` is also defined at {}; ssh applies that block first",
-                                    set.location(first)
-                                ),
-                            }),
-                            None => {
-                                owners.insert(alias.clone(), header.at);
+                            Some(&owner) => {
+                                let also_in = &mut list.hosts[owner].also_in;
+                                if also_in.last() != Some(&header.at) {
+                                    also_in.push(header.at);
+                                }
                             }
+                            None => fresh.push(alias.to_string()),
                         }
                     }
+                    if fresh.is_empty() {
+                        continue;
+                    }
+                    let index = list.hosts.len();
+                    for alias in &fresh {
+                        owners.insert(alias.clone(), index);
+                    }
                     list.hosts.push(HostEntry {
-                        has_wildcards: positive.clone().any(HostPattern::is_wildcard),
-                        aliases,
+                        aliases: fresh,
                         at: header.at,
+                        also_in: Vec::new(),
                         conditional,
+                        has_wildcards: h.patterns.iter().any(|p| !p.negated && p.is_wildcard()),
                     });
                 }
                 LineKind::MatchHeader(m) => list.patterns.push(PatternEntry {
@@ -116,8 +124,7 @@ impl HostList {
         list
     }
 
-    /// First host (in evaluation order) with `alias`; matching is
-    /// case-sensitive, like ssh's.
+    /// The host owning `alias`; matching is case-sensitive, like ssh's.
     pub fn find(&self, alias: &str) -> Option<&HostEntry> {
         self.hosts
             .iter()
@@ -153,6 +160,15 @@ mod tests {
             .hosts
             .iter()
             .map(|h| h.aliases.iter().map(String::as_str).collect())
+            .collect()
+    }
+
+    /// Line numbers of `also_in` for each host.
+    fn also_in(set: &ConfigSet, hosts: &HostList) -> Vec<Vec<usize>> {
+        hosts
+            .hosts
+            .iter()
+            .map(|h| h.also_in.iter().map(|&at| set.line(at).number).collect())
             .collect()
     }
 
@@ -195,18 +211,28 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_alias_is_reported_and_first_block_wins() {
-        let (set, hosts) = list(&[("config", "Host a\n  Port 1\nHost b a\n  Port 2\n")]);
-        assert_eq!(aliases(&hosts), [vec!["a"], vec!["b", "a"]]);
+    fn repeated_block_merges_into_the_first() {
+        let (set, hosts) = list(&[("config", "Host a\n  Port 1\nHost a\n  Port 2\n")]);
+        assert_eq!(aliases(&hosts), [vec!["a"]]);
+        assert_eq!(hosts.hosts[0].at.line, 0);
+        assert_eq!(also_in(&set, &hosts), [vec![3]]);
+    }
+
+    #[test]
+    fn later_block_keeps_only_its_new_aliases() {
+        let (set, hosts) = list(&[("config", "Host a\nHost b a\nHost a c\nHost a b\n")]);
+        assert_eq!(aliases(&hosts), [vec!["a"], vec!["b"], vec!["c"]]);
         assert_eq!(hosts.find("a").unwrap().at.line, 0);
-        assert_eq!(hosts.diagnostics.len(), 1);
-        let d = &hosts.diagnostics[0];
-        assert_eq!(set.line(d.at).number, 3);
-        assert!(
-            d.message.contains("`a` is also defined at"),
-            "{}",
-            d.message
-        );
+        assert_eq!(hosts.find("b").unwrap().at.line, 1);
+        // `Host a b` adds nothing new: it is recorded once on each owner.
+        assert_eq!(also_in(&set, &hosts), [vec![2, 3, 4], vec![4], vec![]]);
+    }
+
+    #[test]
+    fn alias_repeated_within_a_block_is_not_a_duplicate() {
+        let (_, hosts) = list(&[("config", "Host a a b a\n")]);
+        assert_eq!(aliases(&hosts), [vec!["a", "b"]]);
+        assert!(hosts.hosts[0].also_in.is_empty());
     }
 
     #[test]
@@ -248,6 +274,6 @@ mod tests {
             ("shared.conf", "Host shared\n"),
         ]);
         assert_eq!(aliases(&hosts), [vec!["shared"], vec!["x"]]);
-        assert!(hosts.diagnostics.is_empty());
+        assert!(hosts.hosts[0].also_in.is_empty());
     }
 }

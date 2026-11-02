@@ -58,8 +58,9 @@ fn main() -> ExitCode {
     }
 
     let hosts = HostList::from_set(&set);
+    let multi_block = hosts.hosts.iter().filter(|h| !h.also_in.is_empty()).count();
     println!(
-        "\n{} hosts, {} patterns",
+        "\n{} hosts ({multi_block} configured in more than one block), {} patterns",
         hosts.hosts.len(),
         hosts.patterns.len()
     );
@@ -71,6 +72,9 @@ fn main() -> ExitCode {
                 h.aliases.join(" "),
                 set.location(h.at)
             );
+            for &at in &h.also_in {
+                println!("             also configured at {}", set.location(at));
+            }
         }
         for p in &hosts.patterns {
             let text = match &p.kind {
@@ -87,7 +91,7 @@ fn main() -> ExitCode {
         }
     }
 
-    for d in set.diagnostics.iter().chain(&hosts.diagnostics) {
+    for d in &set.diagnostics {
         println!("{:?}: {}: {}", d.severity, set.location(d.at), d.message);
     }
 
