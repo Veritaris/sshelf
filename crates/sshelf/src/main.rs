@@ -8,6 +8,7 @@ mod orphans_window;
 mod settings_view;
 mod sidebar;
 mod theme;
+mod tunnels_view;
 mod util;
 
 use app::SshelfApp;

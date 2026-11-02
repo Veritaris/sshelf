@@ -7,12 +7,14 @@ use std::sync::mpsc::Receiver;
 use egui::RichText;
 use sshelf_core::core::{AppData, Command, ConfigSnapshot, Core, Event, SshInfo};
 use sshelf_core::paths::Paths;
+use sshelf_core::supervisor::Snapshot;
 
 use crate::hosts_view::HostsView;
 use crate::orphans_window::OrphansWindow;
 use crate::settings_view::SettingsView;
 use crate::sidebar::{self, View};
 use crate::theme::{self, Palette};
+use crate::tunnels_view::TunnelsView;
 
 enum Status {
     Info(String),
@@ -26,7 +28,9 @@ pub struct SshelfApp {
     config: Option<Arc<ConfigSnapshot>>,
     data: Option<Arc<AppData>>,
     ssh: Option<Arc<SshInfo>>,
+    tunnel_states: Option<Arc<Snapshot>>,
     hosts: HostsView,
+    tunnels: TunnelsView,
     settings: SettingsView,
     orphans: OrphansWindow,
     status: Option<Status>,
@@ -53,7 +57,9 @@ impl SshelfApp {
             config: None,
             data: None,
             ssh: None,
+            tunnel_states: None,
             hosts: HostsView::default(),
+            tunnels: TunnelsView::default(),
             settings: SettingsView::default(),
             orphans: OrphansWindow::default(),
             status: None,
@@ -81,8 +87,7 @@ impl SshelfApp {
                     self.status = Some(Status::Info(format!("Opened a terminal for {alias}")));
                 }
                 Event::Error(message) => self.status = Some(Status::Error(message)),
-                // Shown by the tunnel views (next step).
-                Event::Tunnels(_) => {}
+                Event::Tunnels(states) => self.tunnel_states = Some(states),
             }
         }
     }
@@ -153,6 +158,14 @@ impl eframe::App for SshelfApp {
                     self.config.as_deref(),
                     self.data.as_deref(),
                     self.ssh.as_deref(),
+                );
+            }
+            View::Tunnels => {
+                commands = self.tunnels.show(
+                    ui,
+                    self.config.as_deref(),
+                    self.data.as_deref(),
+                    self.tunnel_states.as_deref(),
                 );
             }
             View::Settings => {
