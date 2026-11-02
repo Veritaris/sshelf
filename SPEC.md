@@ -165,29 +165,32 @@ The read-only "resolved" panel shows `ssh -G <alias>` output for the selected ho
 version = 1
 
 [[tunnel]]
-id = "k3s-api"            # stable, generated; never derived from the name
+id = "t-3f9a1c07"         # stable, generated; never derived from the name
 name = "k3s API"
 host = "k3s-master"       # ssh_config alias
 forwards = [
-  { kind = "L", bind = "127.0.0.1", local = 6443, remote = "localhost:6443" },
+  { kind = "L", bind = "127.0.0.1", listen = 6443, target = "localhost:6443" },
 ]
 
 [[tunnel]]
-id = "prod-db"
+id = "t-81d2e4aa"
 name = "Prod Postgres"
 host = "bastion"
 forwards = [
-  { kind = "L", bind = "127.0.0.1", local = 5432, remote = "db.internal:5432" },
+  { kind = "L", bind = "127.0.0.1", listen = 5432, target = "db.internal:5432" },
+  { kind = "R", bind = "127.0.0.1", listen = 8080, target = "localhost:3000" },
+  { kind = "D", bind = "127.0.0.1", listen = 1080 },
 ]
 
 [[group]]
-id = "work-prod"
+id = "g-5b07c9e1"
 name = "Work on prod"
-tunnels = ["k3s-api", "prod-db"]
+tunnels = ["t-3f9a1c07", "t-81d2e4aa"]
 ```
 
 - **Tunnel** = one host alias + N forwards = **one `ssh` process**.
-- Forward kinds: `L` (local), `R` (remote), `D` (dynamic/SOCKS).
+- Forward kinds: `L` (local), `R` (remote), `D` (dynamic/SOCKS). Every forward has `bind` (listen address; local for `L`/`D`, on the server for `R`), `listen` (port) and, for `L`/`R`, `target` (`host:port` to connect to).
+- Ids are random (`t-xxxxxxxx`, `g-xxxxxxxx`).
 - Default bind address `127.0.0.1`. Binding to `0.0.0.0` or another non-loopback address requires an explicit choice and shows a warning.
 - **Group** = named set of tunnel ids. Forwards are defined only on tunnels, never inline in groups.
 
@@ -195,8 +198,9 @@ tunnels = ["k3s-api", "prod-db"]
 
 Spawned command:
 ```
-ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o BatchMode=yes <forwards> <alias>
+ssh -v -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o BatchMode=yes <forwards> -- <alias>
 ```
+- `-v` lets the supervisor see when the connection is up: the tunnel is *Running* once ssh logs `Entering interactive session.` (forward setup failures make ssh exit because of `ExitOnForwardFailure`). Debug lines are hidden from the shown log unless the user asks for them.
 - Windows: spawn with `CREATE_NO_WINDOW`; kill the whole process tree on stop.
 - Keep the last N lines of stderr per tunnel, viewable in the UI.
 - Before starting, pre-check local ports by attempting to bind a `TcpListener`; report conflicts without spawning.
