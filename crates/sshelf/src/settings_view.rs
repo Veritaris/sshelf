@@ -262,25 +262,12 @@ fn files_section(ui: &mut egui::Ui, data: &AppData, ssh_config: Option<&Path>) {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use egui_kittest::Harness;
     use egui_kittest::kittest::Queryable;
-    use sshelf_core::history::History;
-    use sshelf_core::metadata::HostsFile;
-
-    use super::*;
 
     fn data() -> AppData {
-        AppData {
-            app_dir: PathBuf::from("app"),
-            hosts: HostsFile::default(),
-            hosts_status: LoadStatus::Loaded,
-            orphans: Vec::new(),
-            relink_targets: Vec::new(),
-            settings: Settings::default(),
-            settings_status: LoadStatus::Missing,
-            history: History::default(),
-            history_status: LoadStatus::Missing,
-        }
+        AppData::new(PathBuf::from("app"))
     }
 
     #[test]

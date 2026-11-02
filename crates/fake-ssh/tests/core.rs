@@ -13,6 +13,8 @@ use sshelf_core::metadata::{HostMeta, HostsFile};
 use sshelf_core::paths::Paths;
 use sshelf_core::settings::Settings;
 use sshelf_core::storage::Store;
+use sshelf_core::supervisor::{Snapshot, TunnelState};
+use sshelf_core::tunnels::{DEFAULT_BIND, Forward, ForwardKind, Group, Tunnel};
 
 const WAIT: Duration = Duration::from_secs(10);
 
@@ -185,6 +187,134 @@ fn full_session_never_writes_the_ssh_config() {
         _ => None,
     });
     drop(core);
+    assert_eq!(fingerprint(&paths.ssh_config), before);
+}
+
+fn tunnel_state(events: &Receiver<Event>, id: &str, want: TunnelState) -> Arc<Snapshot> {
+    wait_for(events, &format!("{id} {want:?}"), |e| match e {
+        Event::Tunnels(s) if s.state(id) == want => Some(s),
+        _ => None,
+    })
+}
+
+#[test]
+fn tunnels_and_groups_through_the_core() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let paths = Paths::new(&home, tmp.path().join("app"));
+    fs::create_dir_all(&paths.ssh_dir).unwrap();
+    fs::write(&paths.ssh_config, "Host ok-a\nHost ok-b\n").unwrap();
+    let before = fingerprint(&paths.ssh_config);
+    Store::new(&paths.app_dir)
+        .save(&Settings {
+            ssh_path: Some(fake_ssh()),
+            ..Settings::default()
+        })
+        .unwrap();
+
+    let free = || {
+        std::net::TcpListener::bind(("127.0.0.1", 0))
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+    };
+    let port = free();
+    let tunnel = Tunnel {
+        id: "t-1".into(),
+        name: "API".into(),
+        host: "ok-a".into(),
+        forwards: vec![Forward {
+            kind: ForwardKind::L,
+            bind: DEFAULT_BIND.into(),
+            listen: port,
+            target: Some("localhost:6443".into()),
+        }],
+    };
+
+    let (core, events) = Core::start(paths.clone(), Arc::new(|| {}));
+    wait_for(&events, "the config", host_aliases);
+
+    // Invalid tunnels are refused with the reasons.
+    core.send(Command::SaveTunnel(Tunnel {
+        host: "nope".into(),
+        ..tunnel.clone()
+    }));
+    let error = wait_for(&events, "a refused tunnel", |e| match e {
+        Event::Error(m) => Some(m),
+        _ => None,
+    });
+    assert!(error.contains("no host `nope`"), "{error}");
+
+    core.send(Command::SaveTunnel(tunnel.clone()));
+    wait_for(&events, "the saved tunnel", |e| match e {
+        Event::Data(d) if d.tunnels.tunnel("t-1").is_some() => Some(()),
+        _ => None,
+    });
+    core.send(Command::SaveGroup(Group {
+        id: "g-1".into(),
+        name: "Work".into(),
+        tunnels: vec!["t-1".into()],
+    }));
+    wait_for(&events, "the saved group", |e| match e {
+        Event::Data(d) if d.tunnels.group("g-1").is_some() => Some(()),
+        _ => None,
+    });
+
+    core.send(Command::StartTunnel("t-1".into()));
+    tunnel_state(&events, "t-1", TunnelState::Running);
+    core.send(Command::SaveTunnel(tunnel.clone()));
+    let error = wait_for(&events, "edit refused while running", |e| match e {
+        Event::Error(m) => Some(m),
+        _ => None,
+    });
+    assert!(error.contains("before editing"), "{error}");
+
+    core.send(Command::StartGroup("g-1".into()));
+    wait_for(&events, "two owners", |e| match e {
+        Event::Tunnels(s) if s.tunnels["t-1"].owners.len() == 2 => Some(()),
+        _ => None,
+    });
+    core.send(Command::StopTunnel("t-1".into()));
+    let s = wait_for(&events, "the group still holding it", |e| match e {
+        Event::Tunnels(s) if s.tunnels["t-1"].owners.len() == 1 => Some(s),
+        _ => None,
+    });
+    assert_eq!(s.state("t-1"), TunnelState::Running);
+
+    core.send(Command::DeleteTunnel("t-1".into()));
+    let data = wait_for(&events, "the deleted tunnel", |e| match e {
+        Event::Data(d) if d.tunnels.tunnel("t-1").is_none() => Some(d),
+        _ => None,
+    });
+    assert!(
+        data.tunnels.groups[0].tunnels.is_empty(),
+        "removed from the group"
+    );
+    let deadline = Instant::now() + WAIT;
+    while std::net::TcpListener::bind(("127.0.0.1", port)).is_err() {
+        assert!(Instant::now() < deadline, "the deleted tunnel kept running");
+        std::thread::sleep(Duration::from_millis(25));
+    }
+
+    // A tunnel still running at shutdown is stopped with the app.
+    let port = free();
+    core.send(Command::SaveTunnel(Tunnel {
+        id: "t-2".into(),
+        host: "ok-b".into(),
+        forwards: vec![Forward {
+            listen: port,
+            ..tunnel.forwards[0].clone()
+        }],
+        ..tunnel
+    }));
+    core.send(Command::StartTunnel("t-2".into()));
+    tunnel_state(&events, "t-2", TunnelState::Running);
+    drop(core);
+    assert!(
+        std::net::TcpListener::bind(("127.0.0.1", port)).is_ok(),
+        "tunnels must stop with the app"
+    );
     assert_eq!(fingerprint(&paths.ssh_config), before);
 }
 

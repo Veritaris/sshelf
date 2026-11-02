@@ -81,6 +81,8 @@ impl SshelfApp {
                     self.status = Some(Status::Info(format!("Opened a terminal for {alias}")));
                 }
                 Event::Error(message) => self.status = Some(Status::Error(message)),
+                // Shown by the tunnel views (next step).
+                Event::Tunnels(_) => {}
             }
         }
     }

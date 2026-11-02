@@ -1,6 +1,7 @@
 //! The core service (SPEC.md §2): owns every file and process. The UI sends
 //! [`Command`]s and renders [`Event`]s; after each event the repaint callback
-//! runs, so the UI never polls. The ssh config is only ever read.
+//! runs, so the UI never polls. The ssh config is only ever read. Tunnels run
+//! in the [`Supervisor`], whose events are relayed as [`Event::Tunnels`].
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -13,12 +14,14 @@ use sshconf::{ConfigSet, HostList, WatchDir};
 use crate::agent_service::{self, AgentService};
 use crate::history::History;
 use crate::metadata::{HostMeta, HostsFile};
-use crate::orphans::{self, Orphan};
+use crate::orphans::{self, GroupOrphan, Orphan, TunnelOrphan};
 use crate::paths::Paths;
 use crate::settings::Settings;
 use crate::ssh::{AgentStatus, Resolved, SshTools};
 use crate::storage::{LoadStatus, Store, Versioned};
+use crate::supervisor::{self, Owner, Request, Snapshot, Supervisor, SupervisorEvent, TunnelState};
 use crate::terminal::{self, Terminal};
+use crate::tunnels::{Group, Tunnel, TunnelsFile};
 use crate::watch::ConfigWatcher;
 
 /// Called after every event; the UI passes `ctx.request_repaint()`.
@@ -47,6 +50,33 @@ pub enum Command {
     RefreshSsh,
     /// Open a terminal session for an alias.
     Connect(String),
+    /// Create or update a tunnel (refused while it runs).
+    SaveTunnel(Tunnel),
+    /// Stop and delete a tunnel, removing it from every group.
+    DeleteTunnel(String),
+    /// Start a tunnel manually.
+    StartTunnel(String),
+    /// Release the manual start; groups using it keep it running.
+    StopTunnel(String),
+    /// Create or update a group (refused while it runs).
+    SaveGroup(Group),
+    DeleteGroup(String),
+    /// Start a group; also "Retry failed".
+    StartGroup(String),
+    StopGroup(String),
+    RelinkTunnel {
+        tunnel_id: String,
+        to: String,
+    },
+    RelinkGroupMember {
+        group_id: String,
+        from: String,
+        to: String,
+    },
+    RemoveGroupMember {
+        group_id: String,
+        tunnel_id: String,
+    },
     Shutdown,
 }
 
@@ -64,6 +94,8 @@ pub enum Event {
     Launched {
         alias: String,
     },
+    /// Tunnel states from the supervisor.
+    Tunnels(Arc<Snapshot>),
     Error(String),
 }
 
@@ -105,10 +137,39 @@ pub struct AppData {
     pub orphans: Vec<Orphan>,
     /// Aliases an orphan may be relinked to.
     pub relink_targets: Vec<String>,
+    pub tunnels: TunnelsFile,
+    pub tunnels_status: LoadStatus,
+    pub tunnel_orphans: Vec<TunnelOrphan>,
+    pub group_orphans: Vec<GroupOrphan>,
     pub settings: Settings,
     pub settings_status: LoadStatus,
     pub history: History,
     pub history_status: LoadStatus,
+}
+
+impl AppData {
+    /// Nothing loaded yet: every file missing, defaults everywhere.
+    pub fn new(app_dir: PathBuf) -> Self {
+        Self {
+            app_dir,
+            hosts: HostsFile::default(),
+            hosts_status: LoadStatus::Missing,
+            orphans: Vec::new(),
+            relink_targets: Vec::new(),
+            tunnels: TunnelsFile::default(),
+            tunnels_status: LoadStatus::Missing,
+            tunnel_orphans: Vec::new(),
+            group_orphans: Vec::new(),
+            settings: Settings::default(),
+            settings_status: LoadStatus::Missing,
+            history: History::default(),
+            history_status: LoadStatus::Missing,
+        }
+    }
+
+    pub fn orphan_count(&self) -> usize {
+        self.orphans.len() + self.tunnel_orphans.len() + self.group_orphans.len()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -121,15 +182,22 @@ pub struct SshInfo {
     pub terminal: Option<Terminal>,
 }
 
-/// Handle to the core thread; dropping it shuts the core down.
+/// Messages to the core thread: UI commands and relayed supervisor events.
+enum Message {
+    Command(Command),
+    Supervisor(SupervisorEvent),
+}
+
+/// Handle to the core thread; dropping it shuts the core down and stops
+/// every tunnel.
 pub struct Core {
-    tx: Sender<Command>,
+    tx: Sender<Message>,
     thread: Option<JoinHandle<()>>,
 }
 
 impl Core {
     pub fn start(paths: Paths, repaint: Repaint) -> (Self, Receiver<Event>) {
-        let (tx, commands) = mpsc::channel();
+        let (tx, messages) = mpsc::channel();
         let (events_tx, events) = mpsc::channel();
         let self_tx = tx.clone();
         let thread = thread::Builder::new()
@@ -139,7 +207,7 @@ impl Core {
                     tx: events_tx,
                     repaint,
                 };
-                Worker::new(paths, emitter, self_tx).run(commands);
+                Worker::new(paths, emitter, self_tx).run(messages);
             })
             .expect("spawning the core thread");
         (
@@ -152,13 +220,13 @@ impl Core {
     }
 
     pub fn send(&self, command: Command) {
-        let _ = self.tx.send(command);
+        let _ = self.tx.send(Message::Command(command));
     }
 }
 
 impl Drop for Core {
     fn drop(&mut self) {
-        let _ = self.tx.send(Command::Shutdown);
+        let _ = self.tx.send(Message::Command(Command::Shutdown));
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
@@ -182,20 +250,23 @@ impl Emitter {
 struct Worker {
     paths: Paths,
     emitter: Emitter,
-    /// For the watcher, which sends `Reload`.
-    self_tx: Sender<Command>,
+    /// For the watcher (reloads) and the supervisor (events).
+    self_tx: Sender<Message>,
     store: Store,
     data: AppData,
     config: Arc<ConfigSnapshot>,
     tools: Result<SshTools, String>,
     terminal: Option<Terminal>,
     watcher: Option<ConfigWatcher>,
+    supervisor: Option<Supervisor>,
+    tunnel_states: Arc<Snapshot>,
 }
 
 impl Worker {
-    fn new(paths: Paths, emitter: Emitter, self_tx: Sender<Command>) -> Self {
+    fn new(paths: Paths, emitter: Emitter, self_tx: Sender<Message>) -> Self {
         let mut store = Store::new(paths.app_dir.clone());
         let hosts = store.load::<HostsFile>();
+        let tunnels = store.load::<TunnelsFile>();
         let settings = store.load::<Settings>();
         let history = store.load::<History>();
         let data = AppData {
@@ -204,6 +275,10 @@ impl Worker {
             hosts_status: hosts.status,
             orphans: Vec::new(),
             relink_targets: Vec::new(),
+            tunnels: tunnels.data,
+            tunnels_status: tunnels.status,
+            tunnel_orphans: Vec::new(),
+            group_orphans: Vec::new(),
             settings: settings.data,
             settings_status: settings.status,
             history: history.data,
@@ -224,21 +299,42 @@ impl Worker {
             tools: Err("not detected yet".into()),
             terminal: None,
             watcher: None,
+            supervisor: None,
+            tunnel_states: Arc::new(Snapshot::default()),
         }
     }
 
-    fn run(mut self, commands: Receiver<Command>) {
+    fn run(mut self, messages: Receiver<Message>) {
         let tx = self.self_tx.clone();
         match ConfigWatcher::new(move || {
-            let _ = tx.send(Command::Reload);
+            let _ = tx.send(Message::Command(Command::Reload));
         }) {
             Ok(watcher) => self.watcher = Some(watcher),
             Err(e) => self.error(format!("config changes will not be detected: {e}")),
         }
         self.refresh_ssh();
+        let tx = self.self_tx.clone();
+        self.supervisor = Some(Supervisor::start(
+            self.tools.as_ref().ok().map(|t| t.ssh.clone()),
+            move |event| {
+                let _ = tx.send(Message::Supervisor(event));
+            },
+        ));
         self.reload();
 
-        while let Ok(command) = commands.recv() {
+        while let Ok(message) = messages.recv() {
+            let command = match message {
+                Message::Supervisor(SupervisorEvent::Snapshot(snapshot)) => {
+                    self.tunnel_states = Arc::clone(&snapshot);
+                    self.emitter.emit(Event::Tunnels(snapshot));
+                    continue;
+                }
+                Message::Supervisor(SupervisorEvent::Error(e)) => {
+                    self.error(e);
+                    continue;
+                }
+                Message::Command(command) => command,
+            };
             match command {
                 Command::Reload => self.reload(),
                 Command::Resolve(alias) => self.resolve(alias),
@@ -256,6 +352,44 @@ impl Worker {
                 Command::SaveSettings(settings) => self.save_settings(settings),
                 Command::RefreshSsh => self.refresh_ssh(),
                 Command::Connect(alias) => self.connect(&alias),
+                Command::SaveTunnel(tunnel) => self.save_tunnel(tunnel),
+                Command::DeleteTunnel(id) => self.delete_tunnel(&id),
+                Command::StartTunnel(id) => self.start_tunnel(&id),
+                Command::StopTunnel(id) => self.supervise(Request::Stop {
+                    tunnel_id: id,
+                    owner: Owner::Manual,
+                }),
+                Command::SaveGroup(group) => self.save_group(group),
+                Command::DeleteGroup(id) => {
+                    self.supervise(Request::StopGroup {
+                        group_id: id.clone(),
+                    });
+                    self.change_tunnels(|file, _| {
+                        file.remove_group(&id)
+                            .then_some(())
+                            .ok_or_else(|| format!("no group `{id}`"))
+                    });
+                }
+                Command::StartGroup(id) => self.start_group(&id),
+                Command::StopGroup(id) => self.supervise(Request::StopGroup { group_id: id }),
+                Command::RelinkTunnel { tunnel_id, to } => self.change_tunnels(|file, hosts| {
+                    orphans::relink_tunnel(file, hosts, &tunnel_id, &to).map_err(|e| e.to_string())
+                }),
+                Command::RelinkGroupMember { group_id, from, to } => {
+                    self.change_tunnels(|file, _| {
+                        orphans::relink_group_member(file, &group_id, &from, &to)
+                            .map_err(|e| e.to_string())
+                    })
+                }
+                Command::RemoveGroupMember {
+                    group_id,
+                    tunnel_id,
+                } => self.change_tunnels(|file, _| {
+                    orphans::remove_group_member(file, &group_id, &tunnel_id)
+                        .then_some(())
+                        .ok_or_else(|| format!("group has no tunnel `{tunnel_id}`"))
+                }),
+                // Dropping the supervisor stops every tunnel.
                 Command::Shutdown => break,
             }
         }
@@ -263,6 +397,12 @@ impl Worker {
 
     fn error(&self, message: String) {
         self.emitter.emit(Event::Error(message));
+    }
+
+    fn supervise(&self, request: Request) {
+        if let Some(supervisor) = &self.supervisor {
+            supervisor.send(request);
+        }
     }
 
     fn reload(&mut self) {
@@ -316,6 +456,10 @@ impl Worker {
             ),
             None => (Vec::new(), Vec::new()),
         };
+        self.data.tunnel_orphans = hosts
+            .map(|hosts| orphans::find_tunnel_orphans(&self.data.tunnels, hosts))
+            .unwrap_or_default();
+        self.data.group_orphans = orphans::find_group_orphans(&self.data.tunnels);
         self.emitter.emit(Event::Data(Arc::new(self.data.clone())));
     }
 
@@ -363,6 +507,133 @@ impl Worker {
         }
     }
 
+    /// Like [`Self::change_hosts`], for `tunnels.toml`.
+    fn change_tunnels(
+        &mut self,
+        change: impl FnOnce(&mut TunnelsFile, &HostList) -> Result<(), String>,
+    ) {
+        let empty = HostList::default();
+        let list = self.config.hosts().unwrap_or(&empty);
+        let mut tunnels = self.data.tunnels.clone();
+        let result = change(&mut tunnels, list)
+            .and_then(|()| self.store.save(&tunnels).map_err(|e| e.to_string()));
+        match result {
+            Ok(()) => {
+                self.data.tunnels = tunnels;
+                self.publish_data();
+            }
+            Err(e) => self.error(format!("{}: {e}", TunnelsFile::FILE)),
+        }
+    }
+
+    fn is_active(&self, tunnel_id: &str) -> bool {
+        !matches!(
+            self.tunnel_states.state(tunnel_id),
+            TunnelState::Stopped | TunnelState::Failed(_)
+        )
+    }
+
+    fn save_tunnel(&mut self, tunnel: Tunnel) {
+        if self.is_active(&tunnel.id) {
+            return self.error(format!("stop \"{}\" before editing it", tunnel.name));
+        }
+        self.change_tunnels(|file, hosts| {
+            let mut problems = tunnel.validate();
+            if !tunnel.host.is_empty() && hosts.find(&tunnel.host).is_none() {
+                problems.push(format!("no host `{}`", tunnel.host));
+            }
+            if !problems.is_empty() {
+                return Err(format!(
+                    "cannot save \"{}\": {}",
+                    tunnel.name,
+                    problems.join("; ")
+                ));
+            }
+            file.upsert_tunnel(tunnel);
+            Ok(())
+        });
+    }
+
+    fn delete_tunnel(&mut self, id: &str) {
+        self.supervise(Request::Remove {
+            tunnel_id: id.to_string(),
+        });
+        self.change_tunnels(|file, _| {
+            file.remove_tunnel(id)
+                .then_some(())
+                .ok_or_else(|| format!("no tunnel `{id}`"))
+        });
+    }
+
+    fn save_group(&mut self, group: Group) {
+        let active = supervisor::GroupState::Stopped != self.tunnel_states.group_state(&group)
+            || self.data.tunnels.group(&group.id).is_some_and(|old| {
+                self.tunnel_states.group_state(old) != supervisor::GroupState::Stopped
+            });
+        if active {
+            return self.error(format!("stop \"{}\" before editing it", group.name));
+        }
+        self.change_tunnels(|file, _| {
+            if group.name.trim().is_empty() {
+                return Err("cannot save a group without a name".to_string());
+            }
+            if let Some(missing) = group.tunnels.iter().find(|t| file.tunnel(t).is_none()) {
+                return Err(format!("no tunnel `{missing}`"));
+            }
+            file.upsert_group(group);
+            Ok(())
+        });
+    }
+
+    /// The tunnel's definition, if its host exists.
+    fn startable(&self, tunnel: &Tunnel) -> Result<(), String> {
+        let exists = self
+            .config
+            .hosts()
+            .is_some_and(|hosts| hosts.find(&tunnel.host).is_some());
+        if exists {
+            Ok(())
+        } else {
+            Err(format!("\"{}\": no host `{}`", tunnel.name, tunnel.host))
+        }
+    }
+
+    fn start_tunnel(&mut self, id: &str) {
+        let Some(tunnel) = self.data.tunnels.tunnel(id).cloned() else {
+            return self.error(format!("no tunnel `{id}`"));
+        };
+        if let Err(e) = self.startable(&tunnel) {
+            return self.error(format!("cannot start {e}"));
+        }
+        self.supervise(Request::Start {
+            tunnel,
+            owner: Owner::Manual,
+        });
+    }
+
+    fn start_group(&mut self, id: &str) {
+        let Some(group) = self.data.tunnels.group(id).cloned() else {
+            return self.error(format!("no group `{id}`"));
+        };
+        let tunnels: Vec<Tunnel> = group
+            .tunnels
+            .iter()
+            .filter_map(|t| self.data.tunnels.tunnel(t).cloned())
+            .collect();
+        let problems: Vec<String> = tunnels
+            .iter()
+            .filter_map(|t| self.startable(t).err())
+            .collect();
+        if !problems.is_empty() {
+            return self.error(format!(
+                "cannot start \"{}\": {}",
+                group.name,
+                problems.join("; ")
+            ));
+        }
+        self.supervise(Request::StartGroup { group, tunnels });
+    }
+
     fn save_settings(&mut self, settings: Settings) {
         match self.store.save(&settings) {
             Ok(()) => {
@@ -379,6 +650,9 @@ impl Worker {
     fn refresh_ssh(&mut self) {
         self.tools =
             SshTools::locate(self.data.settings.ssh_path.as_deref()).map_err(|e| e.to_string());
+        self.supervise(Request::SetSsh(
+            self.tools.as_ref().ok().map(|t| t.ssh.clone()),
+        ));
         self.terminal = Terminal::detect();
         let tools = self.tools.clone();
         let terminal = self.terminal.clone();

@@ -291,9 +291,7 @@ mod tests {
     use egui_kittest::kittest::Queryable;
     use sshconf::{ConfigSet, HostList, ResolveOptions};
     use sshelf_core::core::{AppData, Command, ConfigSnapshot, ConfigState};
-    use sshelf_core::history::History;
     use sshelf_core::metadata::{HostMeta, HostsFile};
-    use sshelf_core::settings::Settings;
     use sshelf_core::storage::LoadStatus;
 
     use super::*;
@@ -320,15 +318,9 @@ mod tests {
             },
         );
         let data = AppData {
-            app_dir: PathBuf::from("app"),
             hosts: meta,
             hosts_status: LoadStatus::Loaded,
-            orphans: Vec::new(),
-            relink_targets: Vec::new(),
-            settings: Settings::default(),
-            settings_status: LoadStatus::Missing,
-            history: History::default(),
-            history_status: LoadStatus::Missing,
+            ..AppData::new(PathBuf::from("app"))
         };
         (Arc::new(snapshot), Arc::new(data))
     }

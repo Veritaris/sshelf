@@ -124,10 +124,8 @@ mod tests {
 
     use egui_kittest::Harness;
     use egui_kittest::kittest::Queryable;
-    use sshelf_core::history::History;
     use sshelf_core::metadata::{HostMeta, HostsFile};
     use sshelf_core::orphans::{Orphan, OrphanReason};
-    use sshelf_core::settings::Settings;
     use sshelf_core::storage::LoadStatus;
 
     use super::*;
@@ -136,7 +134,6 @@ mod tests {
         let mut hosts = HostsFile::default();
         hosts.hosts.insert("gone".into(), HostMeta::default());
         AppData {
-            app_dir: PathBuf::from("app"),
             hosts,
             hosts_status: LoadStatus::Loaded,
             orphans: vec![Orphan {
@@ -144,10 +141,7 @@ mod tests {
                 reason: OrphanReason::MissingAlias,
             }],
             relink_targets: vec!["db".into()],
-            settings: Settings::default(),
-            settings_status: LoadStatus::Missing,
-            history: History::default(),
-            history_status: LoadStatus::Missing,
+            ..AppData::new(PathBuf::from("app"))
         }
     }
 
