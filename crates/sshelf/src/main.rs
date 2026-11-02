@@ -2,7 +2,11 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod host_detail;
+mod hosts_view;
+mod sidebar;
 mod theme;
+mod util;
 
 use app::SshelfApp;
 

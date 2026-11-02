@@ -21,6 +21,8 @@ pub struct Palette {
     /// Header / brand / links.
     pub accent: Color32,
     pub text: Color32,
+    /// Secondary text: other aliases, file names, hints.
+    pub dim: Color32,
     /// Text on hovered widgets.
     pub text_strong: Color32,
     pub yellow: Color32,
@@ -37,6 +39,7 @@ impl Palette {
         border: Color32::from_rgb(86, 92, 108),        // #565c6c
         accent: Color32::from_rgb(198, 120, 221),      // #c678dd
         text: Color32::from_rgb(171, 178, 191),        // #abb2bf
+        dim: Color32::from_rgb(130, 137, 151),         // softer gray
         text_strong: Color32::from_rgb(215, 218, 224), // #d7dae0
         yellow: Color32::from_rgb(229, 192, 123),      // #e5c07b
         red: Color32::from_rgb(224, 108, 117),         // #e06c75

@@ -8,7 +8,8 @@ description = "Visual layer over your ~/.ssh/config: hosts, effective config, tu
 [dependencies]
 sshconf = { path = "../sshconf" }
 sshelf-core = { path = "../sshelf-core" }
-egui = "0.37.0"
+# Since 0.37 the emoji/icon glyphs (⭐ ⚠ ✖ ▶ …) are an opt-in font feature.
+egui = { version = "0.37.0", features = ["monochrome_emoji_fonts"] }
 # Linux needs at least one windowing backend once default features are off.
 eframe = { version = "0.37.0", default-features = false, features = [
     "accesskit",
@@ -17,3 +18,8 @@ eframe = { version = "0.37.0", default-features = false, features = [
     "wayland",
     "x11",
 ] }
+
+[dev-dependencies]
+# Headless UI tests: drive views through their accessibility labels.
+egui_kittest = { version = "0.37.0" }
+tempfile = { version = "3.27.0" }
