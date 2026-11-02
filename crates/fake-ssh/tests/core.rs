@@ -18,6 +18,12 @@ use sshelf_core::tunnels::{DEFAULT_BIND, Forward, ForwardKind, Group, Tunnel};
 
 const WAIT: Duration = Duration::from_secs(10);
 
+/// Public parts of two throwaway keys (fake-ssh's servers present `NEW`).
+const OLD: &str =
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAID/hisleXY3lBCSP34IG2qVLK1Fupesz68s+RrGuiBgg";
+const NEW: &str =
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIO/867Gn6gWVC9L/2TosddbUBIfUwN1FA755XCQA20kG";
+
 fn fake_ssh() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_fake-ssh"))
 }
@@ -204,6 +210,12 @@ fn tunnels_and_groups_through_the_core() {
     let paths = Paths::new(&home, tmp.path().join("app"));
     fs::create_dir_all(&paths.ssh_dir).unwrap();
     fs::write(&paths.ssh_config, "Host ok-a\nHost ok-b\n").unwrap();
+    // Known host keys, so starts go straight through.
+    fs::write(
+        paths.ssh_dir.join("known_hosts"),
+        format!("ok-a.example.com {NEW}\nok-b.example.com {NEW}\n"),
+    )
+    .unwrap();
     let before = fingerprint(&paths.ssh_config);
     Store::new(&paths.app_dir)
         .save(&Settings {
@@ -316,6 +328,170 @@ fn tunnels_and_groups_through_the_core() {
         "tunnels must stop with the app"
     );
     assert_eq!(fingerprint(&paths.ssh_config), before);
+}
+
+/// A core with fake-ssh as ssh, hosts `aliases`, and `known_hosts` contents.
+fn host_key_session(
+    aliases: &[&str],
+    known_hosts: &str,
+) -> (tempfile::TempDir, Paths, Core, Receiver<Event>) {
+    let tmp = tempfile::tempdir().unwrap();
+    let paths = Paths::new(&tmp.path().join("home"), tmp.path().join("app"));
+    fs::create_dir_all(&paths.ssh_dir).unwrap();
+    let config: String = aliases.iter().map(|a| format!("Host {a}\n")).collect();
+    fs::write(&paths.ssh_config, config).unwrap();
+    if !known_hosts.is_empty() {
+        fs::write(paths.ssh_dir.join("known_hosts"), known_hosts).unwrap();
+    }
+    let store = Store::new(&paths.app_dir);
+    store
+        .save(&Settings {
+            ssh_path: Some(fake_ssh()),
+            ..Settings::default()
+        })
+        .unwrap();
+    let mut tunnels = sshelf_core::tunnels::TunnelsFile::default();
+    for alias in aliases {
+        tunnels.upsert_tunnel(Tunnel {
+            id: format!("t-{alias}"),
+            name: format!("to {alias}"),
+            host: alias.to_string(),
+            forwards: vec![Forward {
+                kind: ForwardKind::L,
+                bind: DEFAULT_BIND.into(),
+                listen: std::net::TcpListener::bind(("127.0.0.1", 0))
+                    .unwrap()
+                    .local_addr()
+                    .unwrap()
+                    .port(),
+                target: Some("localhost:80".into()),
+            }],
+        });
+    }
+    store.save(&tunnels).unwrap();
+    let (core, events) = Core::start(paths.clone(), Arc::new(|| {}));
+    wait_for(&events, "the config", host_aliases);
+    (tmp, paths, core, events)
+}
+
+fn prompt(events: &Receiver<Event>) -> Arc<sshelf_core::core::HostKeyPrompt> {
+    wait_for(events, "a host key prompt", |e| match e {
+        Event::HostKeyPrompt(p) => Some(p),
+        _ => None,
+    })
+}
+
+#[test]
+fn unknown_host_key_is_asked_for_then_stored_and_started() {
+    let (_tmp, paths, core, events) = host_key_session(&["newkey-a"], "");
+    core.send(Command::StartTunnel("t-newkey-a".into()));
+    let p = prompt(&events);
+    assert_eq!(p.unknown.target.display(), "newkey-a.example.com");
+    assert_eq!(p.unknown.keys.len(), 1);
+    assert!(p.unknown.keys[0].fingerprint.starts_with("SHA256:"));
+    assert_eq!(p.purpose, "tunnel \"to newkey-a\"");
+
+    core.send(Command::AcceptHostKey(p.id));
+    tunnel_state(&events, "t-newkey-a", TunnelState::Running);
+    assert_eq!(
+        fs::read_to_string(paths.ssh_dir.join("known_hosts")).unwrap(),
+        format!("newkey-a.example.com {NEW}\n")
+    );
+}
+
+#[test]
+fn rejected_host_key_starts_nothing_and_stores_nothing() {
+    let (_tmp, paths, core, events) = host_key_session(&["newkey-b"], "");
+    core.send(Command::StartTunnel("t-newkey-b".into()));
+    let p = prompt(&events);
+    core.send(Command::RejectHostKey(p.id));
+    let error = wait_for(&events, "the rejection", |e| match e {
+        Event::Error(m) => Some(m),
+        _ => None,
+    });
+    assert!(error.contains("was not accepted"), "{error}");
+    assert!(!paths.ssh_dir.join("known_hosts").exists());
+    drop(core);
+}
+
+#[test]
+fn jump_hosts_are_asked_for_first() {
+    let (_tmp, paths, core, events) = host_key_session(&["newkey-via-x"], "");
+    core.send(Command::StartTunnel("t-newkey-via-x".into()));
+    let first = prompt(&events);
+    assert_eq!(first.unknown.target.display(), "newkey-jump.example.com");
+    assert_eq!(first.unknown.hop_of.as_deref(), Some("newkey-via-x"));
+    core.send(Command::AcceptHostKey(first.id));
+    let second = prompt(&events);
+    assert_eq!(second.unknown.target.display(), "newkey-via-x.example.com");
+    assert_eq!(second.unknown.hop_of, None);
+    core.send(Command::AcceptHostKey(second.id));
+    tunnel_state(&events, "t-newkey-via-x", TunnelState::Running);
+    let stored = fs::read_to_string(paths.ssh_dir.join("known_hosts")).unwrap();
+    assert_eq!(stored.lines().count(), 2, "{stored}");
+}
+
+#[test]
+fn unreachable_hosts_report_why_and_start_nothing() {
+    let (_tmp, _paths, core, events) = host_key_session(&["unreachable-a"], "");
+    core.send(Command::StartTunnel("t-unreachable-a".into()));
+    let error = wait_for(&events, "the fetch error", |e| match e {
+        Event::Error(m) => Some(m),
+        _ => None,
+    });
+    assert!(error.contains("cannot get the host key"), "{error}");
+    assert!(error.contains("timed out"), "{error}");
+    drop(core);
+}
+
+#[test]
+fn changed_host_key_is_reviewed_and_replaced() {
+    let old_line = format!("changed-a.example.com {OLD}\n");
+    let (_tmp, paths, core, events) = host_key_session(&["changed-a"], &old_line);
+    core.send(Command::StartTunnel("t-changed-a".into()));
+    let s = wait_for(&events, "the changed-key failure", |e| match e {
+        Event::Tunnels(s) if matches!(s.state("t-changed-a"), TunnelState::Failed(_)) => Some(s),
+        _ => None,
+    });
+    assert_eq!(
+        s.tunnels["t-changed-a"].failure,
+        Some(sshelf_core::supervisor::FailureKind::HostKeyChanged)
+    );
+
+    core.send(Command::ReviewChangedKey("t-changed-a".into()));
+    let review = wait_for(&events, "the review", |e| match e {
+        Event::HostKeyChanged(p) => Some(p),
+        _ => None,
+    });
+    assert_eq!(review.tunnel_name, "to changed-a");
+    assert_ne!(
+        review.changed.old[0].fingerprint,
+        review.changed.new[0].fingerprint
+    );
+    assert_eq!(
+        review.changed.user_files,
+        [paths.ssh_dir.join("known_hosts")]
+    );
+
+    core.send(Command::ReplaceHostKey(review.id));
+    // Restarted after the replacement (fake-ssh's server keeps failing).
+    wait_for(&events, "the restart", |e| match e {
+        Event::Tunnels(s) if s.state("t-changed-a") == TunnelState::Starting => Some(()),
+        _ => None,
+    });
+    let stored = fs::read_to_string(paths.ssh_dir.join("known_hosts")).unwrap();
+    assert_eq!(stored, format!("changed-a.example.com {NEW}\n"));
+    let backups: Vec<String> = fs::read_dir(&paths.ssh_dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.contains(".sshelf-") || n.ends_with(".old"))
+        .collect();
+    assert_eq!(
+        backups.len(),
+        2,
+        "sshelf's backup and ssh-keygen's .old: {backups:?}"
+    );
+    drop(core);
 }
 
 #[test]

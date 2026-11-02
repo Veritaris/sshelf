@@ -228,7 +228,7 @@ ssh -v -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o BatchMode=yes
 
 - **Windows:** the built-in OpenSSH at `C:\Windows\System32\OpenSSH\ssh.exe`, located by explicit path (not `PATH`). Companion tools (`ssh-add`, `ssh-keygen`, `ssh-keyscan`) are taken from the same directory.
 - **macOS / Linux:** system `ssh` from `PATH`.
-- Settings allow overriding the path on all platforms.
+- Settings allow overriding the path on all platforms. Companion tools are taken from the overridden binary's directory; if one is missing there, the system's is used (Windows' built-in OpenSSH, else `PATH`).
 - Settings show: selected binary, `ssh -V` output, agent reachability and number of loaded keys (`ssh-add -l`).
 - **Windows agent:** detect when the `ssh-agent` Windows service is stopped or disabled and explain how to enable it (requires admin; the app does not do it itself).
 - **Auth under `BatchMode`:** when a tunnel fails because a key is not available in the agent, show a clear message ("key not loaded in agent") with a hint, not a raw error.
@@ -256,6 +256,13 @@ Before starting a tunnel, determine the host key state using values from `ssh -G
 - *Replace* is not the default button and requires an explicit extra action (checkbox "I know this server was reinstalled" or typing the host name).
 - Replace = `ssh-keygen -R <host> -f <known_hosts>` (creates `.old` backup), then the unknown-key flow above to fetch and store the new key.
 - Never replace automatically.
+
+### How sshelf applies this
+
+- Every tunnel or group start first checks, without connecting, each host on the way (jump hosts first, then the destination): `ssh -G` for the lookup name and known-hosts files, `ssh-keygen -F` in each user and global file. The first unknown key is fetched and shown; *Accept* stores it and continues with the next host, *Reject* starts nothing (for a group: none of its tunnels). The fetch runs the command above, which logs in and runs `exit` if the key is accepted for authentication.
+- A changed key can only be seen when ssh connects: the tunnel fails, and its failure is classified from ssh's messages (host key changed / unknown, authentication, other). *Review changed key…* walks the same chain, fetches each host's key (of the stored key's type when the server offers it) and shows the first host whose key no longer matches.
+- `known_hosts` files are written only by these flows: appends are atomic (temp file + rename), and each file gets a timestamped backup (`known_hosts.sshelf-<time>.bak`) before its first change in a session; `ssh-keygen -R` additionally keeps `.old`. The global (system) files are never written; a key stored only there cannot be replaced from the app.
+- Interactive sessions (Connect) are not checked: ssh asks about host keys in the terminal itself.
 
 ---
 

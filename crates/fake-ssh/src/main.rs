@@ -26,8 +26,8 @@
 //! - Host keys: `-G` prints `~/.ssh/known_hosts` paths, and a `proxyjump`
 //!   `<prefix>-jump` for `<prefix>-via-*` aliases. A key fetch
 //!   (`-o UserKnownHostsFile=… -o StrictHostKeyChecking=accept-new … exit`)
-//!   writes [`NEW_KEY`] for `newkey*`/`changed*` hosts, then fails auth like a
-//!   real server; `unreachable*` hosts time out.
+//!   writes [`NEW_KEY`] for the host, then fails auth like a real server;
+//!   `unreachable*` hosts time out.
 
 use std::env;
 use std::fs::OpenOptions;
@@ -141,7 +141,7 @@ fn fetch_key(args: &[String]) -> Option<ExitCode> {
         eprintln!("ssh: connect to host {host}.example.com port 22: Connection timed out");
         return Some(ExitCode::from(255));
     }
-    if host.starts_with("newkey") || host.starts_with("changed") {
+    {
         let port = args
             .windows(2)
             .find(|w| w[0] == "-p")

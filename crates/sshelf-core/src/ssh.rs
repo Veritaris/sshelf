@@ -110,13 +110,18 @@ impl SshTools {
             .ok_or_else(|| LocateError::NotFound("no `ssh` on PATH".to_string()))
     }
 
-    /// A companion tool such as `ssh-add`: next to `ssh`, else (outside
-    /// Windows) on `PATH`.
+    /// A companion tool such as `ssh-add`: next to `ssh`; if an overridden
+    /// ssh has none beside it, the system's (Windows' built-in OpenSSH, else
+    /// `PATH`).
     pub fn companion(&self, name: &str) -> PathBuf {
         let file = format!("{name}{}", env::consts::EXE_SUFFIX);
         let beside = self.ssh.with_file_name(&file);
-        if beside.is_file() || cfg!(windows) {
+        if beside.is_file() {
             return beside;
+        }
+        if cfg!(windows) {
+            let builtin = windows_openssh_dir(env::var_os("SystemRoot").as_deref()).join(&file);
+            return if builtin.is_file() { builtin } else { beside };
         }
         let path_var = env::var_os("PATH").unwrap_or_default();
         find_in_path(name, &path_var).unwrap_or(beside)

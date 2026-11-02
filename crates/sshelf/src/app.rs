@@ -91,6 +91,8 @@ impl SshelfApp {
                 }
                 Event::Error(message) => self.status = Some(Status::Error(message)),
                 Event::Tunnels(states) => self.tunnel_states = Some(states),
+                // Shown by the host key modals (next step).
+                Event::HostKeyPrompt(_) | Event::HostKeyChanged(_) | Event::HostKeyClosed(_) => {}
             }
         }
     }

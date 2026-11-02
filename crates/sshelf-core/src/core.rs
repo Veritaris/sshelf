@@ -3,6 +3,7 @@
 //! runs, so the UI never polls. The ssh config is only ever read. Tunnels run
 //! in the [`Supervisor`], whose events are relayed as [`Event::Tunnels`].
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -13,6 +14,7 @@ use sshconf::{ConfigSet, HostList, WatchDir};
 
 use crate::agent_service::{self, AgentService};
 use crate::history::History;
+use crate::hostkeys::{self, ChangedKey, Keygen, KnownHostsWriter, UnknownKey};
 use crate::metadata::{HostMeta, HostsFile};
 use crate::orphans::{self, GroupOrphan, Orphan, TunnelOrphan};
 use crate::paths::Paths;
@@ -77,7 +79,40 @@ pub enum Command {
         group_id: String,
         tunnel_id: String,
     },
+    /// Store the key of a [`HostKeyPrompt`] and continue the start.
+    AcceptHostKey(u64),
+    /// Do not store the key; the start is abandoned.
+    RejectHostKey(u64),
+    /// Find whose host key changed for a failed tunnel (SPEC.md §9).
+    ReviewChangedKey(String),
+    /// Replace the old key of a [`ChangedKeyPrompt`] and start the tunnel again.
+    ReplaceHostKey(u64),
+    CancelChangedKey(u64),
     Shutdown,
+}
+
+/// An unknown host key waiting for the user (SPEC.md §9).
+#[derive(Debug, Clone)]
+pub struct HostKeyPrompt {
+    pub id: u64,
+    /// What is waiting for it, e.g. `tunnel "Prod DB"`.
+    pub purpose: String,
+    pub unknown: UnknownKey,
+}
+
+/// A changed host key waiting for the user's decision (SPEC.md §9).
+#[derive(Debug, Clone)]
+pub struct ChangedKeyPrompt {
+    pub id: u64,
+    pub tunnel_name: String,
+    pub changed: ChangedKey,
+}
+
+/// What a host key check was for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum StartRequest {
+    Tunnel(String),
+    Group(String),
 }
 
 #[derive(Debug, Clone)]
@@ -96,6 +131,12 @@ pub enum Event {
     },
     /// Tunnel states from the supervisor.
     Tunnels(Arc<Snapshot>),
+    /// A start is waiting for an unknown host key to be accepted.
+    HostKeyPrompt(Arc<HostKeyPrompt>),
+    /// A changed host key was found and needs a decision.
+    HostKeyChanged(Arc<ChangedKeyPrompt>),
+    /// The prompt with this id is settled.
+    HostKeyClosed(u64),
     Error(String),
 }
 
@@ -182,10 +223,19 @@ pub struct SshInfo {
     pub terminal: Option<Terminal>,
 }
 
-/// Messages to the core thread: UI commands and relayed supervisor events.
+/// Messages to the core thread: UI commands, relayed supervisor events and
+/// results of background host key work.
 enum Message {
     Command(Command),
     Supervisor(SupervisorEvent),
+    KeyCheck {
+        start: StartRequest,
+        result: Result<Option<UnknownKey>, String>,
+    },
+    KeyReview {
+        tunnel_id: String,
+        result: Result<ChangedKey, String>,
+    },
 }
 
 /// Handle to the core thread; dropping it shuts the core down and stops
@@ -260,6 +310,10 @@ struct Worker {
     watcher: Option<ConfigWatcher>,
     supervisor: Option<Supervisor>,
     tunnel_states: Arc<Snapshot>,
+    writer: KnownHostsWriter,
+    next_prompt: u64,
+    unknown_keys: BTreeMap<u64, (StartRequest, UnknownKey)>,
+    changed_keys: BTreeMap<u64, (String, ChangedKey)>,
 }
 
 impl Worker {
@@ -301,6 +355,10 @@ impl Worker {
             watcher: None,
             supervisor: None,
             tunnel_states: Arc::new(Snapshot::default()),
+            writer: KnownHostsWriter::default(),
+            next_prompt: 0,
+            unknown_keys: BTreeMap::new(),
+            changed_keys: BTreeMap::new(),
         }
     }
 
@@ -333,6 +391,14 @@ impl Worker {
                     self.error(e);
                     continue;
                 }
+                Message::KeyCheck { start, result } => {
+                    self.key_checked(start, result);
+                    continue;
+                }
+                Message::KeyReview { tunnel_id, result } => {
+                    self.key_reviewed(tunnel_id, result);
+                    continue;
+                }
                 Message::Command(command) => command,
             };
             match command {
@@ -354,7 +420,7 @@ impl Worker {
                 Command::Connect(alias) => self.connect(&alias),
                 Command::SaveTunnel(tunnel) => self.save_tunnel(tunnel),
                 Command::DeleteTunnel(id) => self.delete_tunnel(&id),
-                Command::StartTunnel(id) => self.start_tunnel(&id),
+                Command::StartTunnel(id) => self.start(StartRequest::Tunnel(id)),
                 Command::StopTunnel(id) => self.supervise(Request::Stop {
                     tunnel_id: id,
                     owner: Owner::Manual,
@@ -370,7 +436,16 @@ impl Worker {
                             .ok_or_else(|| format!("no group `{id}`"))
                     });
                 }
-                Command::StartGroup(id) => self.start_group(&id),
+                Command::StartGroup(id) => self.start(StartRequest::Group(id)),
+                Command::AcceptHostKey(id) => self.accept_host_key(id),
+                Command::RejectHostKey(id) => self.reject_host_key(id),
+                Command::ReviewChangedKey(tunnel_id) => self.review_changed_key(tunnel_id),
+                Command::ReplaceHostKey(id) => self.replace_host_key(id),
+                Command::CancelChangedKey(id) => {
+                    if self.changed_keys.remove(&id).is_some() {
+                        self.emitter.emit(Event::HostKeyClosed(id));
+                    }
+                }
                 Command::StopGroup(id) => self.supervise(Request::StopGroup { group_id: id }),
                 Command::RelinkTunnel { tunnel_id, to } => self.change_tunnels(|file, hosts| {
                     orphans::relink_tunnel(file, hosts, &tunnel_id, &to).map_err(|e| e.to_string())
@@ -598,40 +673,217 @@ impl Worker {
         }
     }
 
-    fn start_tunnel(&mut self, id: &str) {
-        let Some(tunnel) = self.data.tunnels.tunnel(id).cloned() else {
-            return self.error(format!("no tunnel `{id}`"));
-        };
-        if let Err(e) = self.startable(&tunnel) {
-            return self.error(format!("cannot start {e}"));
+    /// The supervisor request for `start` once its host keys are known, or why
+    /// it cannot start.
+    fn launch_request(&self, start: &StartRequest) -> Result<Request, String> {
+        match start {
+            StartRequest::Tunnel(id) => {
+                let tunnel = self
+                    .data
+                    .tunnels
+                    .tunnel(id)
+                    .cloned()
+                    .ok_or_else(|| format!("no tunnel `{id}`"))?;
+                self.startable(&tunnel)
+                    .map_err(|e| format!("cannot start {e}"))?;
+                Ok(Request::Start {
+                    tunnel,
+                    owner: Owner::Manual,
+                })
+            }
+            StartRequest::Group(id) => {
+                let group = self
+                    .data
+                    .tunnels
+                    .group(id)
+                    .cloned()
+                    .ok_or_else(|| format!("no group `{id}`"))?;
+                let tunnels: Vec<Tunnel> = group
+                    .tunnels
+                    .iter()
+                    .filter_map(|t| self.data.tunnels.tunnel(t).cloned())
+                    .collect();
+                let problems: Vec<String> = tunnels
+                    .iter()
+                    .filter_map(|t| self.startable(t).err())
+                    .collect();
+                if !problems.is_empty() {
+                    return Err(format!(
+                        "cannot start \"{}\": {}",
+                        group.name,
+                        problems.join("; ")
+                    ));
+                }
+                Ok(Request::StartGroup { group, tunnels })
+            }
         }
-        self.supervise(Request::Start {
-            tunnel,
-            owner: Owner::Manual,
+    }
+
+    fn describe(&self, start: &StartRequest) -> String {
+        match start {
+            StartRequest::Tunnel(id) => self.data.tunnels.tunnel(id).map_or_else(
+                || format!("tunnel {id}"),
+                |t| format!("tunnel \"{}\"", t.name),
+            ),
+            StartRequest::Group(id) => self.data.tunnels.group(id).map_or_else(
+                || format!("group {id}"),
+                |g| format!("group \"{}\"", g.name),
+            ),
+        }
+    }
+
+    fn keygen(&self) -> Result<(SshTools, Keygen), String> {
+        let tools = self.tools.clone()?;
+        let keygen = Keygen {
+            path: tools.companion("ssh-keygen"),
+        };
+        Ok((tools, keygen))
+    }
+
+    /// Checks the host keys of every host `start` connects through (jump
+    /// hosts first) in the background, then starts or asks (SPEC.md §9).
+    fn start(&mut self, start: StartRequest) {
+        let request = match self.launch_request(&start) {
+            Ok(request) => request,
+            Err(e) => return self.error(e),
+        };
+        let mut destinations: Vec<String> = match &request {
+            Request::Start { tunnel, .. } => vec![tunnel.host.clone()],
+            Request::StartGroup { tunnels, .. } => tunnels.iter().map(|t| t.host.clone()).collect(),
+            _ => Vec::new(),
+        };
+        destinations.dedup();
+        let (tools, keygen) = match self.keygen() {
+            Ok(found) => found,
+            Err(e) => return self.error(format!("cannot start: {e}")),
+        };
+        let home = self.paths.home.clone();
+        let tx = self.self_tx.clone();
+        thread::spawn(move || {
+            let result = hostkeys::first_unknown(&tools, &keygen, &home, &destinations);
+            let _ = tx.send(Message::KeyCheck { start, result });
         });
     }
 
-    fn start_group(&mut self, id: &str) {
-        let Some(group) = self.data.tunnels.group(id).cloned() else {
-            return self.error(format!("no group `{id}`"));
+    fn key_checked(&mut self, start: StartRequest, result: Result<Option<UnknownKey>, String>) {
+        match result {
+            Ok(None) => match self.launch_request(&start) {
+                Ok(request) => self.supervise(request),
+                Err(e) => self.error(e),
+            },
+            Ok(Some(unknown)) => {
+                self.next_prompt += 1;
+                let prompt = HostKeyPrompt {
+                    id: self.next_prompt,
+                    purpose: self.describe(&start),
+                    unknown: unknown.clone(),
+                };
+                self.unknown_keys.insert(prompt.id, (start, unknown));
+                self.emitter.emit(Event::HostKeyPrompt(Arc::new(prompt)));
+            }
+            Err(e) => self.error(format!("{} not started: {e}", self.describe(&start))),
+        }
+    }
+
+    fn accept_host_key(&mut self, id: u64) {
+        let Some((start, unknown)) = self.unknown_keys.remove(&id) else {
+            return;
         };
-        let tunnels: Vec<Tunnel> = group
-            .tunnels
-            .iter()
-            .filter_map(|t| self.data.tunnels.tunnel(t).cloned())
-            .collect();
-        let problems: Vec<String> = tunnels
-            .iter()
-            .filter_map(|t| self.startable(t).err())
-            .collect();
-        if !problems.is_empty() {
+        self.emitter.emit(Event::HostKeyClosed(id));
+        let Some(file) = unknown.target.user_files.first() else {
+            return self.error("no UserKnownHostsFile to store the key in".to_string());
+        };
+        if let Err(e) = self.writer.append(file, &unknown.lines) {
+            return self.error(e);
+        }
+        // Next hop, or the start itself.
+        self.start(start);
+    }
+
+    fn reject_host_key(&mut self, id: u64) {
+        let Some((start, unknown)) = self.unknown_keys.remove(&id) else {
+            return;
+        };
+        self.emitter.emit(Event::HostKeyClosed(id));
+        self.error(format!(
+            "{} not started: the host key of {} was not accepted",
+            self.describe(&start),
+            unknown.target.display()
+        ));
+    }
+
+    fn review_changed_key(&mut self, tunnel_id: String) {
+        let Some(host) = self.data.tunnels.tunnel(&tunnel_id).map(|t| t.host.clone()) else {
+            return self.error(format!("no tunnel `{tunnel_id}`"));
+        };
+        let (tools, keygen) = match self.keygen() {
+            Ok(found) => found,
+            Err(e) => return self.error(e),
+        };
+        let home = self.paths.home.clone();
+        let tx = self.self_tx.clone();
+        thread::spawn(move || {
+            let result = hostkeys::find_changed(&tools, &keygen, &home, &host);
+            let _ = tx.send(Message::KeyReview { tunnel_id, result });
+        });
+    }
+
+    fn key_reviewed(&mut self, tunnel_id: String, result: Result<ChangedKey, String>) {
+        match result {
+            Ok(changed) => {
+                self.next_prompt += 1;
+                let prompt = ChangedKeyPrompt {
+                    id: self.next_prompt,
+                    tunnel_name: self
+                        .data
+                        .tunnels
+                        .tunnel(&tunnel_id)
+                        .map_or_else(|| tunnel_id.clone(), |t| t.name.clone()),
+                    changed: changed.clone(),
+                };
+                self.changed_keys.insert(prompt.id, (tunnel_id, changed));
+                self.emitter.emit(Event::HostKeyChanged(Arc::new(prompt)));
+            }
+            Err(e) => self.error(e),
+        }
+    }
+
+    /// `ssh-keygen -R` the old key from every user file holding it, store the
+    /// new one, then start the tunnel again. Never automatic (SPEC.md §9).
+    fn replace_host_key(&mut self, id: u64) {
+        let Some((tunnel_id, changed)) = self.changed_keys.remove(&id) else {
+            return;
+        };
+        self.emitter.emit(Event::HostKeyClosed(id));
+        if changed.user_files.is_empty() {
             return self.error(format!(
-                "cannot start \"{}\": {}",
-                group.name,
-                problems.join("; ")
+                "the old key of {} is in the system-wide known_hosts; an administrator has to replace it",
+                changed.target.display()
             ));
         }
-        self.supervise(Request::StartGroup { group, tunnels });
+        let (_, keygen) = match self.keygen() {
+            Ok(found) => found,
+            Err(e) => return self.error(e),
+        };
+        for file in &changed.user_files {
+            let removed = self
+                .writer
+                .backup_once(file)
+                .and_then(|()| keygen.remove(&changed.target.lookup, file));
+            if let Err(e) = removed {
+                return self.error(e);
+            }
+        }
+        let file = changed
+            .target
+            .user_files
+            .first()
+            .unwrap_or(&changed.user_files[0])
+            .clone();
+        if let Err(e) = self.writer.append(&file, &changed.new_lines) {
+            return self.error(e);
+        }
+        self.start(StartRequest::Tunnel(tunnel_id));
     }
 
     fn save_settings(&mut self, settings: Settings) {

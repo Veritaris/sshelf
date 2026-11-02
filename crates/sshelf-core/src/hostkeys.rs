@@ -14,8 +14,11 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use crate::process;
-use crate::ssh::Resolved;
+use crate::ssh::{Resolved, SshTools};
 use crate::storage;
+
+/// Nested `ProxyJump` chains followed at most this deep.
+const MAX_JUMP_DEPTH: usize = 8;
 
 /// Limit for fetching a key (connect, key exchange, maybe a login).
 pub const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
@@ -299,6 +302,140 @@ pub fn fetch(
         return Err(reason);
     }
     Ok(lines)
+}
+
+/// A host whose key is not stored yet, with the key the server presented.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownKey {
+    pub target: KeyTarget,
+    /// `known_hosts` lines to append if the user accepts.
+    pub lines: Vec<String>,
+    pub keys: Vec<KeyInfo>,
+    /// Set when this is a jump host on the way to that destination.
+    pub hop_of: Option<String>,
+}
+
+/// A host whose stored key no longer matches the server's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChangedKey {
+    pub target: KeyTarget,
+    /// User files holding the old key (what Replace changes).
+    pub user_files: Vec<PathBuf>,
+    pub old: Vec<KeyInfo>,
+    pub new: Vec<KeyInfo>,
+    pub new_lines: Vec<String>,
+    pub hop_of: Option<String>,
+}
+
+/// Every host on the way to `destinations`, jump hosts first (SPEC.md §9:
+/// hops are verified in order), each once.
+pub fn chain(
+    tools: &SshTools,
+    home: &Path,
+    destinations: &[String],
+) -> Result<Vec<(KeyTarget, Option<String>)>, String> {
+    fn walk(
+        tools: &SshTools,
+        home: &Path,
+        destination: &str,
+        hop_of: Option<&str>,
+        depth: usize,
+        out: &mut Vec<(KeyTarget, Option<String>)>,
+    ) -> Result<(), String> {
+        if depth > MAX_JUMP_DEPTH {
+            return Err(format!("ProxyJump chain to {destination} is too deep"));
+        }
+        if out.iter().any(|(t, _)| t.destination == destination) {
+            return Ok(());
+        }
+        let resolved = tools.resolve(destination)?;
+        let target = KeyTarget::from_resolved(destination, &resolved, home);
+        for jump in &target.jumps {
+            walk(
+                tools,
+                home,
+                jump,
+                Some(hop_of.unwrap_or(destination)),
+                depth + 1,
+                out,
+            )?;
+        }
+        out.push((target, hop_of.map(String::from)));
+        Ok(())
+    }
+    let mut out = Vec::new();
+    for destination in destinations {
+        walk(tools, home, destination, None, 0, &mut out)?;
+    }
+    Ok(out)
+}
+
+/// The first host on the way to `destinations` whose key is not stored,
+/// with the key the server presents (fetched through ssh, SPEC.md §9).
+pub fn first_unknown(
+    tools: &SshTools,
+    keygen: &Keygen,
+    home: &Path,
+    destinations: &[String],
+) -> Result<Option<UnknownKey>, String> {
+    for (target, hop_of) in chain(tools, home, destinations)? {
+        if !keygen.known(&target)?.is_empty() {
+            continue;
+        }
+        let lines = fetch(&tools.ssh, &target.destination, None)
+            .map_err(|e| format!("cannot get the host key of {}: {e}", target.display()))?;
+        let keys = keygen.fingerprints(&lines)?;
+        return Ok(Some(UnknownKey {
+            target,
+            lines,
+            keys,
+            hop_of,
+        }));
+    }
+    Ok(None)
+}
+
+/// The host on the way to `destination` whose server key differs from the
+/// stored one. Fetches a key of the stored type where the server has one.
+pub fn find_changed(
+    tools: &SshTools,
+    keygen: &Keygen,
+    home: &Path,
+    destination: &str,
+) -> Result<ChangedKey, String> {
+    for (target, hop_of) in chain(tools, home, &[destination.to_string()])? {
+        let known = keygen.known(&target)?;
+        let Some(first) = known.first().and_then(|(_, lines)| lines.first()) else {
+            continue;
+        };
+        let old_lines: Vec<String> = known.iter().flat_map(|(_, l)| l.clone()).collect();
+        let algorithms = host_key_algorithms(first);
+        let new_lines = fetch(&tools.ssh, &target.destination, algorithms.as_deref())
+            .or_else(|_| fetch(&tools.ssh, &target.destination, None))
+            .map_err(|e| format!("cannot get the host key of {}: {e}", target.display()))?;
+        let old = keygen.fingerprints(&old_lines)?;
+        let new = keygen.fingerprints(&new_lines)?;
+        if new
+            .iter()
+            .any(|n| old.iter().any(|o| o.fingerprint == n.fingerprint))
+        {
+            continue;
+        }
+        let user_files = known
+            .iter()
+            .map(|(file, _)| file.clone())
+            .filter(|file| target.user_files.contains(file))
+            .collect();
+        return Ok(ChangedKey {
+            target,
+            user_files,
+            old,
+            new,
+            new_lines,
+            hop_of,
+        });
+    }
+    Err("every stored host key matches its server now; try starting again".to_string())
 }
 
 /// The only writer for `known_hosts`: atomic appends, with a timestamped
