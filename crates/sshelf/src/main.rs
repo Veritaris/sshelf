@@ -4,6 +4,8 @@
 mod app;
 mod host_detail;
 mod hosts_view;
+mod orphans_window;
+mod settings_view;
 mod sidebar;
 mod theme;
 mod util;

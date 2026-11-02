@@ -9,6 +9,8 @@ use sshelf_core::core::{AppData, Command, ConfigSnapshot, Core, Event, SshInfo};
 use sshelf_core::paths::Paths;
 
 use crate::hosts_view::HostsView;
+use crate::orphans_window::OrphansWindow;
+use crate::settings_view::SettingsView;
 use crate::sidebar::{self, View};
 use crate::theme::{self, Palette};
 
@@ -25,6 +27,8 @@ pub struct SshelfApp {
     data: Option<Arc<AppData>>,
     ssh: Option<Arc<SshInfo>>,
     hosts: HostsView,
+    settings: SettingsView,
+    orphans: OrphansWindow,
     status: Option<Status>,
 }
 
@@ -50,6 +54,8 @@ impl SshelfApp {
             data: None,
             ssh: None,
             hosts: HostsView::default(),
+            settings: SettingsView::default(),
+            orphans: OrphansWindow::default(),
             status: None,
         }
     }
@@ -127,10 +133,14 @@ impl eframe::App for SshelfApp {
             .as_ref()
             .map(|d| d.orphans.clone())
             .unwrap_or_default();
-        egui::Panel::left("sidebar")
+        let orphans_clicked = egui::Panel::left("sidebar")
             .resizable(false)
             .exact_size(150.0)
-            .show(ui, |ui| sidebar::show(ui, &mut self.view, &orphans));
+            .show(ui, |ui| sidebar::show(ui, &mut self.view, &orphans))
+            .inner;
+        if orphans_clicked {
+            self.orphans.open = !self.orphans.open;
+        }
         self.status_bar(ui);
 
         let mut commands = Vec::new();
@@ -143,7 +153,20 @@ impl eframe::App for SshelfApp {
                     self.ssh.as_deref(),
                 );
             }
+            View::Settings => {
+                commands = self.settings.show(
+                    ui,
+                    self.data.as_deref(),
+                    self.ssh.as_deref(),
+                    self.config.as_deref().map(|c| c.path.as_path()),
+                );
+            }
         });
+        if self.orphans.open
+            && let Some(data) = &self.data
+        {
+            commands.extend(self.orphans.show(ui.ctx(), data));
+        }
         self.send(commands);
     }
 }

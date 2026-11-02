@@ -25,6 +25,7 @@ pub struct Palette {
     pub dim: Color32,
     /// Text on hovered widgets.
     pub text_strong: Color32,
+    pub green: Color32,
     pub yellow: Color32,
     pub red: Color32,
 }
@@ -41,6 +42,7 @@ impl Palette {
         text: Color32::from_rgb(171, 178, 191),        // #abb2bf
         dim: Color32::from_rgb(130, 137, 151),         // softer gray
         text_strong: Color32::from_rgb(215, 218, 224), // #d7dae0
+        green: Color32::from_rgb(152, 195, 121),       // #98c379
         yellow: Color32::from_rgb(229, 192, 123),      // #e5c07b
         red: Color32::from_rgb(224, 108, 117),         // #e06c75
     };
