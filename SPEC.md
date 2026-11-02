@@ -108,6 +108,8 @@ Must handle:
 - Concrete aliases (no wildcards) are listed as **hosts**.
 - Blocks with wildcard patterns (`Host *`, `Host *.prod`) and `Match` blocks are listed separately as **patterns**; they are not connectable and cannot carry metadata.
 - A multi-alias block (`Host prod-db db1`) is one host; metadata links by the **first alias**, but lookups resolve any alias.
+- A block mixing concrete aliases and wildcards (`Host web1 *.corp`) is a host with only its concrete aliases, flagged as also having wildcards. Negated patterns never make a block a host; a block with only negations is a pattern.
+- Each `Host` block is one entry. An alias defined by more than one block is reported (info diagnostic); lookups return the first block in evaluation order, which is the one ssh applies first. Alias lookup is case-sensitive, like ssh's `Host` matching.
 - Each host shows which file it comes from.
 
 ### Effective config

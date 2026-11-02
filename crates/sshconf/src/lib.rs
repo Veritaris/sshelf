@@ -7,12 +7,14 @@
 
 mod error;
 mod file;
+mod hosts;
 mod include;
 pub mod lexer;
 mod line;
 
 pub use error::{Error, Result};
 pub use file::{Block, ConfigFile};
+pub use hosts::{HostEntry, HostList, PatternEntry, PatternKind};
 pub use include::{
     ConfigSet, Diagnostic, FileId, HeaderRef, LineRef, MAX_INCLUDE_DEPTH, ResolveOptions, Severity,
 };
