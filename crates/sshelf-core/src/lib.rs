@@ -7,6 +7,7 @@
 
 pub mod history;
 pub mod metadata;
+pub mod orphans;
 pub mod paths;
 pub mod settings;
 pub mod storage;
