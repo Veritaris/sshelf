@@ -70,7 +70,9 @@ Rules:
 - **Every file has a top-level `version` integer from the very first commit.**
 - On load, files with an older version are migrated step by step (`v1 → v2 → …`). Before writing a migrated file, the original is backed up next to it.
 - A file with a *newer* version than the app understands is never overwritten; the app shows an error and runs read-only for that data.
-- All writes are atomic.
+- The same read-only treatment applies to a file that is not valid TOML, has no `version` (or a non-positive-integer one), or fails to migrate: it is shown where possible and never written. A missing file means defaults.
+- Migration backups are named `<file>.bak-v<old version>` (an existing backup is never overwritten).
+- All writes are atomic and only ever target files directly inside the app data dir.
 
 ---
 
