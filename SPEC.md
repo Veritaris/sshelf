@@ -82,6 +82,11 @@ A line-oriented concrete syntax tree. Each line is one of:
 `Blank`, `Comment`, `HostHeader`, `MatchHeader`, `Include`, `Directive`.
 Each node stores the **original raw text** plus parsed key/value(s), the **source file**, and its **position**. Blocks group a header with its following lines.
 
+Tokenization follows OpenSSH `readconf.c` (verified against OpenSSH_for_Windows 9.5p1 with `ssh -G`):
+- Trailing ` \t\r\f` is ignored for parsing.
+- Keyword, then whitespace and/or at most one `=`.
+- Arguments split like `argv_split`: `"…"`/`'…'` quotes anywhere in a word, escapes `\"`, `\'`, `\\`, `\ `; a `#` at the start of a word begins a trailing comment (OpenSSH ≥ 8.7 semantics).
+
 Must handle:
 - Case-insensitive keywords, `Key value` and `Key=value` syntax, tabs, trailing whitespace, CRLF and LF.
 - Quoted values, multi-value directives, comments at any position.
