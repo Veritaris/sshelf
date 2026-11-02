@@ -9,6 +9,7 @@ use crate::theme::Palette;
 pub enum View {
     Hosts,
     Tunnels,
+    Groups,
     Settings,
 }
 
@@ -20,6 +21,7 @@ pub fn show(ui: &mut egui::Ui, view: &mut View, orphans: &[Orphan]) -> bool {
     ui.add_space(12.0);
     ui.selectable_value(view, View::Hosts, "Hosts");
     ui.selectable_value(view, View::Tunnels, "Tunnels");
+    ui.selectable_value(view, View::Groups, "Groups");
     ui.selectable_value(view, View::Settings, "Settings");
 
     let mut clicked = false;

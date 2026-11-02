@@ -9,6 +9,7 @@ use sshelf_core::core::{AppData, Command, ConfigSnapshot, Core, Event, SshInfo};
 use sshelf_core::paths::Paths;
 use sshelf_core::supervisor::Snapshot;
 
+use crate::groups_view::GroupsView;
 use crate::hosts_view::HostsView;
 use crate::orphans_window::OrphansWindow;
 use crate::settings_view::SettingsView;
@@ -31,6 +32,7 @@ pub struct SshelfApp {
     tunnel_states: Option<Arc<Snapshot>>,
     hosts: HostsView,
     tunnels: TunnelsView,
+    groups: GroupsView,
     settings: SettingsView,
     orphans: OrphansWindow,
     status: Option<Status>,
@@ -60,6 +62,7 @@ impl SshelfApp {
             tunnel_states: None,
             hosts: HostsView::default(),
             tunnels: TunnelsView::default(),
+            groups: GroupsView::default(),
             settings: SettingsView::default(),
             orphans: OrphansWindow::default(),
             status: None,
@@ -167,6 +170,11 @@ impl eframe::App for SshelfApp {
                     self.data.as_deref(),
                     self.tunnel_states.as_deref(),
                 );
+            }
+            View::Groups => {
+                commands =
+                    self.groups
+                        .show(ui, self.data.as_deref(), self.tunnel_states.as_deref());
             }
             View::Settings => {
                 commands = self.settings.show(
