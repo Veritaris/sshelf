@@ -1,0 +1,19 @@
+[package]
+name = "sshelf"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Visual layer over your ~/.ssh/config: hosts, effective config, tunnels and groups"
+
+[dependencies]
+sshconf = { path = "../sshconf" }
+sshelf-core = { path = "../sshelf-core" }
+egui = "0.37.0"
+# Linux needs at least one windowing backend once default features are off.
+eframe = { version = "0.37.0", default-features = false, features = [
+    "accesskit",
+    "default_fonts",
+    "glow",
+    "wayland",
+    "x11",
+] }

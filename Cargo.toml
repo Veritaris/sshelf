@@ -4,6 +4,7 @@ members = [
     "crates/sshconf",
     "crates/sshelf-core",
     "crates/fake-ssh",
+    "crates/sshelf",
 ]
 
 [workspace.package]
