@@ -16,6 +16,7 @@ pub mod process;
 pub mod settings;
 pub mod ssh;
 pub mod storage;
+pub mod supervisor;
 pub mod terminal;
 pub mod tunnels;
 pub mod watch;

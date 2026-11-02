@@ -211,7 +211,8 @@ ssh -v -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o BatchMode=yes
 - **Start group:** pre-check all ports first; if any conflict, report it and start nothing. Otherwise start tunnels in parallel.
 - **Partial failure:** remaining tunnels keep running; the group shows **degraded** (e.g. 2/3) with a *Retry failed* action.
 - **Stop group:** releases the group's ownership; a tunnel stops only when no owners remain. If a tunnel stays up, show why ("still used by: Work on staging").
-- States per tunnel: `Stopped`, `Starting`, `Running`, `Failed(reason)`, plus host key / auth sub-states (§9).
+- States per tunnel: `Stopped`, `Starting`, `Running`, `Stopping`, `Failed(reason)`, plus host key / auth sub-states (§9). `Failed` keeps the tunnel's owners and shows ssh's last non-debug stderr line; starting it (or its group) again retries it. A start that arrives while a tunnel is `Stopping` runs once the old process has exited, so the two never compete for a port.
+- The last 200 stderr lines per tunnel are kept in memory (not persisted).
 - Tunnels stop when the app quits (no detached background processes).
 
 ### Testing

@@ -1,0 +1,681 @@
+//! Tunnel supervisor (SPEC.md §7): runs one ssh process per tunnel on its
+//! own thread, independent of the UI loop.
+//!
+//! - A tunnel runs while at least one owner (a manual start or a group)
+//!   holds it; starting it again only adds an owner.
+//! - Before spawning, every local listen port is checked; if any is taken,
+//!   nothing in that request starts.
+//! - A tunnel is *Running* once ssh logs `Entering interactive session.`; an
+//!   exit nobody asked for makes it *Failed* with ssh's last message.
+//! - Shutting down stops every tunnel (no detached processes).
+
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::io::{BufRead, BufReader};
+use std::net::TcpListener;
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
+use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
+
+use crate::child::{self, KILL_GRACE, TreeKiller};
+use crate::tunnels::{Group, Tunnel};
+
+/// Stderr lines kept per tunnel.
+pub const LOG_LINES: usize = 200;
+/// ssh's `-v` line once authentication and forward setup are done.
+pub const READY_MARKER: &str = "Entering interactive session.";
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Owner {
+    Manual,
+    /// Group id.
+    Group(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TunnelState {
+    Stopped,
+    Starting,
+    Running,
+    /// Being stopped; the process has not exited yet.
+    Stopping,
+    /// Exited without being asked to; the reason is ssh's last message.
+    Failed(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogLine {
+    pub text: String,
+    /// `debug1:`-style output from `-v`; hidden unless asked for.
+    pub debug: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TunnelStatus {
+    pub state: TunnelState,
+    pub owners: BTreeSet<Owner>,
+    pub log: VecDeque<LogLine>,
+    pub pid: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupState {
+    Stopped,
+    Starting,
+    Running,
+    /// Some tunnels are not running (e.g. failed): `running` of `total`.
+    Degraded {
+        running: usize,
+        total: usize,
+    },
+}
+
+/// Status of every tunnel the supervisor has seen, by tunnel id.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Snapshot {
+    pub tunnels: BTreeMap<String, TunnelStatus>,
+}
+
+impl Snapshot {
+    pub fn state(&self, tunnel_id: &str) -> TunnelState {
+        self.tunnels
+            .get(tunnel_id)
+            .map_or(TunnelState::Stopped, |s| s.state.clone())
+    }
+
+    pub fn group_state(&self, group: &Group) -> GroupState {
+        let owner = Owner::Group(group.id.clone());
+        let members: Vec<&TunnelStatus> = group
+            .tunnels
+            .iter()
+            .filter_map(|id| self.tunnels.get(id))
+            .filter(|s| s.owners.contains(&owner))
+            .collect();
+        if members.is_empty() {
+            return GroupState::Stopped;
+        }
+        let total = group.tunnels.len();
+        let running = members
+            .iter()
+            .filter(|s| s.state == TunnelState::Running)
+            .count();
+        let failed = members
+            .iter()
+            .any(|s| matches!(s.state, TunnelState::Failed(_)));
+        if running == total {
+            GroupState::Running
+        } else if !failed && members.iter().any(|s| s.state == TunnelState::Starting) {
+            GroupState::Starting
+        } else {
+            GroupState::Degraded { running, total }
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum Request {
+    /// Adds `owner`; spawns unless already running or starting.
+    Start {
+        tunnel: Tunnel,
+        owner: Owner,
+    },
+    /// Removes `owner`; stops the tunnel when no owners remain.
+    Stop {
+        tunnel_id: String,
+        owner: Owner,
+    },
+    /// Owns every tunnel of the group; (re)starts the stopped and failed ones
+    /// together, or none if a port is taken. Also "Retry failed".
+    StartGroup {
+        group: Group,
+        tunnels: Vec<Tunnel>,
+    },
+    StopGroup {
+        group_id: String,
+    },
+    /// Stops the tunnel whatever its owners (e.g. before deleting it).
+    Remove {
+        tunnel_id: String,
+    },
+    /// ssh binary for processes started from now on.
+    SetSsh(Option<PathBuf>),
+}
+
+#[derive(Debug, Clone)]
+pub enum SupervisorEvent {
+    Snapshot(Arc<Snapshot>),
+    /// A request that could not be carried out (e.g. a port conflict).
+    Error(String),
+}
+
+enum Message {
+    Request(Request),
+    Line {
+        id: String,
+        generation: u64,
+        text: String,
+    },
+    Exited {
+        id: String,
+        generation: u64,
+        code: Option<i32>,
+    },
+    Shutdown,
+}
+
+/// Handle to the supervisor thread; dropping it stops every tunnel.
+pub struct Supervisor {
+    tx: Sender<Message>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl Supervisor {
+    pub fn start(
+        ssh: Option<PathBuf>,
+        on_event: impl Fn(SupervisorEvent) + Send + 'static,
+    ) -> Self {
+        let (tx, rx) = mpsc::channel();
+        let worker_tx = tx.clone();
+        let thread = thread::Builder::new()
+            .name("sshelf-supervisor".into())
+            .spawn(move || {
+                Worker {
+                    ssh,
+                    tx: worker_tx,
+                    on_event: Box::new(on_event),
+                    entries: BTreeMap::new(),
+                    next_generation: 0,
+                    changed: false,
+                }
+                .run(rx)
+            })
+            .expect("spawning the supervisor thread");
+        Self {
+            tx,
+            thread: Some(thread),
+        }
+    }
+
+    pub fn send(&self, request: Request) {
+        let _ = self.tx.send(Message::Request(request));
+    }
+}
+
+impl Drop for Supervisor {
+    fn drop(&mut self) {
+        let _ = self.tx.send(Message::Shutdown);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// Local ports of `tunnels` that are taken (or wanted twice), as messages.
+pub fn check_ports(tunnels: &[&Tunnel]) -> Vec<String> {
+    let mut problems = Vec::new();
+    let mut wanted: Vec<(String, u16, &str)> = Vec::new();
+    for tunnel in tunnels {
+        for (addr, port) in tunnel.forwards.iter().filter_map(|f| f.local_listen()) {
+            if let Some((_, _, other)) = wanted.iter().find(|(a, p, _)| *a == addr && *p == port) {
+                problems.push(format!(
+                    "port {port} is used by both \"{other}\" and \"{}\"",
+                    tunnel.name
+                ));
+                continue;
+            }
+            if TcpListener::bind((addr.as_str(), port)).is_err() {
+                problems.push(format!(
+                    "port {port} on {addr} is already in use (needed by \"{}\")",
+                    tunnel.name
+                ));
+            }
+            wanted.push((addr, port, &tunnel.name));
+        }
+    }
+    problems
+}
+
+struct Process {
+    generation: u64,
+    killer: TreeKiller,
+}
+
+struct Entry {
+    tunnel: Tunnel,
+    status: TunnelStatus,
+    process: Option<Process>,
+    /// Start again once the current (stopping) process has exited.
+    restart: bool,
+}
+
+struct Worker {
+    ssh: Option<PathBuf>,
+    tx: Sender<Message>,
+    on_event: Box<dyn Fn(SupervisorEvent) + Send>,
+    entries: BTreeMap<String, Entry>,
+    next_generation: u64,
+    changed: bool,
+}
+
+impl Worker {
+    fn run(mut self, rx: Receiver<Message>) {
+        while let Ok(message) = rx.recv() {
+            if !self.handle(message) {
+                return self.shutdown(&rx);
+            }
+            // Coalesce bursts (e.g. many log lines) into one snapshot.
+            while let Ok(message) = rx.try_recv() {
+                if !self.handle(message) {
+                    return self.shutdown(&rx);
+                }
+            }
+            self.publish();
+        }
+    }
+
+    /// `false` on shutdown.
+    fn handle(&mut self, message: Message) -> bool {
+        match message {
+            Message::Request(request) => self.request(request),
+            Message::Line {
+                id,
+                generation,
+                text,
+            } => self.line(&id, generation, text),
+            Message::Exited {
+                id,
+                generation,
+                code,
+            } => self.exited(&id, generation, code),
+            Message::Shutdown => return false,
+        }
+        true
+    }
+
+    fn publish(&mut self) {
+        if !self.changed {
+            return;
+        }
+        self.changed = false;
+        let snapshot = Snapshot {
+            tunnels: self
+                .entries
+                .iter()
+                .map(|(id, e)| (id.clone(), e.status.clone()))
+                .collect(),
+        };
+        (self.on_event)(SupervisorEvent::Snapshot(Arc::new(snapshot)));
+    }
+
+    fn error(&self, message: String) {
+        (self.on_event)(SupervisorEvent::Error(message));
+    }
+
+    fn request(&mut self, request: Request) {
+        match request {
+            Request::Start { tunnel, owner } => self.start(vec![tunnel], owner),
+            Request::Stop { tunnel_id, owner } => self.release(&tunnel_id, &owner),
+            Request::StartGroup { group, tunnels } => {
+                let wanted: Vec<Tunnel> = tunnels
+                    .into_iter()
+                    .filter(|t| group.tunnels.contains(&t.id))
+                    .collect();
+                self.start(wanted, Owner::Group(group.id))
+            }
+            Request::StopGroup { group_id } => {
+                let owner = Owner::Group(group_id);
+                let ids: Vec<String> = self
+                    .entries
+                    .iter()
+                    .filter(|(_, e)| e.status.owners.contains(&owner))
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                for id in ids {
+                    self.release(&id, &owner);
+                }
+            }
+            Request::Remove { tunnel_id } => {
+                if let Some(entry) = self.entries.get_mut(&tunnel_id) {
+                    entry.status.owners.clear();
+                    entry.restart = false;
+                    if let Some(process) = entry.process.take() {
+                        process.killer.kill();
+                    }
+                    self.entries.remove(&tunnel_id);
+                    self.changed = true;
+                }
+            }
+            Request::SetSsh(ssh) => self.ssh = ssh,
+        }
+    }
+
+    /// Adds `owner` to every tunnel; spawns those not running, or none of
+    /// them when a port is taken.
+    fn start(&mut self, tunnels: Vec<Tunnel>, owner: Owner) {
+        let to_spawn: Vec<&Tunnel> = tunnels
+            .iter()
+            .filter(|t| {
+                self.entries.get(&t.id).is_none_or(|e| {
+                    matches!(
+                        e.status.state,
+                        TunnelState::Stopped | TunnelState::Failed(_)
+                    )
+                })
+            })
+            .collect();
+        let problems = check_ports(&to_spawn);
+        if !problems.is_empty() {
+            return self.error(format!("Nothing started: {}", problems.join("; ")));
+        }
+        let to_spawn: Vec<String> = to_spawn.iter().map(|t| t.id.clone()).collect();
+
+        for tunnel in tunnels {
+            let id = tunnel.id.clone();
+            let entry = self.entries.entry(id.clone()).or_insert_with(|| Entry {
+                tunnel: tunnel.clone(),
+                status: TunnelStatus {
+                    state: TunnelState::Stopped,
+                    owners: BTreeSet::new(),
+                    log: VecDeque::new(),
+                    pid: None,
+                },
+                process: None,
+                restart: false,
+            });
+            entry.status.owners.insert(owner.clone());
+            self.changed = true;
+            if entry.status.state == TunnelState::Stopping {
+                entry.tunnel = tunnel;
+                entry.restart = true;
+            } else if to_spawn.contains(&id) {
+                entry.tunnel = tunnel;
+                self.spawn(&id);
+            }
+        }
+    }
+
+    fn release(&mut self, id: &str, owner: &Owner) {
+        let Some(entry) = self.entries.get_mut(id) else {
+            return;
+        };
+        if !entry.status.owners.remove(owner) {
+            return;
+        }
+        self.changed = true;
+        if !entry.status.owners.is_empty() {
+            return;
+        }
+        entry.restart = false;
+        match &entry.process {
+            Some(process) => {
+                process.killer.kill();
+                entry.status.state = TunnelState::Stopping;
+            }
+            None => entry.status.state = TunnelState::Stopped,
+        }
+    }
+
+    fn spawn(&mut self, id: &str) {
+        let Some(ssh) = self.ssh.clone() else {
+            return self.fail(id, "no ssh binary".to_string());
+        };
+        let entry = self.entries.get_mut(id).expect("spawn of a known tunnel");
+        let mut cmd = Command::new(&ssh);
+        cmd.args(entry.tunnel.ssh_args())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        let spawned = match child::spawn_tree(cmd) {
+            Ok(spawned) => spawned,
+            Err(e) => return self.fail(id, format!("cannot start {}: {e}", ssh.display())),
+        };
+        self.next_generation += 1;
+        let generation = self.next_generation;
+        let mut child = spawned.child;
+        let pid = child.id();
+
+        if let Some(stderr) = child.stderr.take() {
+            let tx = self.tx.clone();
+            let id = id.to_string();
+            thread::spawn(move || {
+                for line in BufReader::new(stderr).lines() {
+                    let Ok(text) = line else { break };
+                    let message = Message::Line {
+                        id: id.clone(),
+                        generation,
+                        text,
+                    };
+                    if tx.send(message).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+        let tx = self.tx.clone();
+        let waiter_id = id.to_string();
+        thread::spawn(move || {
+            let code = child.wait().ok().and_then(|s| s.code());
+            let _ = tx.send(Message::Exited {
+                id: waiter_id,
+                generation,
+                code,
+            });
+        });
+
+        let entry = self.entries.get_mut(id).expect("spawn of a known tunnel");
+        entry.process = Some(Process {
+            generation,
+            killer: spawned.killer,
+        });
+        entry.status.state = TunnelState::Starting;
+        entry.status.pid = Some(pid);
+        push_log(&mut entry.status.log, format!("starting ssh (pid {pid})"));
+        self.changed = true;
+    }
+
+    fn fail(&mut self, id: &str, reason: String) {
+        if let Some(entry) = self.entries.get_mut(id) {
+            push_log(&mut entry.status.log, reason.clone());
+            entry.status.state = TunnelState::Failed(reason);
+            entry.status.pid = None;
+            self.changed = true;
+        }
+    }
+
+    fn current(&mut self, id: &str, generation: u64) -> Option<&mut Entry> {
+        self.entries.get_mut(id).filter(|e| {
+            e.process
+                .as_ref()
+                .is_some_and(|p| p.generation == generation)
+        })
+    }
+
+    fn line(&mut self, id: &str, generation: u64, text: String) {
+        let Some(entry) = self.current(id, generation) else {
+            return;
+        };
+        if entry.status.state == TunnelState::Starting && text.contains(READY_MARKER) {
+            entry.status.state = TunnelState::Running;
+        }
+        push_log(&mut entry.status.log, text);
+        self.changed = true;
+    }
+
+    fn exited(&mut self, id: &str, generation: u64, code: Option<i32>) {
+        let Some(entry) = self.current(id, generation) else {
+            return;
+        };
+        entry.process = None;
+        entry.status.pid = None;
+        if entry.status.state == TunnelState::Stopping {
+            entry.status.state = TunnelState::Stopped;
+            push_log(&mut entry.status.log, "stopped".to_string());
+            let restart = entry.restart && !entry.status.owners.is_empty();
+            entry.restart = false;
+            let tunnel = entry.tunnel.clone();
+            self.changed = true;
+            if restart {
+                let problems = check_ports(&[&tunnel]);
+                if problems.is_empty() {
+                    self.spawn(id);
+                } else {
+                    self.fail(id, problems.join("; "));
+                }
+            }
+            return;
+        }
+        let reason = entry
+            .status
+            .log
+            .iter()
+            .rev()
+            .find(|l| !l.debug && !l.text.starts_with("starting ssh"))
+            .map(|l| l.text.clone())
+            .unwrap_or_else(|| format!("ssh exited with code {code:?}"));
+        entry.status.state = TunnelState::Failed(reason);
+        self.changed = true;
+    }
+
+    /// Stops every tunnel and waits (bounded) for the processes to exit.
+    fn shutdown(&mut self, rx: &Receiver<Message>) {
+        let mut waiting: BTreeMap<String, u64> = BTreeMap::new();
+        for (id, entry) in &mut self.entries {
+            if let Some(process) = entry.process.take() {
+                process.killer.kill();
+                waiting.insert(id.clone(), process.generation);
+                // Dropping the killer finishes the job (Windows: closes the job).
+                drop(process);
+            }
+        }
+        let deadline = Instant::now() + KILL_GRACE + Duration::from_secs(1);
+        while !waiting.is_empty() {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match rx.recv_timeout(left) {
+                Ok(Message::Exited { id, generation, .. }) => {
+                    if waiting.get(&id) == Some(&generation) {
+                        waiting.remove(&id);
+                    }
+                }
+                Ok(_) => {}
+                Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => break,
+            }
+        }
+    }
+}
+
+fn push_log(log: &mut VecDeque<LogLine>, text: String) {
+    let debug = text.starts_with("debug");
+    log.push_back(LogLine { text, debug });
+    while log.len() > LOG_LINES {
+        log.pop_front();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tunnels::{DEFAULT_BIND, Forward, ForwardKind};
+
+    fn tunnel(id: &str, port: u16) -> Tunnel {
+        Tunnel {
+            id: id.into(),
+            name: format!("tunnel {id}"),
+            host: "h".into(),
+            forwards: vec![Forward {
+                kind: ForwardKind::L,
+                bind: DEFAULT_BIND.into(),
+                listen: port,
+                target: Some("localhost:1".into()),
+            }],
+        }
+    }
+
+    fn status(state: TunnelState, owners: &[&Owner]) -> TunnelStatus {
+        TunnelStatus {
+            state,
+            owners: owners.iter().map(|o| (*o).clone()).collect(),
+            log: VecDeque::new(),
+            pid: None,
+        }
+    }
+
+    #[test]
+    fn port_check_finds_taken_and_duplicate_ports() {
+        let held = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let taken = held.local_addr().unwrap().port();
+        let free = TcpListener::bind(("127.0.0.1", 0))
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let (a, b, c) = (tunnel("a", taken), tunnel("b", free), tunnel("c", free));
+        let problems = check_ports(&[&a, &b, &c]);
+        assert_eq!(problems.len(), 2, "{problems:?}");
+        assert!(problems[0].contains("already in use"), "{problems:?}");
+        assert!(problems[1].contains("used by both"), "{problems:?}");
+        assert!(check_ports(&[&b]).is_empty());
+    }
+
+    #[test]
+    fn group_states() {
+        let g = Owner::Group("g".into());
+        let group = Group {
+            id: "g".into(),
+            name: "G".into(),
+            tunnels: vec!["a".into(), "b".into()],
+        };
+        let snapshot = |a: TunnelStatus, b: TunnelStatus| Snapshot {
+            tunnels: [("a".into(), a), ("b".into(), b)].into(),
+        };
+        let other = Owner::Group("other".into());
+        assert_eq!(
+            snapshot(
+                status(TunnelState::Running, &[&other]),
+                status(TunnelState::Stopped, &[])
+            )
+            .group_state(&group),
+            GroupState::Stopped
+        );
+        assert_eq!(
+            snapshot(
+                status(TunnelState::Running, &[&g]),
+                status(TunnelState::Running, &[&g, &other])
+            )
+            .group_state(&group),
+            GroupState::Running
+        );
+        assert_eq!(
+            snapshot(
+                status(TunnelState::Running, &[&g]),
+                status(TunnelState::Starting, &[&g])
+            )
+            .group_state(&group),
+            GroupState::Starting
+        );
+        assert_eq!(
+            snapshot(
+                status(TunnelState::Running, &[&g]),
+                status(TunnelState::Failed("x".into()), &[&g])
+            )
+            .group_state(&group),
+            GroupState::Degraded {
+                running: 1,
+                total: 2
+            }
+        );
+    }
+
+    #[test]
+    fn log_is_capped_and_marks_debug_lines() {
+        let mut log = VecDeque::new();
+        for i in 0..(LOG_LINES + 10) {
+            push_log(&mut log, format!("line {i}"));
+        }
+        push_log(&mut log, "debug1: x".into());
+        assert_eq!(log.len(), LOG_LINES);
+        assert_eq!(log.front().unwrap().text, "line 11");
+        assert!(log.back().unwrap().debug);
+    }
+}
