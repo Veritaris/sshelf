@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use egui::RichText;
 use sshelf_core::agent_service::{self, AgentService};
 use sshelf_core::core::{AppData, Command, SshInfo};
-use sshelf_core::settings::{DEFAULT_TERMINAL_COMMAND, Settings};
+use sshelf_core::settings::{CloseBehavior, DEFAULT_TERMINAL_COMMAND, Settings};
 use sshelf_core::ssh::{AgentStatus, ToolSource};
 use sshelf_core::storage::LoadStatus;
 use sshelf_core::terminal;
@@ -20,6 +20,7 @@ pub struct SettingsView {
     base: Option<Settings>,
     ssh_path: String,
     terminal_command: String,
+    close_behavior: CloseBehavior,
 }
 
 impl SettingsView {
@@ -28,6 +29,7 @@ impl SettingsView {
         Settings {
             ssh_path: (!path.is_empty()).then(|| PathBuf::from(path)),
             terminal_command: self.terminal_command.clone(),
+            close_behavior: self.close_behavior,
         }
     }
 
@@ -40,6 +42,7 @@ impl SettingsView {
                 .map(|p| p.display().to_string())
                 .unwrap_or_default();
             self.terminal_command = saved.terminal_command.clone();
+            self.close_behavior = saved.close_behavior;
             self.base = Some(saved.clone());
         }
     }
@@ -74,6 +77,8 @@ impl SettingsView {
                 });
                 ui.separator();
                 self.terminal_section(ui, ssh);
+                ui.separator();
+                self.close_section(ui);
                 ui.separator();
                 self.save_buttons(ui, data, &mut commands);
                 ui.separator();
@@ -112,6 +117,29 @@ impl SettingsView {
             .map(|t| t.describe())
             .unwrap_or_else(|| "none found".to_string());
         ui.label(RichText::new(format!("Detected terminal: {terminal}")).color(p.dim));
+    }
+
+    fn close_section(&mut self, ui: &mut egui::Ui) {
+        ui.label(RichText::new("Closing").strong());
+        ui.horizontal(|ui| {
+            let label = ui.label("With tunnels running");
+            let text = |b: CloseBehavior| match b {
+                CloseBehavior::Ask => "Ask every time",
+                CloseBehavior::StopAndQuit => "Stop the tunnels and quit",
+            };
+            egui::ComboBox::from_id_salt("close_behavior")
+                .selected_text(text(self.close_behavior))
+                .show_ui(ui, |ui| {
+                    for behavior in [CloseBehavior::Ask, CloseBehavior::StopAndQuit] {
+                        ui.selectable_value(&mut self.close_behavior, behavior, text(behavior));
+                    }
+                })
+                .response
+                .labelled_by(label.id);
+            if self.close_behavior != CloseBehavior::Ask && ui.button("Reset").clicked() {
+                self.close_behavior = CloseBehavior::Ask;
+            }
+        });
     }
 
     fn save_buttons(&mut self, ui: &mut egui::Ui, data: &AppData, commands: &mut Vec<Command>) {

@@ -17,6 +17,19 @@ pub struct Settings {
     pub ssh_path: Option<PathBuf>,
     /// Command template for "Connect" (see [`crate::terminal`]).
     pub terminal_command: String,
+    /// What closing the window does while tunnels run (SPEC.md §10).
+    pub close_behavior: CloseBehavior,
+}
+
+/// What closing the window does while tunnels run.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CloseBehavior {
+    /// Ask every time.
+    #[default]
+    Ask,
+    /// Remembered choice: stop the tunnels and quit without asking.
+    StopAndQuit,
 }
 
 impl Default for Settings {
@@ -24,6 +37,7 @@ impl Default for Settings {
         Self {
             ssh_path: None,
             terminal_command: DEFAULT_TERMINAL_COMMAND.to_string(),
+            close_behavior: CloseBehavior::Ask,
         }
     }
 }
@@ -45,8 +59,14 @@ mod tests {
         let settings = Settings {
             ssh_path: Some(PathBuf::from("/opt/ssh/bin/ssh")),
             terminal_command: "alacritty -e {ssh} {alias}".into(),
+            close_behavior: CloseBehavior::StopAndQuit,
         };
         store.save(&settings).unwrap();
+        let text = std::fs::read_to_string(store.path::<Settings>()).unwrap();
+        assert!(
+            text.contains("close_behavior = \"stop-and-quit\""),
+            "{text}"
+        );
         assert_eq!(store.load::<Settings>().data, settings);
 
         std::fs::write(store.path::<Settings>(), "version = 1\n").unwrap();

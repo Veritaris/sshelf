@@ -91,6 +91,7 @@ fn full_session_never_writes_the_ssh_config() {
                 fake_ssh().display(),
                 record.display()
             ),
+            ..Settings::default()
         })
         .unwrap();
     let mut hosts = HostsFile::default();

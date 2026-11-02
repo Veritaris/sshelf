@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod close_guard;
 mod groups_view;
 mod host_detail;
 mod hostkey_modal;

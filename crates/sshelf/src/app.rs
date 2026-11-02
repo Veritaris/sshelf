@@ -9,6 +9,7 @@ use sshelf_core::core::{AppData, Command, ConfigSnapshot, Core, Event, SshInfo};
 use sshelf_core::paths::Paths;
 use sshelf_core::supervisor::Snapshot;
 
+use crate::close_guard::{self, CloseGuard};
 use crate::groups_view::GroupsView;
 use crate::hostkey_modal::HostKeyModals;
 use crate::hosts_view::HostsView;
@@ -37,6 +38,7 @@ pub struct SshelfApp {
     settings: SettingsView,
     orphans: OrphansWindow,
     hostkeys: HostKeyModals,
+    close: CloseGuard,
     status: Option<Status>,
 }
 
@@ -68,6 +70,7 @@ impl SshelfApp {
             settings: SettingsView::default(),
             orphans: OrphansWindow::default(),
             hostkeys: HostKeyModals::default(),
+            close: CloseGuard::default(),
             status: None,
         }
     }
@@ -204,6 +207,11 @@ impl eframe::App for SshelfApp {
             commands.extend(self.orphans.show(ui.ctx(), data, &hosts));
         }
         commands.extend(self.hostkeys.show(ui.ctx()));
+        commands.extend(self.close.update(
+            ui.ctx(),
+            close_guard::running_count(self.tunnel_states.as_deref()),
+            self.data.as_deref().map(|d| &d.settings),
+        ));
         if let Some(host) = self.hosts.detail.take_new_tunnel()
             && let Some(data) = &self.data
         {

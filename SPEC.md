@@ -292,7 +292,7 @@ Before starting a tunnel, determine the host key state using values from `ssh -G
 - If no tunnels are running: close immediately.
 - If tunnels are running: modal "N tunnels are running and will be stopped".
   - Buttons: **Minimize to tray** (only when a tray is available — milestone 6) · **Stop N tunnels and quit** · **Cancel**.
-  - Checkbox: *Remember my choice*; resettable in Settings.
+  - Checkbox: *Remember my choice*; resettable in Settings. Only a quitting choice can be remembered (*Cancel* is not): once remembered, closing with running tunnels stops them and quits without asking, until reset in Settings (`close_behavior` in `settings.toml`).
 - Cmd+Q on macOS and Quit from the tray go through the same logic.
 
 ### Tray (milestone 6)
@@ -352,7 +352,7 @@ Each milestone ends with its acceptance criteria met, tests green on all three O
 - Unknown-key confirmation modal and changed-key replace modal (§9), including jump-chain ordering.
 - Clear "key not in agent" feedback.
 - Close modal (without tray option yet), remembered choice + reset.
-- **Done when:** a brand-new server and a reinstalled server can both be handled entirely from the app; quitting with running tunnels always asks.
+- **Done when:** a brand-new server and a reinstalled server can both be handled entirely from the app; quitting with running tunnels always asks (unless the user chose to remember "stop and quit").
 
 ### M5 — Config editing
 - Structured form + raw editor on the same CST node, `ssh -G -F` validation, rename with app-data update.
