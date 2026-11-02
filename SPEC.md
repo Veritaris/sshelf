@@ -265,9 +265,11 @@ Before starting a tunnel, determine the host key state using values from `ssh -G
 
 ### Terminal launch ("Connect")
 
-- Configurable command template with placeholders, e.g. `{terminal_cmd} {ssh} {alias}`.
+- Configurable command template with placeholders, e.g. `{terminal_cmd} {ssh} {alias}` (the default).
+  - The template is split into words on whitespace; `"…"` groups a word; there are no escapes and no shell. `{ssh}` (ssh binary path) and `{alias}` are substituted inside words, so an alias never adds arguments or commands.
+  - `{terminal_cmd}` is only allowed as the first word: the remaining words run in the detected per-OS terminal. Without it, the template is the full command line of a terminal of the user's choice (e.g. `alacritty -e {ssh} {alias}`).
 - Per-OS defaults:
-  - Windows: Windows Terminal (`wt.exe`) if present, otherwise `cmd`.
+  - Windows: Windows Terminal (`wt.exe new-tab --title <alias> …`) if present, otherwise ssh runs directly in a new console window (equivalent to `cmd`, without its quoting rules).
   - macOS: Terminal.app (via `osascript`).
   - Linux: first available of `$TERMINAL`, `x-terminal-emulator`, common emulators (gnome-terminal, konsole, alacritty, kitty, wezterm…).
 - Each launch from the app is recorded in `history.toml` (only app-launched sessions can be tracked; say so in the UI).
