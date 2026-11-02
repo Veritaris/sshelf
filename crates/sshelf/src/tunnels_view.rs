@@ -4,6 +4,7 @@
 use egui::RichText;
 use sshconf::HostList;
 use sshelf_core::core::{AppData, Command, ConfigSnapshot};
+use sshelf_core::hints;
 use sshelf_core::supervisor::{Owner, Snapshot, TunnelState, TunnelStatus};
 use sshelf_core::tunnels::{DEFAULT_BIND, Forward, ForwardKind, Tunnel, TunnelsFile};
 
@@ -181,6 +182,9 @@ impl TunnelsView {
         ui.label(RichText::new(format!("via {}", tunnel.host)).color(p.dim));
         if let TunnelState::Failed(reason) = &state {
             ui.colored_label(p.red, reason);
+            if let Some(hint) = hints::failure_hint(reason) {
+                ui.label(RichText::new(hint).color(p.dim));
+            }
         }
         if let Some(status) = status
             && !status.owners.is_empty()
@@ -408,8 +412,17 @@ fn start_stop(ui: &mut egui::Ui, tunnel: &Tunnel, states: &Snapshot, commands: &
     let manual = status.is_some_and(|s| s.owners.contains(&Owner::Manual));
     let state = states.state(&tunnel.id);
     if manual {
+        // Laid out right to left: Stop ends up rightmost.
         if ui.small_button("⏹ Stop").clicked() {
             commands.push(Command::StopTunnel(tunnel.id.clone()));
+        }
+        if matches!(state, TunnelState::Failed(_))
+            && ui
+                .small_button("↻ Retry")
+                .on_hover_text("Start this tunnel again")
+                .clicked()
+        {
+            commands.push(Command::StartTunnel(tunnel.id.clone()));
         }
     } else {
         let label = if matches!(state, TunnelState::Failed(_)) {
@@ -555,6 +568,22 @@ mod tests {
         harness.step();
         harness.step();
         harness.get_by_label("debug1: hidden");
+    }
+
+    #[test]
+    fn failed_tunnel_offers_retry_and_a_hint() {
+        let view = TunnelsView {
+            selected: Some("t-1".into()),
+            ..TunnelsView::default()
+        };
+        let reason = "Error: remote port forwarding failed for listen port 6443";
+        let mut harness = harness(fixture(TunnelState::Failed(reason.into())), view);
+        harness.step();
+        harness.get_by_label(reason);
+        harness.get_by_label_contains("already in use there");
+        harness.get_all_by_label("↻ Retry").next().unwrap().click();
+        harness.step();
+        assert_eq!(harness.state().1, [Command::StartTunnel("t-1".into())]);
     }
 
     #[test]

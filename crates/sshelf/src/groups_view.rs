@@ -4,6 +4,7 @@
 
 use egui::RichText;
 use sshelf_core::core::{AppData, Command};
+use sshelf_core::hints;
 use sshelf_core::supervisor::{GroupState, Owner, Snapshot, TunnelState};
 use sshelf_core::tunnels::Group;
 
@@ -169,6 +170,9 @@ impl GroupsView {
                     });
                     if let TunnelState::Failed(reason) = &tunnel_state {
                         ui.label(RichText::new(reason).small().color(p.red));
+                        if let Some(hint) = hints::failure_hint(reason) {
+                            ui.label(RichText::new(hint).small().color(p.dim));
+                        }
                     }
                 }
             });

@@ -8,6 +8,7 @@
 pub mod agent_service;
 pub mod child;
 pub mod core;
+pub mod hints;
 pub mod history;
 pub mod metadata;
 pub mod orphans;
