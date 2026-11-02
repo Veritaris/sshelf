@@ -1,0 +1,355 @@
+# sshelf — Project Specification
+
+sshelf is a cross-platform desktop app (Windows, macOS, Linux) that puts a visual layer over the user's real `~/.ssh/config`: browse hosts, see their effective configuration, edit them safely, launch SSH sessions, and manage port-forwarding tunnels and groups of tunnels.
+
+- Language: Rust
+- GUI: egui / eframe
+- License: MIT
+- Signing: none for now (unsigned builds for all platforms)
+
+This document is the source of truth for scope and design. It describes the **MVP**, the **iterations** after it, and the **final shape**. Implement milestone by milestone; do not pull later-milestone features forward unless this document is updated first.
+
+---
+
+## 1. Core principles (hard rules)
+
+1. **`ssh_config` is the source of truth for hosts.** The app never keeps its own list of connectable machines. A host exists if and only if it exists in the user's ssh config (including `Include`d files).
+2. **Everything else lives in the app's own data folder**, linked to hosts by alias. If app data references an alias that no longer exists, that is an *orphan* and is surfaced to the user (see §6), never silently deleted.
+3. **Lossless config editing.** Lines the user did not change are written back byte-for-byte: comments, blank lines, indentation, tabs, CRLF, ordering, unknown directives — all preserved.
+4. **Shell out to the system `ssh`.** No SSH library for connections or tunnels. This keeps agent, `ProxyJump`, `ProxyCommand`, `known_hosts` and all user config behavior identical to the command line.
+5. **Never read existing private keys.** The app only references `IdentityFile` paths and defers to the agent. It never stores passwords or passphrases. It *may* generate new keys (milestone 7); key material exists only in memory during generation and is zeroized afterward.
+6. **Effective configuration comes from `ssh -G <alias>`**, not from reimplementing ssh's resolution rules.
+7. **Never bypass host key checks silently.** Unknown and changed host keys always go through an explicit user confirmation (see §9).
+8. **Safe writes.** Every write to a user file is atomic (write temp file, then rename). Before the first write to an ssh config file in a session, a timestamped backup is created.
+9. **Small, verifiable steps.** Each milestone ends in a state that can be verified by hand and by tests before moving on.
+
+### Non-goals
+
+- Embedded terminal emulator (sessions open in the user's terminal app).
+- Cloud sync, accounts, or any network service of our own.
+- Password storage or password-based auth automation.
+- PuTTY/plink, WSL, Cygwin, MSYS2 or Git-for-Windows ssh support (see §8).
+- Features depending on `ControlMaster` / `ControlPersist` (unsupported by Windows OpenSSH).
+
+---
+
+## 2. Architecture
+
+Cargo workspace with UI-independent core crates:
+
+| Crate | Responsibility | Depends on egui? |
+|---|---|---|
+| `sshconf` | Lossless `ssh_config` parser/editor (CST), `Include` resolution, write-back | No |
+| `sshelf-core` | App data model (metadata, tunnels, groups, settings, history), storage + migrations, ssh binary discovery, `ssh -G` resolution, host key checks, tunnel supervisor | No |
+| `sshelf` (app) | egui/eframe frontend; renders state, sends commands to core | Yes |
+| `fake-ssh` (test bin) | Scriptable stand-in for `ssh` used by supervisor tests | No |
+
+Rules:
+- The UI never spawns processes or touches files directly; it sends commands to core and renders state/events from core.
+- The **supervisor runs independently of the UI loop** (own thread or async runtime). eframe stops calling `update()` when the window is hidden, and the tray (milestone 6) must keep working then. The UI is just one subscriber to supervisor events.
+- Core → UI communication: a channel of events; the worker that emits an event calls `egui::Context::request_repaint()`. No polling timers, no idle CPU burn.
+- Code style: follow the example Rust + egui repository provided by the project owner (referenced from `CLAUDE.md`).
+- CI: GitHub Actions building and testing on Windows, macOS and Linux, based on the workflows in the provided example repositories. No signing step.
+
+Suggested crates (verify fitness before adopting): `directories` (platform config dirs), `serde` + `toml`, `notify` (file watching), `tray-icon` (tray, milestone 6), `ssh-key` from RustCrypto (key generation, milestone 7), `zeroize`.
+
+---
+
+## 3. App data storage
+
+Location: the platform config directory for `sshelf` (via `directories`). Human-readable TOML files the user can inspect and version:
+
+| File | Contents |
+|---|---|
+| `settings.toml` | ssh binary override, terminal template, close behavior choice, UI prefs |
+| `hosts.toml` | Per-host metadata keyed by alias: tags, notes, favorite, color, display order |
+| `tunnels.toml` | Tunnel definitions and groups |
+| `history.toml` | Recent connections launched from the app (for the tray menu) |
+
+Rules:
+- **Every file has a top-level `version` integer from the very first commit.**
+- On load, files with an older version are migrated step by step (`v1 → v2 → …`). Before writing a migrated file, the original is backed up next to it.
+- A file with a *newer* version than the app understands is never overwritten; the app shows an error and runs read-only for that data.
+- All writes are atomic.
+
+---
+
+## 4. ssh_config handling (`sshconf`)
+
+### Parser model
+
+A line-oriented concrete syntax tree. Each line is one of:
+`Blank`, `Comment`, `HostHeader`, `MatchHeader`, `Include`, `Directive`.
+Each node stores the **original raw text** plus parsed key/value(s), the **source file**, and its **position**. Blocks group a header with its following lines.
+
+Must handle:
+- Case-insensitive keywords, `Key value` and `Key=value` syntax, tabs, trailing whitespace, CRLF and LF.
+- Quoted values, multi-value directives, comments at any position.
+- `Host a b c` multi-alias headers, negated patterns (`!foo`), wildcards (`*`, `?`).
+- `Match` blocks (preserved and displayed; not edited structurally).
+- `Include` with globs, relative paths resolved against `~/.ssh`, `Include` inside a `Host` block (conditional), recursion limits.
+
+### Host list semantics
+
+- Concrete aliases (no wildcards) are listed as **hosts**.
+- Blocks with wildcard patterns (`Host *`, `Host *.prod`) and `Match` blocks are listed separately as **patterns**; they are not connectable and cannot carry metadata.
+- A multi-alias block (`Host prod-db db1`) is one host; metadata links by the **first alias**, but lookups resolve any alias.
+- Each host shows which file it comes from.
+
+### Effective config
+
+The read-only "resolved" panel shows `ssh -G <alias>` output for the selected host. This is also used to obtain `hostname`, `port`, `user`, `hostkeyalias`, `userknownhostsfile`, `proxyjump`, etc. for all other features.
+
+### Writing (milestone 5)
+
+- Edit blocks **in place in whichever file they live**.
+- New hosts go to a user-chosen file (default: main config). Within the file, insert **before the first wildcard `Host *` / `Match all` block**, never simply appended at the end — otherwise wildcard defaults override the new host's values because the first match wins.
+- Blocks from files that are not writable are read-only, with the reason shown.
+- Only changed lines are rewritten; everything else is byte-identical.
+- Backup before first write per session; atomic writes.
+
+### External changes
+
+- Watch the main config and all included files; reload on change.
+- If the file changed on disk while there are unsaved in-app edits, do not overwrite: show the conflict (diff) and let the user choose.
+
+---
+
+## 5. Host details and editing
+
+- Structured form for common directives: `HostName`, `User`, `Port`, `IdentityFile`, `IdentitiesOnly`, `ProxyJump`, `LocalForward`, `RemoteForward`, `DynamicForward`, `ServerAliveInterval`, `ForwardAgent`.
+- A raw text editor for the whole block, for everything else.
+- Both edit the same CST node, so they stay in sync.
+- **Validation:** parse with `sshconf`, then write the candidate config to a temp file and run `ssh -G -F <tempfile> <alias>`. Map ssh's errors (with line numbers) back to the editor. Saving is blocked while validation fails.
+- Renaming a host updates the alias in the config and all app data referencing it, as one operation.
+
+---
+
+## 6. Metadata and orphans
+
+- Metadata (`hosts.toml`) and tunnels (`tunnels.toml`) reference hosts by alias; groups reference tunnels by stable `id`.
+- **Orphans:** metadata for a missing alias, a tunnel whose host alias is missing, a group referencing a missing tunnel.
+- UI: a small warning indicator with a counter (e.g. in the sidebar/status bar).
+  - **Hover:** tooltip listing what is missing.
+  - **Click:** popover with actions per orphan: *Relink to…* (pick an existing alias/tunnel), *Delete*.
+- Orphans are never deleted automatically.
+
+---
+
+## 7. Tunnels and groups
+
+### Model
+
+```toml
+version = 1
+
+[[tunnel]]
+id = "k3s-api"            # stable, generated; never derived from the name
+name = "k3s API"
+host = "k3s-master"       # ssh_config alias
+forwards = [
+  { kind = "L", bind = "127.0.0.1", local = 6443, remote = "localhost:6443" },
+]
+
+[[tunnel]]
+id = "prod-db"
+name = "Prod Postgres"
+host = "bastion"
+forwards = [
+  { kind = "L", bind = "127.0.0.1", local = 5432, remote = "db.internal:5432" },
+]
+
+[[group]]
+id = "work-prod"
+name = "Work on prod"
+tunnels = ["k3s-api", "prod-db"]
+```
+
+- **Tunnel** = one host alias + N forwards = **one `ssh` process**.
+- Forward kinds: `L` (local), `R` (remote), `D` (dynamic/SOCKS).
+- Default bind address `127.0.0.1`. Binding to `0.0.0.0` or another non-loopback address requires an explicit choice and shows a warning.
+- **Group** = named set of tunnel ids. Forwards are defined only on tunnels, never inline in groups.
+
+### Process
+
+Spawned command:
+```
+ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o BatchMode=yes <forwards> <alias>
+```
+- Windows: spawn with `CREATE_NO_WINDOW`; kill the whole process tree on stop.
+- Keep the last N lines of stderr per tunnel, viewable in the UI.
+- Before starting, pre-check local ports by attempting to bind a `TcpListener`; report conflicts without spawning.
+
+### Supervisor semantics
+
+- **Owners and reference counting (from day one):** a tunnel's process runs while at least one owner holds it. Owners are: a manual start, or a group. Starting the same tunnel twice never spawns a second process.
+- **Start group:** pre-check all ports first; if any conflict, report it and start nothing. Otherwise start tunnels in parallel.
+- **Partial failure:** remaining tunnels keep running; the group shows **degraded** (e.g. 2/3) with a *Retry failed* action.
+- **Stop group:** releases the group's ownership; a tunnel stops only when no owners remain. If a tunnel stays up, show why ("still used by: Work on staging").
+- States per tunnel: `Stopped`, `Starting`, `Running`, `Failed(reason)`, plus host key / auth sub-states (§9).
+- Tunnels stop when the app quits (no detached background processes).
+
+### Testing
+
+- `fake-ssh` is a small Rust binary in the workspace that behaves according to arguments/env: sleep forever, exit with code X after Y ms, print given stderr, simulate host key failure, etc.
+- Supervisor tests run against `fake-ssh` on all three OSes in CI.
+
+---
+
+## 8. ssh binary selection
+
+- **Windows:** the built-in OpenSSH at `C:\Windows\System32\OpenSSH\ssh.exe`, located by explicit path (not `PATH`). Companion tools (`ssh-add`, `ssh-keygen`, `ssh-keyscan`) are taken from the same directory.
+- **macOS / Linux:** system `ssh` from `PATH`.
+- Settings allow overriding the path on all platforms.
+- Settings show: selected binary, `ssh -V` output, agent reachability and number of loaded keys (`ssh-add -l`).
+- **Windows agent:** detect when the `ssh-agent` Windows service is stopped or disabled and explain how to enable it (requires admin; the app does not do it itself).
+- **Auth under `BatchMode`:** when a tunnel fails because a key is not available in the agent, show a clear message ("key not loaded in agent") with a hint, not a raw error.
+
+---
+
+## 9. Host key verification
+
+Before starting a tunnel, determine the host key state using values from `ssh -G` (`hostname`, `port`, `hostkeyalias`, `userknownhostsfile`) and `ssh-keygen -F <host> -f <known_hosts>`. Remember non-22 ports are stored as `[host]:port`.
+
+### Unknown key → confirmation modal
+
+1. Fetch the key through ssh itself (works with `ProxyJump`/`ProxyCommand`, unlike `ssh-keyscan`):
+   `ssh -o UserKnownHostsFile=<temp> -o StrictHostKeyChecking=accept-new -o BatchMode=yes <alias> exit`
+   Key exchange happens before auth, so the temp file receives the key even if auth fails.
+2. Show a modal: host, port, key type, SHA256 fingerprint, and a hint to compare it with the server/provider (`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` on the server).
+3. On confirm, append exactly those lines from the temp file to the real `known_hosts` (format already matches the user's `HashKnownHosts` setting).
+4. Start the tunnel with normal strict checking — if the server now presents a different key, ssh refuses.
+
+**Jump chains:** hops must be verified in order (bastion first). Command-line `-o` options may not propagate to the jump connection — **verify this behavior against a real `ProxyJump` setup during implementation.** Show one modal per unknown hop.
+
+### Changed key → replace (with strong confirmation)
+
+- Warning-styled modal, visually distinct from the unknown-key modal: old vs new fingerprint side by side, explanation (server reinstalled **or** connection intercepted).
+- *Replace* is not the default button and requires an explicit extra action (checkbox "I know this server was reinstalled" or typing the host name).
+- Replace = `ssh-keygen -R <host> -f <known_hosts>` (creates `.old` backup), then the unknown-key flow above to fetch and store the new key.
+- Never replace automatically.
+
+---
+
+## 10. UI
+
+### Layout
+
+- **Sidebar:** Hosts · Tunnels · Groups · Settings, plus the orphan warning indicator.
+- **Main area:** list + detail pane.
+  - Hosts: list (search, tags, favorites) with a separate collapsible *Patterns* section; detail pane with source file, metadata, actions (Connect, New tunnel), and the `ssh -G` resolved panel.
+  - Tunnels: list with status, start/stop, forwards, stderr log.
+  - Groups: single toggle per group, aggregate status (running / degraded / stopped), expandable per-tunnel states.
+
+### Terminal launch ("Connect")
+
+- Configurable command template with placeholders, e.g. `{terminal_cmd} {ssh} {alias}`.
+- Per-OS defaults:
+  - Windows: Windows Terminal (`wt.exe`) if present, otherwise `cmd`.
+  - macOS: Terminal.app (via `osascript`).
+  - Linux: first available of `$TERMINAL`, `x-terminal-emulator`, common emulators (gnome-terminal, konsole, alacritty, kitty, wezterm…).
+- Each launch from the app is recorded in `history.toml` (only app-launched sessions can be tracked; say so in the UI).
+
+### Close behavior
+
+- If no tunnels are running: close immediately.
+- If tunnels are running: modal "N tunnels are running and will be stopped".
+  - Buttons: **Minimize to tray** (only when a tray is available — milestone 6) · **Stop N tunnels and quit** · **Cancel**.
+  - Checkbox: *Remember my choice*; resettable in Settings.
+- Cmd+Q on macOS and Quit from the tray go through the same logic.
+
+### Tray (milestone 6)
+
+- Menu: last N connected hosts (click → open terminal session), groups with start/stop, active tunnels with stop, Show window, Quit.
+- If the platform has no tray (e.g. GNOME without an extension), don't offer *Minimize to tray*.
+- macOS: create on the main thread; consider hiding the Dock icon while minimized.
+
+---
+
+## 11. Key generation (milestone 7)
+
+Available when adding/editing a host.
+
+- Generated in-process with the RustCrypto `ssh-key` crate (writes standard encrypted OpenSSH format; passphrase never appears in process arguments). Zeroize secrets after writing.
+- Options:
+  - Algorithm: **Ed25519 (default)**, ECDSA (256/384/521), RSA (3072/4096). Length field hidden for Ed25519.
+  - Passphrase + confirmation; empty allowed with a visible warning.
+  - KDF rounds, comment, file name (refuse to overwrite existing files).
+- Hardware keys (`ed25519-sk`, `ecdsa-sk`) require device interaction → run `ssh-keygen` in a terminal. Optional, later.
+- File permissions: mode `600` on Unix; on Windows restrict the file ACL to the current user (OpenSSH rejects keys with open permissions).
+- Follow-up actions (checkboxes):
+  - Add `IdentityFile` + `IdentitiesOnly yes` to the host block.
+  - Add to agent (`ssh-add`; on macOS `--apple-use-keychain`).
+  - Install public key on the server: pipe the public key into `ssh <alias> 'mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat >> ~/.ssh/authorized_keys'`. Runs in a terminal (the first login usually needs a password). No dependency on `ssh-copy-id` (absent on Windows).
+
+---
+
+## 12. Milestones
+
+Each milestone ends with its acceptance criteria met, tests green on all three OSes in CI, and a manual check by the owner before continuing.
+
+### M0 — Scaffold
+- Workspace with crates from §2, `fake-ssh` stub, CI for Windows/macOS/Linux, MIT license, `CLAUDE.md` pointing to this spec and the style reference repo.
+- **Done when:** empty app window opens on all platforms; CI builds and runs (empty) tests.
+
+### M1 — Lossless parser
+- `sshconf` CST, `Include` resolution, host vs pattern classification.
+- Round-trip test corpus: tabs, `Key=value`, multi-alias, negations, quotes, CRLF, trailing whitespace, comments everywhere, `Match`, `Include` with globs and inside `Host`.
+- **Done when:** parse → write is byte-identical for every corpus file and for the owner's real config.
+
+### M2 — Host browser (read-only)
+- Sidebar layout, host list with source file, patterns section, `ssh -G` resolved panel, file watching and reload.
+- ssh binary discovery + Settings page showing binary, version, agent status (incl. Windows service check).
+- `hosts.toml` metadata (tags, notes, favorite, color) with `version` field and migration scaffolding.
+- Orphan detection, counter, tooltip, relink/delete popover.
+- Terminal launch ("Connect") with per-OS defaults and template setting; history recording.
+- **Done when:** the owner's real config displays correctly and nothing is ever written to it.
+
+### M3 — Tunnels and groups
+- `tunnels.toml`, tunnel and group CRUD in the UI.
+- Supervisor with owners/refcounting, port pre-checks, `L`/`R`/`D` forwards, bind-address warning, stderr log, degraded groups, stop-reason display.
+- Supervisor tests against `fake-ssh`.
+- **Done when:** real tunnels and groups start/stop reliably on all three OSes; overlapping groups behave per §7.
+
+### M4 — Host keys, auth feedback, close behavior → **MVP complete**
+- Unknown-key confirmation modal and changed-key replace modal (§9), including jump-chain ordering.
+- Clear "key not in agent" feedback.
+- Close modal (without tray option yet), remembered choice + reset.
+- **Done when:** a brand-new server and a reinstalled server can both be handled entirely from the app; quitting with running tunnels always asks.
+
+### M5 — Config editing
+- Structured form + raw editor on the same CST node, `ssh -G -F` validation, rename with app-data update.
+- Write policy (§4): in place, new hosts before first wildcard block, target-file picker, read-only unwritable files, backups, atomic writes, external-change conflict handling.
+- **Done when:** edits produce minimal diffs (verified with `git diff` on a versioned config) and invalid edits cannot be saved.
+
+### M6 — Tray
+- Tray icon and menu (§10), *Minimize to tray* in the close modal, supervisor fully functional with the window hidden.
+- **Done when:** tunnels and groups can be controlled from the tray with the window hidden on all supported platforms.
+
+### M7 — Key generation
+- Everything in §11.
+- **Done when:** a new host can be created, a key generated, installed on the server, and connected to without leaving the app (except the terminal for the first password login).
+
+### M8 — Final polish
+- Connection health indicator per host: `ssh -o BatchMode=yes -o ConnectTimeout=3 <alias> true` → reachable / auth OK / latency.
+- Optional auto-reconnect for dropped tunnels (with backoff).
+- "Start on app launch" per group.
+- `ProxyJump` chain visualization (breadcrumb first, graph later).
+- Optional hardware-key generation via terminal `ssh-keygen`.
+
+---
+
+## 13. Final shape (summary)
+
+A small, trustworthy desktop tool where:
+- the ssh config remains the single source of truth and is edited with minimal, comment-preserving diffs;
+- every host shows its effective configuration and health at a glance;
+- tunnels and groups of tunnels start with one click from the window or the tray, with clear status and logs;
+- host keys and keys in general are handled safely and transparently;
+- all app data is plain, versioned TOML that the user can read, back up and version-control.
+
+## 14. Ideas parked for later (not scheduled)
+
+- `kubectl port-forward` profiles alongside SSH tunnels (k3s workflows).
+- Embedded terminal.
+- Support for alternative ssh distributions on Windows.
