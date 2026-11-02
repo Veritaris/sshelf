@@ -53,12 +53,17 @@ impl ConfigWatcher {
         let mut targets = Vec::new();
         for dir in dirs {
             targets.push(dir.path.clone());
-            if let Ok(canonical) = fs::canonicalize(&dir.path) {
-                targets.push(canonical);
-            }
             let Some(existing) = nearest_existing(&dir.path) else {
                 continue;
             };
+            // Events may report canonical paths (e.g. `/private/var` on macOS),
+            // also for directories that do not exist yet.
+            if let (Ok(canonical), Ok(rest)) = (
+                fs::canonicalize(&existing),
+                dir.path.strip_prefix(&existing),
+            ) {
+                targets.push(canonical.join(rest));
+            }
             let recursive = dir.recursive && existing == dir.path;
             *wanted.entry(existing).or_insert(false) |= recursive;
         }
@@ -235,6 +240,26 @@ mod tests {
         thread::sleep(SETTLE);
         fs::write(hosts.join("team").join("x.conf"), "Host x\n").unwrap();
         expect_change(&rx, "a file in a nested dir");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn missing_directory_behind_a_symlink_is_matched_canonically() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real");
+        fs::create_dir(&real).unwrap();
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let (mut watcher, rx) = watcher();
+        watcher.set_dirs(&[dir(link.join("ssh"), false)]);
+        let targets = watcher.targets.lock().unwrap().clone();
+        assert!(
+            targets.contains(&fs::canonicalize(&real).unwrap().join("ssh")),
+            "{targets:?}"
+        );
+        thread::sleep(SETTLE);
+        fs::create_dir(real.join("ssh")).unwrap();
+        expect_change(&rx, "creating the dir through its real path");
     }
 
     #[test]
