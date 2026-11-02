@@ -1,0 +1,78 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "[0-9]+.[0-9]+.[0-9]+"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            target: aarch64-apple-darwin
+
+    runs-on: ${{ matrix.platform.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Get the release version from the tag
+        shell: bash
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> "$GITHUB_ENV"
+
+      - name: Install Linux build dependencies
+        if: matrix.platform.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxkbcommon-dev
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: "true"
+
+      - name: Build release binary
+        run: cargo build --release -p sshelf --target ${{ matrix.platform.target }}
+
+      - name: Package archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="sshelf"
+          dirname="${bin}-${VERSION}-${{ matrix.platform.target }}"
+          mkdir "$dirname"
+
+          if [ "${{ matrix.platform.os }}" = "windows-latest" ]; then
+            cp "target/${{ matrix.platform.target }}/release/${bin}.exe" "$dirname/"
+            7z a -t7z "$dirname.7z" "$dirname"
+            echo "ASSET=$dirname.7z" >> "$GITHUB_ENV"
+          else
+            cp "target/${{ matrix.platform.target }}/release/${bin}" "$dirname/"
+            tar -czf "$dirname.tar.gz" "$dirname"
+            echo "ASSET=$dirname.tar.gz" >> "$GITHUB_ENV"
+          fi
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          append_body: true
+          make_latest: true
+          files: ${{ env.ASSET }}
