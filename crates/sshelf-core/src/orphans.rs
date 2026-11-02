@@ -1,11 +1,11 @@
-//! Orphans (SPEC.md §6): app data that no longer links to a host. They are
-//! surfaced to the user and never deleted automatically.
-//!
-//! M2 covers `hosts.toml`; tunnels and groups join in M3.
+//! Orphans (SPEC.md §6): app data that no longer links to what it refers to:
+//! metadata or tunnels whose host alias is gone, and groups listing missing
+//! tunnels. They are surfaced to the user and never deleted automatically.
 
 use sshconf::HostList;
 
 use crate::metadata::HostsFile;
+use crate::tunnels::TunnelsFile;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OrphanReason {
@@ -44,6 +44,129 @@ pub enum RelinkError {
     UnknownAlias(String),
     #[error("host `{0}` already has metadata")]
     TargetHasMetadata(String),
+    #[error("no tunnel `{0}`")]
+    UnknownTunnel(String),
+    #[error("no group `{0}`")]
+    UnknownGroup(String),
+    #[error("the group already contains tunnel `{0}`")]
+    AlreadyInGroup(String),
+}
+
+/// A tunnel whose host alias is not in the ssh config.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TunnelOrphan {
+    pub tunnel_id: String,
+    pub name: String,
+    pub host: String,
+}
+
+impl TunnelOrphan {
+    pub fn describe(&self) -> String {
+        format!("tunnel \"{}\": no host `{}`", self.name, self.host)
+    }
+}
+
+/// A group entry naming a tunnel that does not exist.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupOrphan {
+    pub group_id: String,
+    pub group_name: String,
+    pub tunnel_id: String,
+}
+
+impl GroupOrphan {
+    pub fn describe(&self) -> String {
+        format!(
+            "group \"{}\": no tunnel `{}`",
+            self.group_name, self.tunnel_id
+        )
+    }
+}
+
+pub fn find_tunnel_orphans(tunnels: &TunnelsFile, hosts: &HostList) -> Vec<TunnelOrphan> {
+    tunnels
+        .tunnels
+        .iter()
+        .filter(|t| hosts.find(&t.host).is_none())
+        .map(|t| TunnelOrphan {
+            tunnel_id: t.id.clone(),
+            name: t.name.clone(),
+            host: t.host.clone(),
+        })
+        .collect()
+}
+
+pub fn find_group_orphans(tunnels: &TunnelsFile) -> Vec<GroupOrphan> {
+    tunnels
+        .groups
+        .iter()
+        .flat_map(|g| {
+            g.tunnels
+                .iter()
+                .filter(|id| tunnels.tunnel(id).is_none())
+                .map(|id| GroupOrphan {
+                    group_id: g.id.clone(),
+                    group_name: g.name.clone(),
+                    tunnel_id: id.clone(),
+                })
+        })
+        .collect()
+}
+
+/// Points a tunnel at the host owning `to` (any host; tunnels may share one).
+pub fn relink_tunnel(
+    tunnels: &mut TunnelsFile,
+    hosts: &HostList,
+    tunnel_id: &str,
+    to: &str,
+) -> Result<(), RelinkError> {
+    let host = hosts
+        .find(to)
+        .ok_or_else(|| RelinkError::UnknownAlias(to.to_string()))?;
+    let tunnel = tunnels
+        .tunnels
+        .iter_mut()
+        .find(|t| t.id == tunnel_id)
+        .ok_or_else(|| RelinkError::UnknownTunnel(tunnel_id.to_string()))?;
+    tunnel.host = host.primary().to_string();
+    Ok(())
+}
+
+/// Replaces a group's reference to `from` with the existing tunnel `to`.
+pub fn relink_group_member(
+    tunnels: &mut TunnelsFile,
+    group_id: &str,
+    from: &str,
+    to: &str,
+) -> Result<(), RelinkError> {
+    if tunnels.tunnel(to).is_none() {
+        return Err(RelinkError::UnknownTunnel(to.to_string()));
+    }
+    let group = tunnels
+        .groups
+        .iter_mut()
+        .find(|g| g.id == group_id)
+        .ok_or_else(|| RelinkError::UnknownGroup(group_id.to_string()))?;
+    if group.tunnels.iter().any(|t| t == to) {
+        return Err(RelinkError::AlreadyInGroup(to.to_string()));
+    }
+    let slot = group
+        .tunnels
+        .iter_mut()
+        .find(|t| *t == from)
+        .ok_or_else(|| RelinkError::UnknownTunnel(from.to_string()))?;
+    *slot = to.to_string();
+    Ok(())
+}
+
+/// Drops a group's reference to `tunnel_id`; `false` if there was none.
+pub fn remove_group_member(tunnels: &mut TunnelsFile, group_id: &str, tunnel_id: &str) -> bool {
+    let Some(group) = tunnels.groups.iter_mut().find(|g| g.id == group_id) else {
+        return false;
+    };
+    let before = group.tunnels.len();
+    group.tunnels.retain(|t| t != tunnel_id);
+    group.tunnels.len() != before
 }
 
 pub fn find_orphans(meta: &HostsFile, hosts: &HostList) -> Vec<Orphan> {
@@ -205,5 +328,75 @@ mod tests {
         assert!(delete(&mut meta, "gone"));
         assert!(!delete(&mut meta, "gone"));
         assert_eq!(meta.hosts.keys().collect::<Vec<_>>(), ["a"]);
+    }
+
+    fn tunnels_file() -> TunnelsFile {
+        use crate::tunnels::{Group, Tunnel};
+        let tunnel = |id: &str, host: &str| Tunnel {
+            id: id.into(),
+            name: format!("tunnel {id}"),
+            host: host.into(),
+            forwards: Vec::new(),
+        };
+        TunnelsFile {
+            tunnels: vec![tunnel("t1", "db1"), tunnel("t2", "gone-host")],
+            groups: vec![Group {
+                id: "g".into(),
+                name: "Work".into(),
+                tunnels: vec!["t1".into(), "t-missing".into()],
+            }],
+        }
+    }
+
+    #[test]
+    fn tunnel_and_group_orphans() {
+        let hosts = hosts(&[&["prod-db", "db1"], &["web"]]);
+        let file = tunnels_file();
+        let tunnel_orphans = find_tunnel_orphans(&file, &hosts);
+        assert_eq!(tunnel_orphans.len(), 1);
+        assert_eq!(tunnel_orphans[0].tunnel_id, "t2");
+        assert!(tunnel_orphans[0].describe().contains("gone-host"));
+        let group_orphans = find_group_orphans(&file);
+        assert_eq!(group_orphans.len(), 1);
+        assert_eq!(group_orphans[0].tunnel_id, "t-missing");
+        assert!(group_orphans[0].describe().contains("Work"));
+    }
+
+    #[test]
+    fn relink_tunnel_to_any_host_by_primary_alias() {
+        let hosts = hosts(&[&["prod-db", "db1"], &["web"]]);
+        let mut file = tunnels_file();
+        relink_tunnel(&mut file, &hosts, "t2", "db1").unwrap();
+        assert_eq!(file.tunnel("t2").unwrap().host, "prod-db");
+        assert_eq!(
+            relink_tunnel(&mut file, &hosts, "t2", "nope"),
+            Err(RelinkError::UnknownAlias("nope".into()))
+        );
+        assert_eq!(
+            relink_tunnel(&mut file, &hosts, "t9", "web"),
+            Err(RelinkError::UnknownTunnel("t9".into()))
+        );
+        assert!(find_tunnel_orphans(&file, &hosts).is_empty());
+    }
+
+    #[test]
+    fn group_member_relink_and_removal() {
+        let mut file = tunnels_file();
+        assert_eq!(
+            relink_group_member(&mut file, "g", "t-missing", "t1"),
+            Err(RelinkError::AlreadyInGroup("t1".into()))
+        );
+        assert_eq!(
+            relink_group_member(&mut file, "g", "t-missing", "t9"),
+            Err(RelinkError::UnknownTunnel("t9".into()))
+        );
+        relink_group_member(&mut file, "g", "t-missing", "t2").unwrap();
+        assert_eq!(file.groups[0].tunnels, ["t1", "t2"]);
+        assert!(find_group_orphans(&file).is_empty());
+
+        assert!(remove_group_member(&mut file, "g", "t2"));
+        assert!(!remove_group_member(&mut file, "g", "t2"));
+        assert!(!remove_group_member(&mut file, "nope", "t1"));
+        assert_eq!(file.groups[0].tunnels, ["t1"]);
     }
 }

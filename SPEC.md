@@ -154,6 +154,7 @@ The read-only "resolved" panel shows `ssh -G <alias>` output for the selected ho
 - Orphans are never deleted automatically.
 - Metadata links to a host through any of its aliases; new entries use the primary alias and existing keys are never renamed silently. A second entry resolving to a host that already has metadata under another alias is also an orphan (*shadowed*).
 - *Relink to…* only offers hosts without metadata of their own (relinking never merges or overwrites) and stores the entry under the target's primary alias. *Delete* asks for confirmation once.
+- A tunnel with a missing host can be relinked to any existing host (tunnels may share hosts) or deleted. A group entry naming a missing tunnel can be relinked to another tunnel not yet in the group, or removed from the group.
 
 ---
 
