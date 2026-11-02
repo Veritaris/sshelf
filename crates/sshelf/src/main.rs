@@ -4,6 +4,7 @@
 mod app;
 mod groups_view;
 mod host_detail;
+mod hostkey_modal;
 mod hosts_view;
 mod orphans_window;
 mod settings_view;

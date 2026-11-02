@@ -195,6 +195,25 @@ impl TunnelsView {
             if let Some(hint) = hint {
                 ui.label(RichText::new(hint).color(p.dim));
             }
+            match status.and_then(|s| s.failure) {
+                Some(FailureKind::HostKeyChanged)
+                    if ui
+                        .button("Review changed key…")
+                        .on_hover_text("Compare the stored key with the one the server presents")
+                        .clicked() =>
+                {
+                    commands.push(Command::ReviewChangedKey(tunnel.id.clone()));
+                }
+                Some(FailureKind::HostKeyUnknown) => {
+                    ui.label(
+                        RichText::new(
+                            "A host key on the way is not stored. Retry checks every host and asks.",
+                        )
+                        .color(p.dim),
+                    );
+                }
+                _ => {}
+            }
         }
         if let Some(status) = status
             && !status.owners.is_empty()
@@ -546,6 +565,23 @@ mod tests {
             }),
             ssh: None,
         }
+    }
+
+    #[test]
+    fn changed_host_key_offers_a_review() {
+        let mut f = fixture(TunnelState::Failed("Host key verification failed.".into()));
+        let mut states = (*f.states).clone();
+        states.tunnels.get_mut("t-1").unwrap().failure = Some(FailureKind::HostKeyChanged);
+        f.states = Arc::new(states);
+        let view = TunnelsView {
+            selected: Some("t-1".into()),
+            ..TunnelsView::default()
+        };
+        let mut harness = harness(f, view);
+        harness.step();
+        harness.get_by_label("Review changed key…").click();
+        harness.step();
+        assert_eq!(harness.state().1, [Command::ReviewChangedKey("t-1".into())]);
     }
 
     #[test]

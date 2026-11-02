@@ -10,6 +10,7 @@ use sshelf_core::paths::Paths;
 use sshelf_core::supervisor::Snapshot;
 
 use crate::groups_view::GroupsView;
+use crate::hostkey_modal::HostKeyModals;
 use crate::hosts_view::HostsView;
 use crate::orphans_window::{self, OrphansWindow};
 use crate::settings_view::SettingsView;
@@ -35,6 +36,7 @@ pub struct SshelfApp {
     groups: GroupsView,
     settings: SettingsView,
     orphans: OrphansWindow,
+    hostkeys: HostKeyModals,
     status: Option<Status>,
 }
 
@@ -65,6 +67,7 @@ impl SshelfApp {
             groups: GroupsView::default(),
             settings: SettingsView::default(),
             orphans: OrphansWindow::default(),
+            hostkeys: HostKeyModals::default(),
             status: None,
         }
     }
@@ -91,8 +94,9 @@ impl SshelfApp {
                 }
                 Event::Error(message) => self.status = Some(Status::Error(message)),
                 Event::Tunnels(states) => self.tunnel_states = Some(states),
-                // Shown by the host key modals (next step).
-                Event::HostKeyPrompt(_) | Event::HostKeyChanged(_) | Event::HostKeyClosed(_) => {}
+                Event::HostKeyPrompt(prompt) => self.hostkeys.on_unknown(prompt),
+                Event::HostKeyChanged(prompt) => self.hostkeys.on_changed(prompt),
+                Event::HostKeyClosed(id) => self.hostkeys.on_closed(id),
             }
         }
     }
@@ -199,6 +203,7 @@ impl eframe::App for SshelfApp {
                 .unwrap_or_default();
             commands.extend(self.orphans.show(ui.ctx(), data, &hosts));
         }
+        commands.extend(self.hostkeys.show(ui.ctx()));
         if let Some(host) = self.hosts.detail.take_new_tunnel()
             && let Some(data) = &self.data
         {
