@@ -210,6 +210,7 @@ ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o BatchMode=yes <f
 
 - `fake-ssh` is a small Rust binary in the workspace that behaves according to arguments/env: sleep forever, exit with code X after Y ms, print given stderr, simulate host key failure, etc.
 - Supervisor tests run against `fake-ssh` on all three OSes in CI.
+- Tests that spawn processes live in `crates/fake-ssh/tests/` with `sshelf-core` as a dev-dependency, and get the binary path from `env!("CARGO_BIN_EXE_fake-ssh")` (Cargo only provides it to tests of the package that defines the binary). The supervisor takes the ssh binary path as configuration (§8 override), so tests pass the `fake-ssh` path. Supervisor unit tests that spawn nothing stay in `sshelf-core`.
 
 ---
 
