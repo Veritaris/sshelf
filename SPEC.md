@@ -48,8 +48,8 @@ Rules:
 - The UI never spawns processes or touches files directly; it sends commands to core and renders state/events from core.
 - The **supervisor runs independently of the UI loop** (own thread or async runtime). eframe stops calling `update()` when the window is hidden, and the tray (milestone 6) must keep working then. The UI is just one subscriber to supervisor events.
 - Core → UI communication: a channel of events; the worker that emits an event calls `egui::Context::request_repaint()`. No polling timers, no idle CPU burn.
-- Code style: follow the example Rust + egui repository provided by the project owner (referenced from `CLAUDE.md`).
-- CI: GitHub Actions building and testing on Windows, macOS and Linux, based on the workflows in the provided example repositories. No signing step.
+- Code style: follow the owner's reference Rust + egui projects listed in `CLAUDE.md`.
+- CI: GitHub Actions building and testing on Windows, macOS and Linux, based on the workflows of those reference projects. No signing step.
 
 Suggested crates (verify fitness before adopting): `directories` (platform config dirs), `serde` + `toml`, `notify` (file watching), `tray-icon` (tray, milestone 6), `ssh-key` from RustCrypto (key generation, milestone 7), `zeroize`.
 
