@@ -106,6 +106,24 @@ impl HostDetail {
         self.new_tunnel.take()
     }
 
+    /// `user@host[:port]` from the `ssh -G` result already fetched for
+    /// `alias` (the cards view runs nothing of its own).
+    pub fn address(&self, alias: &str) -> Option<String> {
+        let (_, Ok(resolved)) = self.resolved.get(alias)? else {
+            return None;
+        };
+        let host = resolved.get("hostname")?;
+        let mut address = match resolved.get("user") {
+            Some(user) => format!("{user}@{host}"),
+            None => host.to_string(),
+        };
+        if let Some(port) = resolved.get("port").filter(|p| *p != "22") {
+            address.push(':');
+            address.push_str(port);
+        }
+        Some(address)
+    }
+
     /// "New tunnel…" from somewhere else (the host list's menu).
     pub fn request_new_tunnel(&mut self, alias: String) {
         self.new_tunnel = Some(alias);

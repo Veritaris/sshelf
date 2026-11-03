@@ -5,24 +5,33 @@
 use std::sync::Arc;
 
 use egui::text::{LayoutJob, TextFormat};
-use egui::{Align, Color32, FontId, Frame, Layout, Margin, RichText, Sense, Ui, UiBuilder, vec2};
+use egui::{
+    Align, Color32, CornerRadius, FontId, Frame, Layout, Margin, Rect, RichText, Sense, Ui,
+    UiBuilder, vec2,
+};
 use sshconf::{ConfigSet, HostEntry, HostList, PatternKind, Severity};
 use sshelf_core::core::{AppData, Command, ConfigSnapshot, ConfigState, SshInfo};
 use sshelf_core::health::HealthSnapshot;
 use sshelf_core::metadata::HostMeta;
+use sshelf_core::settings::{CardsGroupBy, HostListStyle, Settings};
 use sshelf_core::storage::LoadStatus;
 use sshelf_core::supervisor::{Snapshot, TunnelState};
 
 use crate::host_detail::{DetailAction, HostDetail};
 use crate::host_editor::HostEditor;
-use crate::theme::{Palette, timing};
+use crate::theme::{Palette, radius, timing};
 use crate::widgets::button::Button;
+use crate::widgets::dropdown::Dropdown;
 use crate::widgets::empty::empty_state;
 use crate::widgets::{marks, nav, popup, text};
 use crate::{fonts, icons, motion, util};
 
 /// Width of the host list pane.
 const LIST_WIDTH: f32 = 320.0;
+/// Width of the detail pane next to the cards.
+const DETAIL_WIDTH: f32 = 520.0;
+/// Space between cards.
+const CARD_GAP: f32 = 10.0;
 const ROW_HEIGHT: f32 = 40.0;
 const ROW_GAP: f32 = 2.0;
 
@@ -150,31 +159,67 @@ impl HostsView {
         if let Some(alias) = self.editor.take_created() {
             self.selected = Some(alias);
         }
-        let action = egui::Panel::left("host_list")
-            .resizable(false)
-            .exact_size(LIST_WIDTH)
-            .show_separator_line(false)
-            .frame(Frame::NONE.inner_margin(Margin {
-                left: 12,
-                right: 12,
-                top: 0,
-                bottom: 16,
-            }))
-            .show(ui, |ui| {
-                let rect = ui.max_rect().expand2(vec2(12.0, 0.0));
-                ui.painter().vline(
-                    rect.right(),
-                    rect.y_range(),
-                    egui::Stroke::new(1.0, p.bg_dark),
-                );
-                self.list(ui, set, hosts, data, states, ssh)
-            })
-            .inner;
+        let mut commands = Vec::new();
+        let action = if data.settings.host_list_style == HostListStyle::Cards {
+            // Cards: the detail is a right-hand pane, the cards fill the rest.
+            egui::Panel::right("host_detail_pane")
+                .resizable(false)
+                .exact_size(DETAIL_WIDTH)
+                .show_separator_line(false)
+                .frame(
+                    Frame::NONE
+                        .fill(p.bg_dark)
+                        .corner_radius(CornerRadius {
+                            nw: radius::LARGE,
+                            ne: 1,
+                            sw: 1,
+                            se: 1,
+                        })
+                        .inner_margin(Margin::symmetric(24, 20)),
+                )
+                .show(ui, |ui| {
+                    self.detail_pane(ui, hosts, config, data, ssh, &mut commands);
+                });
+            egui::CentralPanel::default()
+                .frame(Frame::NONE.inner_margin(Margin {
+                    left: 16,
+                    right: 16,
+                    top: 0,
+                    bottom: 16,
+                }))
+                .show(ui, |ui| self.cards(ui, set, hosts, data, states, ssh))
+                .inner
+        } else {
+            let action = egui::Panel::left("host_list")
+                .resizable(false)
+                .exact_size(LIST_WIDTH)
+                .show_separator_line(false)
+                .frame(Frame::NONE.inner_margin(Margin {
+                    left: 12,
+                    right: 12,
+                    top: 0,
+                    bottom: 16,
+                }))
+                .show(ui, |ui| {
+                    let rect = ui.max_rect().expand2(vec2(12.0, 0.0));
+                    ui.painter().vline(
+                        rect.right(),
+                        rect.y_range(),
+                        egui::Stroke::new(1.0, p.bg_dark),
+                    );
+                    self.list(ui, set, hosts, data, states, ssh)
+                })
+                .inner;
+            egui::CentralPanel::default().show(ui, |ui| {
+                self.detail_pane(ui, hosts, config, data, ssh, &mut commands);
+            });
+            action
+        };
         if action.new_host {
             self.editor.open_new(config);
             self.selected = None;
         }
-        let mut commands = action.commands;
+        commands.extend(action.commands);
         if let Some((alias, row_action)) = action.row {
             match row_action {
                 RowAction::Connect => commands.push(Command::Connect(alias)),
@@ -207,30 +252,6 @@ impl HostsView {
         {
             self.editor.close();
         }
-
-        egui::CentralPanel::default().show(ui, |ui| {
-            if self.editor.is_open() {
-                commands.extend(self.editor.show(ui, config));
-                return;
-            }
-            let host = self.selected.as_deref().and_then(|a| hosts.find(a));
-            match host {
-                Some(host) => commands.extend(self.detail.show(
-                    ui,
-                    host,
-                    config,
-                    data,
-                    ssh,
-                    self.health.as_deref(),
-                )),
-                None => {
-                    ui.add_space(48.0);
-                    ui.vertical_centered(|ui| {
-                        ui.label(RichText::new("Select a host").size(16.0).color(p.dim));
-                    });
-                }
-            }
-        });
         match self.detail.take_action() {
             Some(DetailAction::Edit(alias)) => self.editor.open(config, &alias),
             Some(DetailAction::Rename(alias)) => self.editor.open_rename(&alias),
@@ -240,6 +261,291 @@ impl HostsView {
         commands.extend(self.editor.show_rename(ui.ctx(), config, data));
         commands.extend(self.editor.show_keys(ui.ctx(), config, ssh));
         commands
+    }
+
+    /// The selected host's details, or the editor in their place.
+    fn detail_pane(
+        &mut self,
+        ui: &mut Ui,
+        hosts: &HostList,
+        config: &ConfigSnapshot,
+        data: &AppData,
+        ssh: Option<&SshInfo>,
+        commands: &mut Vec<Command>,
+    ) {
+        let p = &Palette::ONE_DARK;
+        if self.editor.is_open() {
+            commands.extend(self.editor.show(ui, config));
+            return;
+        }
+        match self.selected.as_deref().and_then(|a| hosts.find(a)) {
+            Some(host) => commands.extend(self.detail.show(
+                ui,
+                host,
+                config,
+                data,
+                ssh,
+                self.health.as_deref(),
+            )),
+            None => {
+                ui.add_space(48.0);
+                ui.vertical_centered(|ui| {
+                    ui.label(RichText::new("Select a host").size(16.0).color(p.dim));
+                });
+            }
+        }
+    }
+
+    /// The list header: "Hosts 19", then (right to left) *New host*,
+    /// *Check all* and whatever `extra` adds (the cards' *Group by*).
+    /// Returns whether *Check all* asked for a new run.
+    fn header(
+        &mut self,
+        ui: &mut Ui,
+        count: usize,
+        action: &mut ListAction,
+        extra: impl FnOnce(&mut Ui, &mut ListAction),
+    ) -> bool {
+        let p = &Palette::ONE_DARK;
+        let mut check_all = false;
+        ui.horizontal(|ui| {
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new("Hosts")
+                    .font(fonts::semibold(16.0))
+                    .color(p.text_strong),
+            );
+            ui.label(RichText::new(count.to_string()).size(13.0).color(p.dim));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                if ui.add(Button::icon_only(icons::PLUS, "New host")).clicked() {
+                    action.new_host = true;
+                }
+                check_all = self.check_all_button(ui, &mut action.commands);
+                extra(ui, action);
+            });
+        });
+        check_all
+    }
+
+    /// Starts *Check all* over the hosts shown, when asked.
+    fn start_check(
+        &mut self,
+        asked: bool,
+        rows: &[(&HostEntry, Option<&HostMeta>)],
+        action: &mut ListAction,
+    ) {
+        if asked && !rows.is_empty() {
+            self.check_run = rows.iter().map(|(h, _)| h.primary().to_string()).collect();
+            action
+                .commands
+                .push(Command::CheckHealth(self.check_run.clone()));
+        }
+    }
+
+    /// The hosts as cards in two columns, grouped by tag, file or nothing
+    /// (SPEC.md §10 *Hosts list style*).
+    fn cards(
+        &mut self,
+        ui: &mut Ui,
+        set: &ConfigSet,
+        hosts: &HostList,
+        data: &AppData,
+        states: Option<&Snapshot>,
+        ssh: Option<&SshInfo>,
+    ) -> ListAction {
+        let p = &Palette::ONE_DARK;
+        let mut action = ListAction::default();
+        let group_by = data.settings.cards_group_by;
+        let check_all = self.header(ui, hosts.hosts.len(), &mut action, |ui, action| {
+            let options = [
+                (CardsGroupBy::Tag, "Tag"),
+                (CardsGroupBy::File, "File"),
+                (CardsGroupBy::None, "None"),
+            ];
+            let trigger = match group_by {
+                CardsGroupBy::Tag => "Group by tag",
+                CardsGroupBy::File => "Group by file",
+                CardsGroupBy::None => "No grouping",
+            };
+            let picked =
+                Dropdown::new("cards_group_by", "Group by", &options, trigger).show(ui, group_by);
+            if let Some(group_by) = picked.filter(|g| *g != data.settings.cards_group_by) {
+                action.commands.push(Command::SaveSettings(Settings {
+                    cards_group_by: group_by,
+                    ..data.settings.clone()
+                }));
+            }
+        });
+        ui.add_space(14.0);
+        ui.add(
+            egui::TextEdit::singleline(&mut self.search)
+                .hint_text("Search aliases, tags, notes")
+                .margin(Margin::symmetric(12, 8))
+                .desired_width(f32::INFINITY),
+        );
+        ui.add_space(14.0);
+
+        // Cards have no filter chips: the search alone narrows them.
+        let needle = self.search.trim().to_lowercase();
+        let mut rows: Vec<(&HostEntry, Option<&HostMeta>)> = hosts
+            .hosts
+            .iter()
+            .map(|h| (h, data.hosts.get(h)))
+            .filter(|(h, meta)| matches_search(h, *meta, &needle))
+            .collect();
+        rows.sort_by_key(|(_, meta)| !meta.is_some_and(|m| m.favorite));
+        self.start_check(check_all, &rows, &mut action);
+
+        let groups = group(&rows, group_by, set, data);
+        let can_connect = ssh.is_none_or(|s| s.tools.is_ok());
+        let meta_writable = !matches!(data.hosts_status, LoadStatus::ReadOnly(_));
+        egui::ScrollArea::vertical()
+            .id_salt("host_cards")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                if rows.is_empty() {
+                    self.empty(ui, hosts, &mut action);
+                    return;
+                }
+                for (title, members) in &groups {
+                    if let Some(title) = title {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 4.0;
+                            if title.favorites {
+                                icons::show(ui, icons::STAR, 12.0, p.dim);
+                            }
+                            ui.label(
+                                RichText::new(title.text.to_uppercase())
+                                    .font(fonts::semibold(11.0))
+                                    .color(p.dim),
+                            );
+                        });
+                        ui.add_space(8.0);
+                    }
+                    let width = (ui.available_width() - CARD_GAP) / 2.0;
+                    for pair in members.chunks(2) {
+                        let lines = |(host, _): &(&HostEntry, Option<&HostMeta>)| {
+                            let tunnels = host_tunnels(host, data, states);
+                            usize::from(self.detail.address(host.primary()).is_some())
+                                + usize::from(tunnels.line().is_some())
+                        };
+                        let extra = pair.iter().map(lines).max().unwrap_or(0) as f32;
+                        let height = 28.0 + 20.0 + extra * 24.0;
+                        let (row, _) = ui.allocate_exact_size(
+                            vec2(ui.available_width(), height),
+                            Sense::hover(),
+                        );
+                        for (column, (host, meta)) in pair.iter().enumerate() {
+                            let rect = Rect::from_min_size(
+                                row.min + vec2(column as f32 * (width + CARD_GAP), 0.0),
+                                vec2(width, height),
+                            );
+                            let tunnels = host_tunnels(host, data, states);
+                            let (response, chosen) = self.card(
+                                ui,
+                                rect,
+                                host,
+                                *meta,
+                                &tunnels,
+                                &needle,
+                                (can_connect, meta_writable),
+                            );
+                            if response.clicked() {
+                                self.selected = Some(host.primary().to_string());
+                            }
+                            if let Some(chosen) = chosen {
+                                action.row = Some((host.primary().to_string(), chosen));
+                            }
+                        }
+                        ui.add_space(CARD_GAP - ui.spacing().item_spacing.y);
+                    }
+                    ui.add_space(8.0);
+                }
+            });
+        action
+    }
+
+    /// One card: mark, alias, first tag and health dot; `user@host` once
+    /// `ssh -G` ran for it; its tunnels; the same menu as a list row.
+    #[allow(clippy::too_many_arguments)]
+    fn card(
+        &self,
+        ui: &mut Ui,
+        rect: Rect,
+        host: &HostEntry,
+        meta: Option<&HostMeta>,
+        tunnels: &HostTunnels,
+        needle: &str,
+        (can_connect, meta_writable): (bool, bool),
+    ) -> (egui::Response, Option<RowAction>) {
+        let p = &Palette::ONE_DARK;
+        let alias = host.primary();
+        let selected = self.selected.as_deref() == Some(alias);
+        let response = ui.interact(rect, ui.scope_id().with(("card", alias)), Sense::click());
+        let enabled = response.enabled();
+        response.widget_info(|| {
+            egui::WidgetInfo::selected(egui::Role::Button, enabled, selected, alias)
+        });
+        let hover = motion::fade(
+            ui.ctx(),
+            response.id.with("hover"),
+            response.hovered() || popup::menu_is_open(&response),
+            timing::HOVER,
+            motion::ease_out,
+        );
+        let fill = if selected {
+            p.selection
+        } else {
+            p.surface.lerp_to_gamma(p.selection, hover * 0.5)
+        };
+        ui.painter().rect_filled(rect, radius::CONTROL, fill);
+        if response.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        let inner = rect.shrink(14.0);
+        ui.scope_builder(UiBuilder::new().max_rect(inner), |ui| {
+            ui.spacing_mut().item_spacing.y = 8.0;
+            ui.allocate_ui_with_layout(
+                vec2(inner.width(), 20.0),
+                Layout::left_to_right(Align::Center),
+                |ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    if let Some(mark) = tunnels.mark {
+                        match mark {
+                            Mark::Dot(color) => {
+                                marks::dot(ui, color);
+                            }
+                            Mark::Ring(color) => {
+                                marks::pulsing_ring(ui, marks::DOT, color);
+                            }
+                        }
+                    }
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        util::health_mark(ui, self.health.as_deref(), alias, 6.0);
+                        if let Some(tag) = meta.and_then(|m| m.tags.first()) {
+                            let fill = if selected { p.surface } else { p.selection };
+                            marks::chip(ui, tag, fill, p.text);
+                        }
+                        ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                            text::truncated(ui, highlighted(alias, needle, p.text_strong), alias);
+                        });
+                    });
+                },
+            );
+            if let Some(address) = self.detail.address(alias) {
+                ui.add(
+                    egui::Label::new(RichText::new(&address).monospace().size(12.0).color(p.dim))
+                        .truncate()
+                        .selectable(false),
+                );
+            }
+            if let Some((text, color)) = tunnels.line() {
+                ui.label(RichText::new(text).size(12.0).color(color));
+            }
+        });
+        let chosen = host_menu(&response, meta, can_connect, meta_writable);
+        (response, chosen)
     }
 
     /// The list pane: header, search, filter chips, rows, patterns.
@@ -254,27 +560,7 @@ impl HostsView {
     ) -> ListAction {
         let p = &Palette::ONE_DARK;
         let mut action = ListAction::default();
-        let mut check_all = false;
-        ui.horizontal(|ui| {
-            ui.add_space(4.0);
-            ui.label(
-                RichText::new("Hosts")
-                    .font(fonts::semibold(16.0))
-                    .color(p.text_strong),
-            );
-            ui.label(
-                RichText::new(hosts.hosts.len().to_string())
-                    .size(13.0)
-                    .color(p.dim),
-            );
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.spacing_mut().item_spacing.x = 8.0;
-                if ui.add(Button::icon_only(icons::PLUS, "New host")).clicked() {
-                    action.new_host = true;
-                }
-                check_all = self.check_all_button(ui, &mut action.commands);
-            });
-        });
+        let check_all = self.header(ui, hosts.hosts.len(), &mut action, |_, _| {});
         ui.add_space(12.0);
         ui.add(
             egui::TextEdit::singleline(&mut self.search)
@@ -297,12 +583,7 @@ impl HostsView {
             .collect();
         // Favorites first, then config order (stable sort).
         rows.sort_by_key(|(_, meta)| !meta.is_some_and(|m| m.favorite));
-        if check_all && !rows.is_empty() {
-            self.check_run = rows.iter().map(|(h, _)| h.primary().to_string()).collect();
-            action
-                .commands
-                .push(Command::CheckHealth(self.check_run.clone()));
-        }
+        self.start_check(check_all, &rows, &mut action);
 
         let filtering = !needle.is_empty() || self.filter != Filter::All;
         egui::ScrollArea::vertical()
@@ -496,19 +777,7 @@ impl HostsView {
             Filter::Favorites => meta.is_some_and(|m| m.favorite),
             Filter::Tag(tag) => meta.is_some_and(|m| m.tags.contains(tag)),
         };
-        if !keep {
-            return false;
-        }
-        if needle.is_empty() {
-            return true;
-        }
-        host.aliases
-            .iter()
-            .any(|a| a.to_lowercase().contains(needle))
-            || meta.is_some_and(|m| {
-                m.tags.iter().any(|t| t.to_lowercase().contains(needle))
-                    || m.notes.to_lowercase().contains(needle)
-            })
+        keep && matches_search(host, meta, needle)
     }
 
     /// One 40 px row: tunnel mark, alias (search matches bold), notes,
@@ -591,42 +860,151 @@ impl HostsView {
             });
         });
 
-        let mut chosen = None;
-        popup::context_menu(&response, |menu| {
-            if menu.item(Some(icons::SQUARE_TERMINAL), "Connect", can_connect) {
-                chosen = Some(RowAction::Connect);
-            }
-            if menu.item(None, "New tunnel…", true) {
-                chosen = Some(RowAction::NewTunnel);
-            }
-            menu.separator();
-            if menu.item(None, "Edit", true) {
-                chosen = Some(RowAction::Edit);
-            }
-            if menu.item(None, "Rename…", true) {
-                chosen = Some(RowAction::Rename);
-            }
-            let favorite = meta.is_some_and(|m| m.favorite);
-            let label = if favorite {
-                "Remove from favorites"
-            } else {
-                "Add to favorites"
-            };
-            if menu.item(Some(icons::STAR), label, meta_writable) {
-                let mut meta = meta.cloned().unwrap_or_default();
-                meta.favorite = !favorite;
-                chosen = Some(RowAction::Favorite(meta));
-            }
-            menu.separator();
-            if menu.item(None, "Copy alias", true) {
-                chosen = Some(RowAction::CopyAlias);
-            }
-            if menu.item(None, "Copy ssh command", true) {
-                chosen = Some(RowAction::CopySsh);
-            }
-        });
+        let chosen = host_menu(&response, meta, can_connect, meta_writable);
         (response, chosen)
     }
+}
+
+/// Whether the search `needle` (lowercase) finds the host: in an alias, a
+/// tag or the notes.
+fn matches_search(host: &HostEntry, meta: Option<&HostMeta>, needle: &str) -> bool {
+    needle.is_empty()
+        || host
+            .aliases
+            .iter()
+            .any(|a| a.to_lowercase().contains(needle))
+        || meta.is_some_and(|m| {
+            m.tags.iter().any(|t| t.to_lowercase().contains(needle))
+                || m.notes.to_lowercase().contains(needle)
+        })
+}
+
+/// The right-click menu of a host row or card; returns the item chosen.
+fn host_menu(
+    response: &egui::Response,
+    meta: Option<&HostMeta>,
+    can_connect: bool,
+    meta_writable: bool,
+) -> Option<RowAction> {
+    let mut chosen = None;
+    popup::context_menu(response, |menu| {
+        if menu.item(Some(icons::SQUARE_TERMINAL), "Connect", can_connect) {
+            chosen = Some(RowAction::Connect);
+        }
+        if menu.item(None, "New tunnel…", true) {
+            chosen = Some(RowAction::NewTunnel);
+        }
+        menu.separator();
+        if menu.item(None, "Edit", true) {
+            chosen = Some(RowAction::Edit);
+        }
+        if menu.item(None, "Rename…", true) {
+            chosen = Some(RowAction::Rename);
+        }
+        let favorite = meta.is_some_and(|m| m.favorite);
+        let label = if favorite {
+            "Remove from favorites"
+        } else {
+            "Add to favorites"
+        };
+        if menu.item(Some(icons::STAR), label, meta_writable) {
+            let mut meta = meta.cloned().unwrap_or_default();
+            meta.favorite = !favorite;
+            chosen = Some(RowAction::Favorite(meta));
+        }
+        menu.separator();
+        if menu.item(None, "Copy alias", true) {
+            chosen = Some(RowAction::CopyAlias);
+        }
+        if menu.item(None, "Copy ssh command", true) {
+            chosen = Some(RowAction::CopySsh);
+        }
+    });
+    chosen
+}
+
+/// A cards section's heading.
+struct GroupTitle {
+    text: String,
+    favorites: bool,
+}
+
+type Members<'a> = Vec<(&'a HostEntry, Option<&'a HostMeta>)>;
+
+/// The cards' sections. By tag: favorites first, then each tag (a host goes
+/// under its first tag), then the untagged. By file: one per config file,
+/// in load order. None: one section without a heading.
+fn group<'a>(
+    rows: &[(&'a HostEntry, Option<&'a HostMeta>)],
+    by: CardsGroupBy,
+    set: &ConfigSet,
+    data: &AppData,
+) -> Vec<(Option<GroupTitle>, Members<'a>)> {
+    let titled = |text: String, members: Members<'a>| {
+        let text = format!("{text} · {}", members.len());
+        (
+            Some(GroupTitle {
+                text,
+                favorites: false,
+            }),
+            members,
+        )
+    };
+    let mut groups = Vec::new();
+    match by {
+        CardsGroupBy::None => groups.push((None, rows.to_vec())),
+        CardsGroupBy::File => {
+            for (index, file) in set.files.iter().enumerate() {
+                let members: Members = rows
+                    .iter()
+                    .filter(|(h, _)| h.at.file == index)
+                    .copied()
+                    .collect();
+                if !members.is_empty() {
+                    let name = file
+                        .path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| file.path.display().to_string());
+                    groups.push(titled(name, members));
+                }
+            }
+        }
+        CardsGroupBy::Tag => {
+            let favorites: Members = rows
+                .iter()
+                .filter(|(_, m)| m.is_some_and(|m| m.favorite))
+                .copied()
+                .collect();
+            if !favorites.is_empty() {
+                groups.push((
+                    Some(GroupTitle {
+                        text: "Favorites".into(),
+                        favorites: true,
+                    }),
+                    favorites,
+                ));
+            }
+            let rest = || rows.iter().filter(|(_, m)| !m.is_some_and(|m| m.favorite));
+            for tag in data.hosts.all_tags() {
+                let members: Members = rest()
+                    .filter(|(_, m)| m.and_then(|m| m.tags.first()) == Some(&tag))
+                    .copied()
+                    .collect();
+                if !members.is_empty() {
+                    groups.push(titled(tag, members));
+                }
+            }
+            let untagged: Members = rest()
+                .filter(|(_, m)| m.is_none_or(|m| m.tags.is_empty()))
+                .copied()
+                .collect();
+            if !untagged.is_empty() {
+                groups.push(titled("untagged".into(), untagged));
+            }
+        }
+    }
+    groups
 }
 
 /// A row's tunnel mark.
@@ -636,25 +1014,52 @@ enum Mark {
     Ring(Color32),
 }
 
-/// What a host's tunnels show in its row.
+/// What a host's tunnels show in its row or card.
 struct HostTunnels {
+    /// Tunnels defined on the host.
+    total: usize,
     running: usize,
+    failed: bool,
     mark: Option<Mark>,
+}
+
+impl HostTunnels {
+    /// A card's tunnel line: "1 tunnel up", "tunnel failed", "2 tunnels
+    /// stopped"; nothing without tunnels.
+    fn line(&self) -> Option<(String, Color32)> {
+        let p = &Palette::ONE_DARK;
+        let tunnels = |n: usize| if n == 1 { "tunnel" } else { "tunnels" };
+        if self.failed {
+            Some(("tunnel failed".into(), p.red))
+        } else if self.running > 0 {
+            let n = self.running;
+            Some((format!("{n} {} up", tunnels(n)), p.green))
+        } else if self.total > 0 {
+            let n = self.total;
+            Some((format!("{n} {} stopped", tunnels(n)), p.dim))
+        } else {
+            None
+        }
+    }
 }
 
 /// The tunnels on `host` (by any of its aliases): a red dot if one failed,
 /// a pulsing yellow ring while one starts, green while any run.
 fn host_tunnels(host: &HostEntry, data: &AppData, states: Option<&Snapshot>) -> HostTunnels {
     let p = &Palette::ONE_DARK;
-    let mine: Vec<&TunnelState> = data
+    let defined: Vec<_> = data
         .tunnels
         .tunnels
         .iter()
         .filter(|t| host.aliases.contains(&t.host))
+        .collect();
+    let mine: Vec<&TunnelState> = defined
+        .iter()
         .filter_map(|t| states.and_then(|s| s.tunnels.get(&t.id)).map(|s| &s.state))
         .collect();
     let running = mine.iter().filter(|s| ***s == TunnelState::Running).count();
-    let mark = if mine.iter().any(|s| matches!(s, TunnelState::Failed(_))) {
+    let failed = mine.iter().any(|s| matches!(s, TunnelState::Failed(_)));
+    let mark = if failed {
         Some(Mark::Dot(p.red))
     } else if mine.iter().any(|s| **s == TunnelState::Starting) {
         Some(Mark::Ring(p.yellow))
@@ -663,7 +1068,12 @@ fn host_tunnels(host: &HostEntry, data: &AppData, states: Option<&Snapshot>) -> 
     } else {
         None
     };
-    HostTunnels { running, mark }
+    HostTunnels {
+        total: defined.len(),
+        running,
+        failed,
+        mark,
+    }
 }
 
 /// `alias` in 14 px, with the parts matching `needle` in semibold and bright.
@@ -1135,6 +1545,66 @@ mod tests {
             harness.step();
         }
         harness.get_by_label("Editing db");
+    }
+
+    fn cards_harness() -> Harness<'static, (HostsView, Vec<Command>)> {
+        let (config, data) = fixture();
+        let mut data = Arc::unwrap_or_clone(data);
+        data.settings.host_list_style = HostListStyle::Cards;
+        harness(config, Arc::new(data))
+    }
+
+    #[test]
+    fn cards_group_by_tag_and_show_details_beside_them() {
+        let mut harness = cards_harness();
+        harness.step();
+        harness.get_by_label("FAVORITES");
+        harness.get_by_label("UNTAGGED · 1");
+        harness.get_by_label("web").click();
+        for _ in 0..3 {
+            harness.step();
+        }
+        harness.get_by_label("Defined at");
+    }
+
+    #[test]
+    fn the_group_by_dropdown_saves_the_choice() {
+        let mut harness = cards_harness();
+        harness.step();
+        harness.get_by_label("Group by").click();
+        harness.step();
+        harness.step();
+        harness.get_by_label("File").click();
+        harness.step();
+        harness.step();
+        let Some(Command::SaveSettings(settings)) = harness.state().1.last() else {
+            panic!("{:?}", harness.state().1);
+        };
+        assert_eq!(settings.cards_group_by, CardsGroupBy::File);
+        assert!(
+            harness.query_by_label("None").is_none(),
+            "closed after a pick"
+        );
+    }
+
+    #[test]
+    fn the_dropdown_works_from_the_keyboard() {
+        let mut harness = cards_harness();
+        harness.step();
+        harness.get_by_label("Group by").click();
+        harness.step();
+        harness.step();
+        harness.key_press(egui::Key::ArrowDown);
+        harness.step();
+        harness.key_press(egui::Key::ArrowDown);
+        harness.step();
+        harness.key_press(egui::Key::Enter);
+        harness.step();
+        harness.step();
+        let Some(Command::SaveSettings(settings)) = harness.state().1.last() else {
+            panic!("{:?}", harness.state().1);
+        };
+        assert_eq!(settings.cards_group_by, CardsGroupBy::None);
     }
 
     #[test]

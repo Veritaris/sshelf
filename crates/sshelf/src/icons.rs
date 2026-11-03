@@ -14,6 +14,9 @@ pub const INLINE: f32 = 14.0;
 pub const ACTIVITY: char = '\u{e038}';
 pub const ARROW_RIGHT_LEFT: char = '\u{e417}';
 pub const ASTERISK: char = '\u{e1ef}';
+pub const CHECK: char = '\u{e06c}';
+pub const CHEVRON_DOWN: char = '\u{e06d}';
+pub const CHEVRON_UP: char = '\u{e070}';
 pub const CIRCLE_CHECK: char = '\u{e226}';
 pub const CIRCLE_X: char = '\u{e084}';
 pub const INFO: char = '\u{e0f9}';
@@ -39,6 +42,9 @@ pub const ALL: &[char] = &[
     ACTIVITY,
     ARROW_RIGHT_LEFT,
     ASTERISK,
+    CHECK,
+    CHEVRON_DOWN,
+    CHEVRON_UP,
     CIRCLE_CHECK,
     CIRCLE_X,
     INFO,

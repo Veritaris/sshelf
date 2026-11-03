@@ -1,0 +1,298 @@
+//! The dropdown (SPEC.md §10 *Dropdown*), single-select so far: the panel
+//! rolls open from the trigger by clipping (200 ms "out", closing 140 ms
+//! "in"), upward when there is no room below; 30 px rows with the sliding
+//! hover highlight; a Magenta check on the selected row; ↑↓ Enter Esc.
+
+use egui::{
+    Align2, Area, CursorIcon, FontId, Frame, Id, Key, Margin, Modifiers, Order, Rect, Response,
+    Role, Sense, Shape, Stroke, Ui, WidgetInfo, pos2, vec2,
+};
+
+use crate::theme::{Palette, radius, timing};
+use crate::widgets::nav;
+use crate::{icons, motion};
+
+const ROW: f32 = 30.0;
+/// Space between the trigger and the panel.
+const GAP: f32 = 6.0;
+const OPEN: f32 = 0.200;
+const CLOSE: f32 = 0.140;
+/// The check mark's fade.
+const CHECK: f32 = 0.120;
+
+#[derive(Debug, Clone, Copy, Default)]
+struct State {
+    open: bool,
+    /// The keyboard / pointer highlight.
+    highlight: usize,
+}
+
+/// A single-select dropdown over `options`, showing `selected`.
+pub struct Dropdown<'a, T> {
+    id: Id,
+    name: &'a str,
+    options: &'a [(T, &'a str)],
+    /// The closed control's text, e.g. "Group by tag".
+    trigger: String,
+    max_visible: usize,
+}
+
+impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
+    /// `name` is the control's accessible name; `trigger` its text.
+    pub fn new(
+        id: impl std::hash::Hash + std::fmt::Debug,
+        name: &'a str,
+        options: &'a [(T, &'a str)],
+        trigger: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: Id::unique(id),
+            name,
+            options,
+            trigger: trigger.into(),
+            max_visible: 10,
+        }
+    }
+
+    /// Shows the small button-like trigger and, while open, the panel.
+    /// Returns the option picked this frame.
+    pub fn show(self, ui: &mut Ui, selected: T) -> Option<T> {
+        let p = &Palette::ONE_DARK;
+        let ctx = ui.ctx().clone();
+        let mut state = ctx
+            .data(|d| d.get_temp::<State>(self.id))
+            .unwrap_or_default();
+        let trigger = self.trigger(ui, state.open);
+        let selected_index = self
+            .options
+            .iter()
+            .position(|(v, _)| *v == selected)
+            .unwrap_or(0);
+        let mut picked = None;
+
+        let keyboard_open = trigger.has_focus()
+            && ctx.input_mut(|i| {
+                i.consume_key(Modifiers::NONE, Key::Enter)
+                    || i.consume_key(Modifiers::NONE, Key::Space)
+                    || i.consume_key(Modifiers::NONE, Key::ArrowDown)
+            });
+        if (trigger.clicked() || keyboard_open) && !state.open {
+            state.open = true;
+            state.highlight = selected_index;
+        } else if trigger.clicked() {
+            state.open = false;
+        }
+        if state.open {
+            let last = self.options.len().saturating_sub(1);
+            ctx.input_mut(|i| {
+                if i.consume_key(Modifiers::NONE, Key::ArrowDown) {
+                    state.highlight = (state.highlight + 1).min(last);
+                }
+                if i.consume_key(Modifiers::NONE, Key::ArrowUp) {
+                    state.highlight = state.highlight.saturating_sub(1);
+                }
+                if i.consume_key(Modifiers::NONE, Key::Enter) {
+                    picked = Some(state.highlight);
+                }
+                if i.consume_key(Modifiers::NONE, Key::Escape) {
+                    state.open = false;
+                }
+            });
+        }
+
+        let shown = motion::fade(
+            &ctx,
+            self.id.with("roll"),
+            state.open,
+            if state.open { OPEN } else { CLOSE },
+            if state.open {
+                motion::ease_out
+            } else {
+                motion::ease_in
+            },
+        );
+        if shown > 0.0 {
+            let rows = self.options.len().min(self.max_visible);
+            let height = rows as f32 * ROW + 8.0;
+            let width = trigger.rect.width().max(180.0);
+            let below = trigger.rect.bottom() + GAP;
+            let room_below = ctx.content_rect().bottom() - below;
+            let upward = room_below < height && trigger.rect.top() - GAP > height;
+            let top = if upward {
+                trigger.rect.top() - GAP - height
+            } else {
+                below
+            };
+            let panel = Rect::from_min_size(pos2(trigger.rect.left(), top), vec2(width, height));
+            // Revealed from the trigger's side by clipping.
+            let visible = height * shown;
+            let clip = if upward {
+                Rect::from_min_max(pos2(panel.left(), panel.bottom() - visible), panel.max)
+            } else {
+                Rect::from_min_max(panel.min, pos2(panel.right(), panel.top() + visible))
+            };
+            let area = Area::new(self.id.with("panel"))
+                .order(Order::Foreground)
+                .fixed_pos(panel.min)
+                .fade_in(false)
+                .show(&ctx, |ui| {
+                    ui.set_clip_rect(clip.expand(1.0));
+                    Frame::new()
+                        .fill(p.bg_dark)
+                        .stroke(Stroke::new(1.0, p.selection))
+                        .corner_radius(radius::CONTROL)
+                        .inner_margin(Margin::symmetric(4, 4))
+                        .show(ui, |ui| {
+                            ui.set_width(width - 8.0);
+                            if let Some(index) =
+                                self.rows(ui, &mut state, selected_index, height - 8.0)
+                            {
+                                picked = Some(index);
+                            }
+                        });
+                });
+            // A click anywhere else closes it.
+            let outside = ctx.input(|i| {
+                i.pointer.any_pressed()
+                    && i.pointer.interact_pos().is_some_and(|pos| {
+                        !area.response.rect.contains(pos) && !trigger.rect.contains(pos)
+                    })
+            });
+            if outside {
+                state.open = false;
+            }
+        }
+        if picked.is_some() {
+            state.open = false;
+        }
+        ctx.data_mut(|d| d.insert_temp(self.id, state));
+        picked.map(|i| self.options[i].0)
+    }
+
+    /// The closed control: a small raised button with the text and a
+    /// chevron that turns while the panel is open.
+    fn trigger(&self, ui: &mut Ui, open: bool) -> Response {
+        let p = &Palette::ONE_DARK;
+        let galley =
+            ui.painter()
+                .layout_no_wrap(self.trigger.clone(), FontId::proportional(12.0), p.text);
+        let size = vec2(galley.size().x + 10.0 + 6.0 + 14.0 + 8.0, 28.0);
+        let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+        let enabled = response.enabled();
+        let (name, value) = (self.name, self.trigger.clone());
+        response.widget_info(|| {
+            let mut info = WidgetInfo::labeled(Role::ComboBox, enabled, name);
+            info.current_text_value = Some(value.clone());
+            info
+        });
+        let hover = motion::fade(
+            ui.ctx(),
+            response.id.with("hover"),
+            response.hovered(),
+            timing::HOVER,
+            motion::ease_out,
+        );
+        let painter = ui.painter();
+        painter.rect_filled(
+            rect,
+            radius::CONTROL,
+            p.surface.lerp_to_gamma(p.selection, hover),
+        );
+        painter.galley(
+            pos2(rect.left() + 10.0, rect.center().y - galley.size().y / 2.0),
+            galley,
+            p.text,
+        );
+        let turn = motion::fade(
+            ui.ctx(),
+            response.id.with("chevron"),
+            open,
+            CLOSE,
+            motion::ease_in_out,
+        );
+        let chevron = if turn > 0.5 {
+            icons::CHEVRON_UP
+        } else {
+            icons::CHEVRON_DOWN
+        };
+        painter.text(
+            pos2(rect.right() - 8.0 - 7.0, rect.center().y),
+            Align2::CENTER_CENTER,
+            chevron,
+            icons::font(14.0),
+            p.text,
+        );
+        response.on_hover_cursor(CursorIcon::PointingHand)
+    }
+
+    /// The option rows; returns the one clicked.
+    fn rows(
+        &self,
+        ui: &mut Ui,
+        state: &mut State,
+        selected: usize,
+        max_height: f32,
+    ) -> Option<usize> {
+        let p = &Palette::ONE_DARK;
+        let mut picked = None;
+        egui::ScrollArea::vertical()
+            .id_salt(self.id.with("scroll"))
+            .max_height(max_height)
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                let slot = ui.painter().add(Shape::Noop);
+                let mut highlighted = None;
+                for (index, (_, label)) in self.options.iter().enumerate() {
+                    let (rect, response) =
+                        ui.allocate_exact_size(vec2(ui.available_width(), ROW), Sense::click());
+                    let is_selected = index == selected;
+                    response.widget_info(|| {
+                        WidgetInfo::selected(Role::ListBoxOption, true, is_selected, *label)
+                    });
+                    if response.hovered() {
+                        state.highlight = index;
+                    }
+                    if response.clicked() {
+                        picked = Some(index);
+                    }
+                    if index == state.highlight {
+                        highlighted = Some((index, rect));
+                    }
+                    let strong = index == state.highlight || is_selected;
+                    let color = if strong { p.text_strong } else { p.text };
+                    ui.painter().text(
+                        pos2(rect.left() + 10.0, rect.center().y),
+                        Align2::LEFT_CENTER,
+                        *label,
+                        FontId::proportional(13.0),
+                        color,
+                    );
+                    let check = motion::fade(
+                        ui.ctx(),
+                        self.id.with(("check", index)),
+                        is_selected,
+                        CHECK,
+                        motion::ease_out,
+                    );
+                    if check > 0.0 {
+                        ui.painter().text(
+                            pos2(rect.right() - 10.0 - 7.0, rect.center().y),
+                            Align2::CENTER_CENTER,
+                            icons::CHECK,
+                            icons::font(14.0),
+                            p.accent.gamma_multiply(check),
+                        );
+                    }
+                    response.on_hover_cursor(CursorIcon::PointingHand);
+                }
+                nav::hover_highlight(
+                    ui,
+                    self.id.with("highlight"),
+                    slot,
+                    highlighted,
+                    p.selection,
+                );
+            });
+        picked
+    }
+}
