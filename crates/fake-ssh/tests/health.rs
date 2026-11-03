@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use sshelf_core::core::{Command, Core, Event};
-use sshelf_core::health::{Health, HealthSnapshot};
+use sshelf_core::health::{self, Health, HealthSnapshot};
 use sshelf_core::paths::Paths;
 use sshelf_core::settings::Settings;
 use sshelf_core::storage::Store;
@@ -21,9 +21,8 @@ const HOSTS: [&str; 6] = [
     "ok-f",
 ];
 
-#[test]
-fn checks_run_a_few_at_a_time_and_classify_every_outcome() {
-    let tmp = tempfile::tempdir().unwrap();
+/// A core whose config has [`HOSTS`] and whose ssh is fake-ssh.
+fn start(tmp: &tempfile::TempDir) -> (Core, std::sync::mpsc::Receiver<Event>) {
     let paths = Paths::new(&tmp.path().join("home"), tmp.path().join("app"));
     fs::create_dir_all(&paths.ssh_dir).unwrap();
     let config: String = HOSTS.iter().map(|h| format!("Host {h}\n")).collect();
@@ -34,10 +33,18 @@ fn checks_run_a_few_at_a_time_and_classify_every_outcome() {
             ..Settings::default()
         })
         .unwrap();
-    let (core, events) = Core::start(paths, Arc::new(|| {}));
+    Core::start(paths, Arc::new(|| {}))
+}
 
-    let all: Vec<String> = HOSTS.iter().map(|h| h.to_string()).collect();
-    core.send(Command::CheckHealth(all.clone()));
+fn all_hosts() -> Vec<String> {
+    HOSTS.iter().map(|h| h.to_string()).collect()
+}
+
+#[test]
+fn checks_run_a_few_at_a_time_and_classify_every_outcome() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (core, events) = start(&tmp);
+    core.send(Command::CheckHealth(all_hosts()));
     // Asking again while they run queues nothing twice.
     core.send(Command::CheckHealth(vec!["ok-a".into()]));
 
@@ -64,5 +71,32 @@ fn checks_run_a_few_at_a_time_and_classify_every_outcome() {
         "{:?}",
         health("unreachable-e")
     );
+    drop(core);
+}
+
+#[test]
+fn cancelling_drops_the_waiting_checks_and_lets_the_running_finish() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (core, events) = start(&tmp);
+    core.send(Command::CheckHealth(all_hosts()));
+    core.send(Command::CancelHealth);
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let done: Arc<HealthSnapshot> = loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if let Event::Health(snapshot) = events.recv_timeout(left).expect("health results")
+            && snapshot.checking.is_empty()
+            && !snapshot.reports.is_empty()
+        {
+            break snapshot;
+        }
+    };
+    // The first few had started; the rest were still waiting.
+    let reported: Vec<&str> = HOSTS
+        .iter()
+        .copied()
+        .filter(|h| done.reports.contains_key(*h))
+        .collect();
+    assert_eq!(reported, HOSTS[..health::MAX_PARALLEL], "{reported:?}");
     drop(core);
 }

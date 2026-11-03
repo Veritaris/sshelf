@@ -130,6 +130,8 @@ pub enum Command {
     },
     /// Check these hosts' health (SPEC.md §12, M8); a few at a time.
     CheckHealth(Vec<String>),
+    /// Drop the health checks still waiting; the running ones finish.
+    CancelHealth,
     /// Open a terminal running `ssh-keygen` for a security key (SPEC.md §11).
     GenerateHardwareKey(KeyRequest),
     /// Read the public half of a key `ssh-keygen` wrote; answered by
@@ -688,6 +690,12 @@ impl Worker {
                         if self.health.checking.insert(alias.clone()) {
                             self.health_queue.push_back(alias);
                         }
+                    }
+                    self.run_health_checks();
+                }
+                Command::CancelHealth => {
+                    for alias in self.health_queue.drain(..) {
+                        self.health.checking.remove(&alias);
                     }
                     self.run_health_checks();
                 }
