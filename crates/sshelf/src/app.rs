@@ -100,11 +100,17 @@ impl SshelfApp {
                 Event::HostKeyPrompt(prompt) => self.hostkeys.on_unknown(prompt),
                 Event::HostKeyChanged(prompt) => self.hostkeys.on_changed(prompt),
                 Event::HostKeyClosed(id) => self.hostkeys.on_closed(id),
-                // The host editor comes in the next commit.
-                Event::EditChecked { .. }
-                | Event::EditSaved { .. }
-                | Event::EditConflict { .. } => {}
+                Event::EditChecked { id, result } => self.hosts.editor.on_checked(id, result),
+                Event::EditSaved { id } => self.hosts.editor.on_saved(id),
+                Event::EditConflict { id, disk } => self.hosts.editor.on_conflict(id, &disk),
             }
+        }
+        if let Some((error, text)) = self.hosts.editor.take_status() {
+            self.status = Some(if error {
+                Status::Error(text)
+            } else {
+                Status::Info(text)
+            });
         }
     }
 

@@ -1073,6 +1073,8 @@ impl Worker {
             }
         };
         if disk != edit.base && !overwrite {
+            // The editor needs the new version to show and rebase onto.
+            self.reload();
             return self.emitter.emit(Event::EditConflict {
                 id: edit.id,
                 disk: Arc::new(disk),

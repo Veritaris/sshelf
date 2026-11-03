@@ -5,6 +5,7 @@ mod app;
 mod close_guard;
 mod groups_view;
 mod host_detail;
+mod host_editor;
 mod hostkey_modal;
 mod hosts_view;
 mod orphans_window;

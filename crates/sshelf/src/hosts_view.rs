@@ -6,7 +6,8 @@ use sshconf::{ConfigSet, HostEntry, HostList, PatternKind, Severity};
 use sshelf_core::core::{AppData, Command, ConfigSnapshot, ConfigState, SshInfo};
 use sshelf_core::metadata::HostMeta;
 
-use crate::host_detail::HostDetail;
+use crate::host_detail::{DetailAction, HostDetail};
+use crate::host_editor::HostEditor;
 use crate::theme::Palette;
 use crate::util;
 
@@ -18,10 +19,12 @@ pub struct HostsView {
     /// Primary alias of the selected host.
     selected: Option<String>,
     pub detail: HostDetail,
+    pub editor: HostEditor,
 }
 
 impl HostsView {
-    /// Drops the selection when its host disappeared from the config.
+    /// Drops the selection when its host disappeared from the config (or
+    /// follows it when it was renamed).
     pub fn on_config(&mut self, snapshot: &ConfigSnapshot) {
         let gone = match (&self.selected, snapshot.hosts()) {
             (Some(alias), Some(hosts)) => hosts.find(alias).is_none(),
@@ -29,8 +32,13 @@ impl HostsView {
             _ => false,
         };
         if gone {
-            self.selected = None;
+            let renamed = self
+                .editor
+                .renaming_to()
+                .filter(|to| snapshot.hosts().is_some_and(|h| h.find(to).is_some()));
+            self.selected = renamed.map(str::to_string);
         }
+        self.editor.on_config(snapshot);
     }
 
     pub fn show(
@@ -71,15 +79,23 @@ impl HostsView {
             .min_size(240.0)
             .show(ui, |ui| self.list(ui, set, hosts, data));
 
+        // Another host was picked: an editor without changes gives way.
+        if self.editor.is_open()
+            && self.editor.alias() != self.selected.as_deref()
+            && !self.editor.is_dirty()
+        {
+            self.editor.close();
+        }
+
         let mut commands = Vec::new();
         egui::CentralPanel::default().show(ui, |ui| {
+            if self.editor.is_open() {
+                commands = self.editor.show(ui, config);
+                return;
+            }
             let host = self.selected.as_deref().and_then(|a| hosts.find(a));
             match host {
-                Some(host) => {
-                    commands = self
-                        .detail
-                        .show(ui, host, set, config.generation, data, ssh);
-                }
+                Some(host) => commands = self.detail.show(ui, host, config, data, ssh),
                 None => {
                     ui.add_space(24.0);
                     ui.vertical_centered(|ui| {
@@ -88,6 +104,12 @@ impl HostsView {
                 }
             }
         });
+        match self.detail.take_action() {
+            Some(DetailAction::Edit(alias)) => self.editor.open(config, &alias),
+            Some(DetailAction::Rename(alias)) => self.editor.open_rename(&alias),
+            None => {}
+        }
+        commands.extend(self.editor.show_rename(ui.ctx(), config, data));
         commands
     }
 
@@ -382,6 +404,29 @@ mod tests {
             Some("web")
         );
         assert_eq!(harness.state_mut().0.detail.take_new_tunnel(), None);
+    }
+
+    #[test]
+    fn edit_opens_the_editor_in_place_of_the_details() {
+        let (config, data) = fixture();
+        let mut harness = harness(config, data);
+        harness.step();
+        harness.get_by_label("web").click();
+        harness.step();
+        harness.step();
+        harness.get_by_label("Edit").click();
+        for _ in 0..3 {
+            harness.step();
+        }
+        harness.get_by_label("Editing web");
+        assert!(harness.query_by_label("Defined at").is_none());
+        // Picking another host closes an editor without changes.
+        harness.get_by_label("db").click();
+        for _ in 0..3 {
+            harness.step();
+        }
+        assert!(!harness.state().0.editor.is_open());
+        harness.get_by_label("Defined at");
     }
 
     #[test]

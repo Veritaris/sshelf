@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 
 use egui::RichText;
 use sshconf::{ConfigSet, HostEntry};
-use sshelf_core::core::{AppData, Command, SshInfo};
+use sshelf_core::core::{AppData, Command, ConfigSnapshot, SshInfo};
 use sshelf_core::metadata::{Color, HostMeta};
 use sshelf_core::ssh::Resolved;
 use sshelf_core::storage::LoadStatus;
@@ -42,6 +42,15 @@ pub struct HostDetail {
     filter: String,
     /// "New tunnel" was clicked for this host; the app opens the editor.
     new_tunnel: Option<String>,
+    /// "Edit" / "Rename…" was clicked for this host.
+    action: Option<DetailAction>,
+}
+
+/// Editing actions the hosts view carries out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DetailAction {
+    Edit(String),
+    Rename(String),
 }
 
 #[derive(Default, Clone, PartialEq)]
@@ -89,6 +98,10 @@ impl HostDetail {
         self.new_tunnel.take()
     }
 
+    pub fn take_action(&mut self) -> Option<DetailAction> {
+        self.action.take()
+    }
+
     pub fn on_resolved(
         &mut self,
         alias: String,
@@ -108,12 +121,16 @@ impl HostDetail {
         &mut self,
         ui: &mut egui::Ui,
         host: &HostEntry,
-        set: &ConfigSet,
-        generation: u64,
+        config: &ConfigSnapshot,
         data: &AppData,
         ssh: Option<&SshInfo>,
     ) -> Vec<Command> {
         let mut commands = Vec::new();
+        let Some(set) = config.set() else {
+            return commands;
+        };
+        let generation = config.generation;
+        let read_only = config.read_only(host.at.file);
         let alias = host.primary().to_string();
         self.sync_draft(&alias, data.hosts.get(host).cloned().unwrap_or_default());
         let current = self
@@ -128,7 +145,7 @@ impl HostDetail {
             .id_salt("host_detail")
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                self.header(ui, host, set, data, ssh, &mut commands);
+                self.header(ui, host, (set, read_only), data, ssh, &mut commands);
                 ui.separator();
                 self.metadata(ui, &alias, data, &mut commands);
                 ui.separator();
@@ -154,7 +171,7 @@ impl HostDetail {
         &mut self,
         ui: &mut egui::Ui,
         host: &HostEntry,
-        set: &ConfigSet,
+        (set, read_only): (&ConfigSet, Option<&str>),
         data: &AppData,
         ssh: Option<&SshInfo>,
         commands: &mut Vec<Command>,
@@ -221,6 +238,26 @@ impl HostDetail {
             };
             ui.label(RichText::new(last).color(p.dim))
                 .on_hover_text("Only sessions started from sshelf can be tracked.");
+        });
+        ui.horizontal(|ui| {
+            let why = read_only.map(|r| format!("Read-only: {r}"));
+            let edit = ui
+                .add_enabled(why.is_none(), egui::Button::new("Edit"))
+                .on_hover_text("Edit this host's block in the config")
+                .on_disabled_hover_text(why.clone().unwrap_or_default());
+            if edit.clicked() {
+                self.action = Some(DetailAction::Edit(host.primary().to_string()));
+            }
+            let rename = ui
+                .add_enabled(why.is_none(), egui::Button::new("Rename…"))
+                .on_hover_text("Rename this host in the config and in sshelf's data")
+                .on_disabled_hover_text(why.clone().unwrap_or_default());
+            if rename.clicked() {
+                self.action = Some(DetailAction::Rename(host.primary().to_string()));
+            }
+            if let Some(why) = &why {
+                ui.label(RichText::new(why).small().color(p.yellow));
+            }
         });
     }
 
