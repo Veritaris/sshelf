@@ -204,6 +204,7 @@ tunnels = ["t-3f9a1c07", "t-81d2e4aa"]
 - Forward kinds: `L` (local), `R` (remote), `D` (dynamic/SOCKS). Every forward has `bind` (listen address; local for `L`/`D`, on the server for `R`), `listen` (port) and, for `L`/`R`, `target` (`host:port` to connect to).
 - Ids are random (`t-xxxxxxxx`, `g-xxxxxxxx`).
 - Default bind address `127.0.0.1`. Binding to `0.0.0.0` or another non-loopback address requires an explicit choice and shows a warning.
+  - As built: since the bind field starts at `127.0.0.1`, a non-loopback bind only exists when the user types one; that is the choice. The field then gets a yellow outline and the warning says who can reach the port.
 - **Group** = named set of tunnel ids. Forwards are defined only on tunnels, never inline in groups.
 
 ### Process
@@ -265,6 +266,7 @@ Before starting a tunnel, determine the host key state using values from `ssh -G
 
 - Warning-styled modal, visually distinct from the unknown-key modal: old vs new fingerprint side by side, explanation (server reinstalled **or** connection intercepted).
 - *Replace* is not the default button and requires an explicit extra action (checkbox "I know this server was reinstalled" or typing the host name).
+  - As built (M9): typing the host's alias; *Don't connect* is the primary button and *Replace key* uses Dark Red.
 - Replace = `ssh-keygen -R <host> -f <known_hosts>` (creates `.old` backup), then the unknown-key flow above to fetch and store the new key.
 - Never replace automatically.
 
@@ -284,10 +286,10 @@ Before starting a tunnel, determine the host key state using values from `ssh -G
 - **Sidebar:** an icon rail with Hosts · Tunnels · Groups · Settings, plus the orphan warning indicator (see *Visual design*).
 - **Main area:** list + detail pane.
 - **Feedback:** successes (settings saved, host saved/added/renamed, terminal opened) show as a toast in the bottom-right corner that fades after ~3 s; errors stay in the status bar until dismissed.
-  - Hosts: list (search, tags, favorites, *New host*) with a separate collapsible *Patterns* section; detail pane with source file, metadata, actions (Connect, New tunnel, Edit, Rename…), and the `ssh -G` resolved panel.
+  - Hosts: list (search; filter chips *All*, *Favorites* and one per tag, one filter at a time; *New host*) with a separate collapsible *Patterns* section; detail pane with source file, metadata, actions (Connect, New tunnel, Edit, Rename…), and the `ssh -G` resolved panel.
   - *Edit* replaces the detail pane with the editor (§5): *Form* and *Raw text* tabs over the same block, the problems found, the changed lines as they will be written, and Save / Check / Discard. Picking another host closes an editor without changes. *New host* opens the same editor with an alias field and the target file picker (§4).
   - Tunnels: list with status, start/stop, forwards, stderr log.
-  - Groups: single toggle per group, aggregate status (running / degraded / stopped), expandable per-tunnel states.
+  - Groups: list + detail pane. Each row has the group's switch and its aggregate status (running / degraded / stopped, with counts); the detail shows the per-tunnel states.
 
 ### Terminal launch ("Connect")
 
@@ -304,9 +306,9 @@ Before starting a tunnel, determine the host key state using values from `ssh -G
 ### Close behavior
 
 - If no tunnels are running: close immediately — unless *Minimize to tray* is the remembered choice and a tray is available (then the window hides, as below).
-- If tunnels are running: modal "N tunnels are running and will be stopped".
+- If tunnels are running: modal "N tunnels are running", the running tunnels with their ports, then "Quitting stops them. In the tray they keep running." when a tray is available, or "Quitting stops them." when it isn't.
   - Buttons: **Minimize to tray** (only when a tray is available — milestone 6) · **Stop N tunnels and quit** · **Cancel**.
-  - Checkbox: *Remember my choice*; resettable in Settings. Only a quitting choice can be remembered (*Cancel* is not): once remembered, closing with running tunnels stops them and quits without asking, until reset in Settings (`close_behavior` in `settings.toml`).
+  - Switch: *Remember my choice*; resettable in Settings. Only a quitting choice can be remembered (*Cancel* is not): once remembered, closing with running tunnels stops them and quits without asking, until reset in Settings (`close_behavior` in `settings.toml`).
   - *Minimize to tray* can be remembered too (`close_behavior = "minimize-to-tray"`, also selectable in Settings): closing then always hides the window, with or without running tunnels, and the tunnels keep running. When the desktop has no tray at that moment, closing behaves as *Ask* (quit if nothing runs, else the modal without that button); Settings says so.
 - Cmd+Q on macOS and Quit from the tray go through the same logic. Quit from the tray never minimizes: with nothing running it quits; with a remembered *Minimize to tray* and running tunnels it asks, with the window shown, offering *Stop and quit* and *Cancel*.
 - The close decision runs in `App::logic`, so it works while the window is hidden; asking shows the window first.
@@ -331,22 +333,27 @@ Before starting a tunnel, determine the host key state using values from `ssh -G
 
 The visual reference is the design canvas "sshelf redesign — wireframes" (private to the owner); its boards are copied into `docs/design/` (see its README). This section is the rule; the boards show it. If they disagree, this section wins until it is updated.
 
-- **Window:** frameless (no OS title bar or border), corners rounded 16 px, flat (no shadows inside the app; dialogs and popups only get a 1 px `#3E4451` outline).
+- **Window:** frameless (no OS title bar or border), corners rounded 16 px, flat (no shadows anywhere: not on dialogs, popups, menus, toasts or the tray flyout; they only get a 1 px `#3E4451` outline). The one exception is the changed-host-key dialog (§9), which must look different from the unknown-key one: 1 px Light Red `#E06C75` outline and a red-tinted header band.
   - The top 44 px of the content area is the drag strip (`ViewportCommand::StartDrag`); it holds only *Minimize* and *Close* on the right (hover: Minimize turns Light Yellow, Close Light Red). No maximize button; double-clicking the strip maximizes / restores.
   - Resizing works from all edges and corners (`ViewportCommand::BeginResize` on a 6 px border), since the OS frame is gone. Minimum size 960 × 600.
-  - Rounded corners need a transparent viewport (`with_transparent(true)`) with the app painted as a rounded rect. If a platform can't do transparency, fall back to square corners, never to the OS frame.
+  - Rounded corners need a transparent viewport (`with_transparent(true)`) with the app painted as a rounded rect. If a platform can't do transparency, fall back to square corners, never to the OS frame. Linux: rounded on Wayland; X11 uses square corners, since telling whether a compositor runs would need an X11 dependency. Maximized windows are square everywhere.
 - **Layout:** a 64 px icon rail on the left (app icon, Hosts, Tunnels, Groups; orphan indicator and Settings at the bottom), then list pane + detail pane, then a 28 px status bar. Rail items show a tooltip with the name and shortcut (`Ctrl+1…4`).
+  - The status bar is always shown: running and failed tunnel counts, the ssh version, the agent state, and "config reloaded HH:MM". An error takes its place until dismissed: same 28 px height, red tint, Lucide `circle-x`, a dismiss button.
+  - Editors (host, tunnel, group) replace the detail pane; the list stays visible, dimmed. Their *Problems* / *Changes to write* column (380 px) sits right of the form while the pane is at least 880 px wide and stacks below the form when it is narrower, so the default 1280 px window shows both side by side.
 - **Hosts list style** is a setting (*Settings › Appearance › Host list style*: **List** or **Cards**, default List; cards can be grouped by tag, file or not at all). Stored in `settings.toml` as `host_list_style = "list" | "cards"` and `cards_group_by = "tag" | "file" | "none"`. Both views use the same detail content; in Cards the detail is a right-hand pane.
-- **Colours (One Dark):** background `#282C34`; rail, inputs, popups `#21252B`; raised / hover `#2C313A`; selected `#3E4451`; outline `#4B5263`; text `#ABB2BF`; strong text `#D7DAE0`; secondary text `#9AA1AD` (Comment Grey `#5C6370` only for marks and syntax, never body text: it fails contrast). Accent Magenta `#C678DD` (selection, primary button, focus inside inputs, switches, checkboxes). Status: running Green `#98C379`, starting / degraded / warning Light Yellow `#E5C07B`, failed / error Light Red `#E06C75`, destructive buttons Dark Red `#BE5046` with white text, info / links / keyboard focus Blue `#61AFEF`. Tinted banners and status chips mix the status colour about 15 % into the background.
+- **Colours (One Dark):** background `#282C34`; rail, inputs, popups `#21252B`; raised / hover `#2C313A`; selected `#3E4451`; outline `#4B5263`; text `#ABB2BF`; strong text `#D7DAE0`; secondary text `#9AA1AD` (Comment Grey `#5C6370` only for marks and syntax, never body text: it fails contrast). Accent Magenta `#C678DD` (selection, primary button, focus inside inputs, switches, checkboxes). Status: running Green `#98C379`, starting / degraded / warning Light Yellow `#E5C07B`, failed / error Light Red `#E06C75`, destructive buttons Dark Red `#BE5046` with white text, info / links / keyboard focus Blue `#61AFEF`.
+  - Tinted banners and status chips use green `#2B3528`, yellow `#3B3527`, red `#3A2A2E` and blue `#24303D` behind the full status colour.
+  - Also used: tooltip background `#181A1F`; modal overlay `rgba(24,26,31,.72)`; zebra rows in tables `#2A2E36`; separators inside cards `#353B45`; disabled menu text `#7F848E`; link hover `#8CC4F5`.
+  - Host colours (*Notes & tags*) are swatches that never collide with status colours: Blue `#61AFEF`, Cyan `#56B6C2`, Magenta `#C678DD`, Dark Yellow `#D19A66`, Comment Grey `#5C6370`, and *none*. A colour stored in `hosts.toml` outside these shows as a sixth, selected swatch; nothing is rewritten until the user picks another.
 - **Radii:** 1 px (table rows, code bars, the inner side of joined pieces), 4 px (checkboxes only), 8 px (controls, cards, menus, chips), 16 px (window, dialogs, tray flyout, large panels). No other values.
-- **Type:** UI font Inter (Ubuntu acceptable), mono JetBrains Mono for values, paths, aliases and logs. Sizes: 22/600 titles, 16/600 pane headings, 13/600 sections, 14 list items, 13 body and controls, 12 secondary, 11 overlines. Spacing in 4/8 px steps.
+- **Type:** UI font Inter (Ubuntu acceptable), mono JetBrains Mono for values, paths, aliases and logs. Sizes: 22/600 titles, 20/600 editor, Settings and cards-pane titles, 17/600 dialog titles, 16/600 pane headings, 13/600 sections, 14 list items, 13 body and controls, 12 secondary, 11 overlines. Spacing in 4/8 px steps.
 - **Icons:** Lucide (ISC licence) everywhere, loaded as an icon font (`lucide.ttf` from the `lucide-static` package) in its own `FontFamily::Name("lucide")`. No emoji and no self-drawn icons; status dots and the app icon are painted shapes. Sizes: 16 default, 14 in small buttons and inline text, 12 in keyboard hints, 20–28 in empty states. The icon names per action are on the canvas (*Components › Icons*).
 - **Status marks:** a filled dot is a settled state (running green, stopped grey, failed red); a ring is a transition (starting yellow, stopping grey, waiting for the user blue). The app and tray icon carry one dot: green while anything runs, yellow while starting or degraded, red when something failed.
 - **Destructive confirmations:** the safe action is the primary button and gets focus; the destructive one uses Dark Red.
 
 ### Interaction and motion
 
-All timings below are final and live as constants in one place (`theme.rs`), used through egui's `animate_*_with_time`. Easing "in-out" is `cubic-bezier(.65,0,.35,1)`, "out" is `cubic-bezier(.2,.8,.2,1)`, "in" is `cubic-bezier(.4,0,1,1)`. The playable reference is the canvas board *Interaction and motion*.
+All timings below are final and live as constants in one place (`theme.rs`). egui's `animate_value_with_time` only interpolates linearly, so animations go through a small tween helper (`motion.rs`) that applies these curves to egui's frame time and requests repaints only while something moves. Easing "in-out" is `cubic-bezier(.65,0,.35,1)`, "out" is `cubic-bezier(.2,.8,.2,1)`, "in" is `cubic-bezier(.4,0,1,1)`. The playable reference is the canvas board *Interaction and motion*.
 
 | Element | Cursor | Motion | Duration | Easing |
 |---|---|---|---|---|
@@ -376,7 +383,7 @@ One dropdown component is used for every select. The playable reference is the c
 
 - **Parameters:** `max_visible` (rows shown before the list scrolls, default **10**), `searchable` (search field at the top), `multi` (multi-select with checkboxes). Checkboxes exist only in multi-select dropdowns; everywhere else on/off is a switch.
 - **Open / close:** the panel is revealed from the top edge downward by clipping, with no fade (**200 ms**, out); closing rolls it back up (**140 ms**, in). It opens upward when there's no room below; the chevron turns with it.
-- **Rows:** 30 px each; list height = min(rows, `max_visible`) × 30. Beyond that the list scrolls with a thin scrollbar and a 20 px fade at the bottom edge. Opening scrolls the selected row into view.
+- **Rows:** 30 px each; list height = min(rows, `max_visible`) × 30. The *Save to* dropdown is the exception: two-line 36 px rows (the path, then "main config · 19 hosts" / "included from config:2 · 4 hosts", or a Lucide `lock` and the read-only reason on a disabled row). Beyond that the list scrolls with a thin scrollbar and a 20 px fade at the bottom edge. Opening scrolls the selected row into view.
 - **Hover / keyboard highlight:** as in the motion table (50 ms slide). It follows ↑↓ and scrolls the row into view.
 - **Single-select:** the selected row shows a Lucide check on the right (fades 120 ms); picking closes the dropdown.
 - **Searchable:** the search field is fixed at the top and focused on open. Typing filters by case-insensitive substring; the list height glides to the new row count (120 ms, in-out); the highlight moves to the first match. No result shows one "No … match" row. A clear button appears in the field when it has text.
@@ -386,12 +393,12 @@ One dropdown component is used for every select. The playable reference is the c
   - Selections hidden by the search are kept and counted.
   - The closed control shows the selected values as chips, as many as fit; a long value is truncated inside its chip. The rest collapse into a Magenta "+N" chip; hovering it for 300 ms shows those values as chips in a tooltip (120 ms fade). A newly added chip scales in (120 ms).
 - **Keyboard:** Enter / Space / ↓ on the closed control opens it; typing goes to the search when `searchable`; ↑↓ move; Enter picks (single) or toggles (multi); Space toggles (multi); Esc or a click outside closes (multi-select keeps its changes).
-- **Where:** single — IdentitiesOnly, ForwardAgent, Group by, closing behaviour; single + search — tunnel host, *Save to* file; multi — tunnels in a group; multi + search — tag filter, hosts in the cards view.
+- **Where:** single — IdentitiesOnly, ForwardAgent, Group by, closing behaviour, *Save to* file, key algorithm; single + search — tunnel host; multi — tunnels in a group. The host tag filter is a row of chips, not a dropdown (§10 *Layout*).
 
 ### Design of features already in the spec (M7, M8)
 
-- **Health:** a 6 px dot at the right end of every host row and card: Green = login OK, Light Yellow = reachable but sshelf can't log in yet (no key accepted, or host key not known yet), Light Red = unreachable, Comment Grey = not checked yet; a ring while a check runs. Every yellow and red state shows a tinted banner under the Health line with the reason and its fix: *Load key into agent* (disabled with the reason when the agent service is stopped) and *Generate key…* for no key; *Review host key…* (the §9 dialog) and *Connect in terminal* for an unknown host key; ssh's last line and *Edit host* for unreachable. While *Check all* runs, its button shows a ring and "7 / 19"; clicking it again stops. Hovering the dot shows the result, latency, ssh's reason and when it was checked. The host detail has a *Health* line (dot, result, login time, "checked N min ago", *Check*). *Check all* is an icon button (Lucide `activity`) next to *New host*, with a tooltip.
-- **Key generation:** *Generate key…* (Lucide `key-round`) sits next to the *Form / Raw text* tabs in the host editor. The dialog uses the standard dropdown for the algorithm (Ed25519 marked "recommended"; security keys in their own group, noted as opening a terminal), password fields with a show/hide eye, a stepper for KDF rounds, a file field with *Browse…*, and a yellow banner while the passphrase is empty. The result dialog shows fingerprint, type and passphrase state, the public key with a copy icon, and *Next steps* as rows (button + one-line explanation): *Use in this host*, *Add to agent* (disabled with the reason when the agent isn't available), *Install on server*.
+- **Health:** a 6 px dot at the right end of every host row and card: Green = login OK, Light Yellow = reachable but sshelf can't log in yet (no key accepted, or host key not known yet), Light Red = unreachable, Comment Grey = not checked yet; a ring while a check runs. Every yellow and red state shows a tinted banner under the Health line with the reason and its fix: *Load key into agent* (disabled with the reason when the agent service is stopped; it runs `ssh-add` in a terminal for the host's first `identityfile` from `ssh -G`) and *Generate key…* for no key; *Connect in terminal* for an unknown host key (ssh asks there; the health check itself never prompts); ssh's last line and *Edit host* for unreachable. "How to start it" next to a stopped agent opens *Settings › ssh*. While *Check all* runs, its button shows a ring and "7 / 19"; clicking it again stops. Hovering the dot shows the result, latency, ssh's reason and when it was checked. The host detail has a *Health* line (dot, result, login time, "checked N min ago", *Check*). *Check all* is an icon button (Lucide `activity`) next to *New host*, with a tooltip.
+- **Key generation:** *Generate key…* (Lucide `key-round`) sits next to the *Form / Raw text* tabs in the host editor. The dialog uses the standard dropdown for the algorithm (Ed25519 marked "recommended"; security keys in their own group, noted as opening a terminal), password fields with a show/hide eye, a stepper for KDF rounds, a file field (typed path; no file picker), and a yellow banner while the passphrase is empty. It stays a window, not a modal (§11). The result dialog shows fingerprint, type and passphrase state, the public key with a copy icon, and *Next steps* as rows (button + one-line explanation): *Use in this host*, *Add to agent* (disabled with the reason when the agent isn't available), *Install on server*.
 - **Switches, not checkboxes:** the tunnel's *Reconnect automatically* and the group's *Start with sshelf* are Magenta switches. A group's tunnels are picked with the multi-select dropdown (rows show tunnel name and host). Groups that start with sshelf show a "starts with sshelf" chip (Lucide `power`) in their detail.
 
 ---
@@ -484,8 +491,18 @@ Each milestone ends with its acceptance criteria met, tests green on all three O
 
 ### M9 — UI redesign
 - Everything in §10 *Visual design*, *Interaction and motion* and *Dropdown*, plus the M7/M8 design notes there, applied to every existing screen and the tray. Reference boards: `docs/design/` (its README lists what each one shows).
-- Order: theme constants in `theme.rs` (colours, radii, timings), the Lucide font, the frameless rounded window (drag strip, edge resize), the shared widgets (icon rail, sliding highlight, switch, dropdown, truncated label, copy-on-hover row, animated tooltip and context menu, toast), then the screens, then the sshelf tray menu.
+- Order: theme constants in `theme.rs` (colours, radii, timings), the Lucide font, the frameless rounded window (drag strip, edge resize), the shared widgets (icon rail, sliding highlight, switch, dropdown, truncated label, copy-on-hover row, animated tooltip and context menu, toast), then the screens, then the sshelf tray menu. Since `sshelf` is a binary crate (unused code fails `-D warnings`), each widget and constant lands in the commit of the first screen that uses it.
 - No behaviour changes beyond those sections. New `settings.toml` keys (`host_list_style`, `cards_group_by`, `reduce_motion`, `tray_menu`) default when missing, so the file version stays the same.
+- Display extras taken from the boards (they show data the app already has or reuse existing commands):
+  - Lists: a tunnel status dot on host rows; the search match highlighted in the alias; "N of M match"; a "+wildcard" chip; "1 of 3 running" in Tunnels; two-line tunnel rows with *Cancel* / *Retry* / *Review…*; "running · 2/2" on groups. Cards show `user@host:port` only once `ssh -G` has run for that host.
+  - Right-click menus with existing actions only: hosts (*Connect*, *New tunnel…*, *Edit*, *Rename…*, favorite, *Copy alias*, *Copy ssh command*), tunnels (*Start*, *Stop*, *Edit*, *Copy ssh command*, *Delete…*).
+  - Host detail: *Overview* / *Effective config* / *Tunnels · N* tabs; "ssh -G · N s ago" and *Refresh* on the effective config.
+  - Tunnels: uptime in the status chip and `HH:MM:SS` on log lines (core exposes the supervisor's existing start `Instant` and adds a timestamp per `LogLine`); a failure banner with *Show log*; the editor's command preview (from the real ssh arguments) and *Save and start*.
+  - Groups: *Stop group* and *Add tunnel* in the detail; *New group* disabled with the reason while no tunnels exist.
+  - Dialogs: deletes confirm in a dialog; rename lists what else changes and says up front which running tunnel blocks it (§5); the unknown-key dialog shows the jump hop it is on, the `[host]:port` form, *Copy* for the compare command and how many lines it adds.
+  - Settings: one *Agent* row; *Copy command* for the agent hint.
+  - Tray: a status header, *Retry* on degraded groups, a failed tunnel opens the window on that tunnel, a banner while a host key waits; tooltip "sshelf · N tunnels running".
+  - *Check all* stops when clicked again (above) through a new `CancelHealth` command: queued checks are dropped, running ones finish.
 - **Done when:** every screen matches its board (layout, colours, radii, icons, timings); *Reduce motion* turns all animation off; the sshelf tray menu works with the window hidden or falls back to the system menu; UI tests and CI pass on all three OSes.
 
 ---
@@ -506,3 +523,22 @@ A small, trustworthy desktop tool where:
 - Support for alternative ssh distributions on Windows.
 - macOS: hide the Dock icon while minimized to the tray (activation policy *accessory*), and show the window again from the Dock (needs Objective-C calls; not done in M6).
 - Re-detect a tray host appearing or disappearing on Linux without *Refresh* (watch `NameOwnerChanged` for `org.kde.StatusNotifierWatcher`).
+- From the M9 design boards (`docs/design/`), not built yet:
+  - Hosts: *Delete host…* and *Show in config file* in the host menu (Hosts-Interactions).
+  - Keyboard shortcuts beyond `Ctrl+1…4`: `Ctrl+K` search, `Esc` clears, `Enter` / `E` / `F2` / `Del` on rows, `Ctrl+S` / `Esc` in editors, ↑↓ in lists (Hosts-Interactions, Host-Edit, Empty-States, Tunnel-States).
+  - Effective config: "Set for this host / All" with a "From" column naming the line each value came from; "Open line N" from an `ssh -G` error (Host-Config).
+  - Host editor: undo per field (Host-Edit).
+  - Host editor: "Re-apply my edit" onto a file that changed on disk, with the disk diff (Host-Edit-Raw).
+  - Raw editor: syntax highlighting, error marks in the gutter, "Did you mean …?" (Host-Edit-Raw).
+  - *Browse…* file pickers for `IdentityFile` and the key file; needs a new dependency (Host-New, Dialog-KeyGen).
+  - Health: *Cancel* for a single running check (Host-Health).
+  - Health: *Review host key…* from the health banner; the health check never prompts today (Host-Health).
+  - Toasts with *Undo* (Feedback).
+  - An error queue ("+1 more") and action links in errors such as "Change in Settings" (Feedback).
+  - Tunnels: *Duplicate* and *Add to group ›* in the tunnel menu (Tunnel-States).
+  - Tunnels: a "waiting · confirm host key" row state with *Show* (Tunnel-States).
+  - Tunnels: the process holding a busy port (pid and name), and a live port check while editing (Tunnel-States, Tunnel-Edit).
+  - Tunnels: an "I want to listen on all interfaces" switch that gates Save (Tunnel-Edit).
+  - Changed host key: the `known_hosts` line number of the stored key (Dialog-HostKey-Changed).
+  - Unknown host key: "host 1 of 2" counts in the jump chain (Dialog-HostKey).
+  - Settings: *Open* the app data folder in the file manager (A-Settings).
