@@ -114,6 +114,12 @@ pub enum Command {
         id: u64,
         request: KeyRequest,
     },
+    /// Open a terminal that adds a public key to `alias`'s
+    /// `authorized_keys`; the first login there usually asks for a password.
+    InstallKey {
+        alias: String,
+        public_line: String,
+    },
     Shutdown,
 }
 
@@ -578,6 +584,16 @@ impl Worker {
                     self.check_edit(edit, AfterCheck::Save { overwrite })
                 }
                 Command::RenameHost { id, alias, to } => self.rename_host(id, alias, to),
+                Command::InstallKey { alias, public_line } => {
+                    let args = keygen::install_args(&alias, &public_line);
+                    let title = format!("Install key on {alias}");
+                    match args.and_then(|args| self.run_in_terminal(&title, "ssh", &args)) {
+                        Ok(()) => self.emitter.emit(Event::Notice(format!(
+                            "Opened a terminal to install the key on {alias}"
+                        ))),
+                        Err(e) => self.error(format!("cannot install the key: {e}")),
+                    }
+                }
                 Command::GenerateKey { id, request } => {
                     // RSA can take seconds: off the core thread.
                     let emitter = self.emitter.clone();
@@ -1250,6 +1266,26 @@ impl Worker {
                 tray: tray_host::available(),
             })));
         });
+    }
+
+    /// Runs `tool` (`ssh` or a companion such as `ssh-add`) with `args` in
+    /// the user's terminal (SPEC.md §10, §11).
+    fn run_in_terminal(&self, title: &str, tool: &str, args: &[String]) -> Result<(), String> {
+        let tools = self.tools.as_ref().map_err(String::clone)?;
+        let program = if tool == "ssh" {
+            tools.ssh.clone()
+        } else {
+            tools.companion(tool)
+        };
+        let plan = terminal::plan_command(
+            &self.data.settings.terminal_command,
+            &program,
+            args,
+            title,
+            self.terminal.as_ref(),
+        )
+        .map_err(|e| e.to_string())?;
+        terminal::spawn(&plan)
     }
 
     fn connect(&mut self, alias: &str) {

@@ -3,7 +3,7 @@
 //! OpenSSH accepts the file's permissions — it refuses keys others can read,
 //! on Windows too. Nothing touches the network.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -11,7 +11,9 @@ use sshelf_core::core::{Command, Core, Event};
 use sshelf_core::keygen::{self, KeyAlgorithm, KeyRequest, Secret};
 use sshelf_core::paths::Paths;
 use sshelf_core::process;
+use sshelf_core::settings::Settings;
 use sshelf_core::ssh::SshTools;
+use sshelf_core::storage::Store;
 
 fn ssh_keygen() -> std::path::PathBuf {
     SshTools::locate(None)
@@ -93,6 +95,65 @@ fn the_core_generates_keys_in_the_background() {
     let key = result.unwrap();
     assert_eq!(key.path, path);
     assert!(key.public_path.is_file());
+    drop(core);
+}
+
+/// Arguments fake-ssh recorded (one launch per line, `\x1f`-separated).
+fn recorded(file: &Path) -> Vec<Vec<String>> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Ok(text) = std::fs::read_to_string(file)
+            && !text.is_empty()
+        {
+            return text
+                .lines()
+                .map(|l| l.split('\x1f').map(str::to_string).collect())
+                .collect();
+        }
+        assert!(Instant::now() < deadline, "nothing was launched");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
+fn installing_a_key_opens_the_terminal_with_ssh_and_the_script() {
+    let tmp = tempfile::tempdir().unwrap();
+    let paths = Paths::new(&tmp.path().join("home"), tmp.path().join("app"));
+    let record = tmp.path().join("launches.txt");
+    let fake = PathBuf::from(env!("CARGO_BIN_EXE_fake-ssh"));
+    // The "terminal" is fake-ssh recording what it was asked to run.
+    Store::new(&paths.app_dir)
+        .save(&Settings {
+            ssh_path: Some(fake.clone()),
+            terminal_command: format!(
+                "\"{}\" --record \"{}\" {{ssh}} {{alias}}",
+                fake.display(),
+                record.display()
+            ),
+            ..Settings::default()
+        })
+        .unwrap();
+    let (core, events) = Core::start(paths, Arc::new(|| {}));
+    let line =
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIO/867Gn6gWVC9L/2TosddbUBIfUwN1FA755XCQA20kG web";
+    core.send(Command::InstallKey {
+        alias: "web".into(),
+        public_line: line.into(),
+    });
+    let launches = recorded(&record);
+    let args = &launches[0];
+    let at = args.iter().position(|a| a == "-t").expect("ssh -t");
+    assert_eq!(args[at - 1], fake.display().to_string(), "{args:?}");
+    assert_eq!(&args[at..at + 3], ["-t", "--", "web"]);
+    assert!(args[at + 3].contains(&format!("grep -qxF '{line}'")));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if let Event::Notice(text) = events.recv_timeout(left).expect("a notice") {
+            assert_eq!(text, "Opened a terminal to install the key on web");
+            break;
+        }
+    }
     drop(core);
 }
 

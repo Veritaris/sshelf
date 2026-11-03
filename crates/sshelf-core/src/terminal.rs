@@ -255,9 +255,52 @@ pub fn plan(
     if words.iter().any(|w| w.contains("{terminal_cmd}")) {
         return Err(TemplateError::TerminalCmdNotFirst);
     }
-    let mut words = words.iter().map(|w| fill(w));
+    direct(words.iter().map(|w| fill(w)).collect())
+}
+
+/// What to run for another command in the user's terminal (`ssh-add`, the
+/// key install): with `{terminal_cmd}` the command runs as is in the
+/// detected terminal (the template's other words are meant for Connect);
+/// otherwise the word `{ssh}` becomes `program` and the word `{alias}`
+/// expands to `args`, one word each, so they never split or join.
+pub fn plan_command(
+    template: &str,
+    program: &Path,
+    args: &[String],
+    title: &str,
+    terminal: Option<&Terminal>,
+) -> Result<LaunchPlan, TemplateError> {
+    let words = split_template(template)?;
+    let program = program.display().to_string();
+    if words[0] == "{terminal_cmd}" {
+        if words[1..].iter().any(|w| w.contains("{terminal_cmd}")) {
+            return Err(TemplateError::TerminalCmdNotFirst);
+        }
+        let terminal = terminal.ok_or(TemplateError::NoTerminal)?;
+        let command = std::iter::once(program)
+            .chain(args.iter().cloned())
+            .collect();
+        return Ok(terminal.wrap(command, title));
+    }
+    if words.iter().any(|w| w.contains("{terminal_cmd}")) {
+        return Err(TemplateError::TerminalCmdNotFirst);
+    }
+    let mut command = Vec::new();
+    for word in words {
+        match word.as_str() {
+            "{ssh}" => command.push(program.clone()),
+            "{alias}" => command.extend(args.iter().cloned()),
+            _ => command.push(word.replace("{ssh}", &program).replace("{alias}", title)),
+        }
+    }
+    direct(command)
+}
+
+/// A full command line from the template, run as is.
+fn direct(words: Vec<String>) -> Result<LaunchPlan, TemplateError> {
+    let mut words = words.into_iter();
     Ok(LaunchPlan {
-        program: words.next().expect("template has words"),
+        program: words.next().ok_or(TemplateError::Empty)?,
         args: words.collect(),
         console: if cfg!(windows) {
             Console::New
@@ -468,5 +511,68 @@ mod tests {
             })
         );
         assert_eq!(linux_terminal(None, installed(&[])), None);
+    }
+
+    #[test]
+    fn other_commands_run_in_the_detected_terminal_as_is() {
+        let wt = Terminal::WindowsTerminal(PathBuf::from(r"C:\wt.exe"));
+        let args = [
+            "-t".to_string(),
+            "--".into(),
+            "web".into(),
+            "echo 'a b'".into(),
+        ];
+        // The template's other words are for Connect and are left out.
+        let p = plan_command(
+            "{terminal_cmd} {ssh} -A {alias}",
+            Path::new("/usr/bin/ssh"),
+            &args,
+            "Install key on web",
+            Some(&wt),
+        )
+        .unwrap();
+        assert_eq!(
+            p.args,
+            [
+                "new-tab",
+                "--title",
+                "Install key on web",
+                "/usr/bin/ssh",
+                "-t",
+                "--",
+                "web",
+                "echo 'a b'"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_full_template_puts_the_arguments_where_alias_is() {
+        let p = plan_command(
+            "alacritty --title={alias} -e {ssh} {alias}",
+            Path::new("/usr/bin/ssh-add"),
+            &["/home/me/.ssh/id_new".to_string()],
+            "ssh-add",
+            None,
+        )
+        .unwrap();
+        assert_eq!(p.program, "alacritty");
+        assert_eq!(
+            p.args,
+            [
+                "--title=ssh-add",
+                "-e",
+                "/usr/bin/ssh-add",
+                "/home/me/.ssh/id_new"
+            ]
+        );
+        assert_eq!(
+            plan_command("{alias}", Path::new("x"), &[], "t", None),
+            Err(TemplateError::Empty)
+        );
+        assert_eq!(
+            plan_command("{terminal_cmd} {ssh}", Path::new("x"), &[], "t", None),
+            Err(TemplateError::NoTerminal)
+        );
     }
 }

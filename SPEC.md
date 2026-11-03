@@ -298,6 +298,7 @@ Before starting a tunnel, determine the host key state using values from `ssh -G
   - Windows: Windows Terminal (`wt.exe new-tab --title <alias> …`) if present, otherwise ssh runs directly in a new console window (equivalent to `cmd`, without its quoting rules).
   - macOS: Terminal.app (via `osascript`).
   - Linux: first available of `$TERMINAL`, `x-terminal-emulator`, common emulators (gnome-terminal, konsole, alacritty, kitty, wezterm…).
+- Other commands run in the terminal the same way (installing a key, `ssh-add` for a passphrase-protected key, §11): with `{terminal_cmd}` the command runs as is in the detected terminal (the template's other words are meant for Connect); a full template gets the program for the word `{ssh}` and the arguments, one word each, for the word `{alias}`.
 - Each launch from the app is recorded in `history.toml` (only app-launched sessions can be tracked; say so in the UI).
 
 ### Close behavior
@@ -344,6 +345,8 @@ Available when adding/editing a host.
   - Add `IdentityFile` + `IdentitiesOnly yes` to the host block.
   - Add to agent (`ssh-add`; on macOS `--apple-use-keychain`).
   - Install public key on the server: pipe the public key into `ssh <alias> 'mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat >> ~/.ssh/authorized_keys'`. Runs in a terminal (the first login usually needs a password). No dependency on `ssh-copy-id` (absent on Windows).
+    - As built: terminals are launched without a shell (§10), so nothing can pipe. The key line travels inside the remote command instead, in single quotes (it never contains quotes: base64 plus a checked comment): `ssh -t -- <alias> "umask 077 && mkdir -p ~/.ssh && touch ~/.ssh/authorized_keys && (grep -qxF '<key>' ~/.ssh/authorized_keys || echo '<key>' >> ~/.ssh/authorized_keys) && echo '…installed. Press Enter to close.' && read -r _"`.
+    - It never adds a duplicate line, creates `~/.ssh` and `authorized_keys` private (`umask 077`), has no `;` (Windows Terminal splits its command line there), and waits for Enter so the result stays visible (`-t` gives the password prompt and `read` a terminal). It needs a POSIX shell on the server; Windows servers are not supported.
 
 ---
 

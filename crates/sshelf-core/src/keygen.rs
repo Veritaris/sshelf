@@ -168,6 +168,35 @@ pub fn check_target(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// The remote command that adds `public_line` to `~/.ssh/authorized_keys`
+/// once (SPEC.md §11). The key travels inside it in single quotes, so no
+/// pipe is needed (terminals are launched without a shell); a key line never
+/// contains quotes (base64 plus a checked comment). Assumes a POSIX shell on
+/// the server; has no `;` (Windows Terminal splits its command line there).
+/// It waits for Enter so the result stays readable.
+pub fn install_script(public_line: &str) -> Result<String, String> {
+    let key = public_line.trim();
+    if key.is_empty() || key.contains(['\'', '"', '\\', '\n', '\r', ';']) {
+        return Err("the public key line has characters that cannot be sent safely".into());
+    }
+    Ok(format!(
+        "umask 077 && mkdir -p ~/.ssh && touch ~/.ssh/authorized_keys && \
+         (grep -qxF '{key}' ~/.ssh/authorized_keys || echo '{key}' >> ~/.ssh/authorized_keys) && \
+         echo 'sshelf: the key is installed. Press Enter to close.' && read -r _"
+    ))
+}
+
+/// `ssh` arguments for installing `public_line` on `alias`: `-t`, so the
+/// password prompt and the final `read` have a terminal.
+pub fn install_args(alias: &str, public_line: &str) -> Result<Vec<String>, String> {
+    Ok(vec![
+        "-t".into(),
+        "--".into(),
+        alias.to_string(),
+        install_script(public_line)?,
+    ])
+}
+
 /// Generates the key and writes both files. Nothing is left behind on
 /// failure.
 pub fn generate(request: &KeyRequest) -> Result<GeneratedKey, String> {
@@ -383,5 +412,57 @@ mod tests {
             assert!(crate::acl::is_owner_only(&key.path).unwrap());
             assert!(!crate::acl::is_owner_only(&key.public_path).unwrap());
         }
+    }
+
+    const KEY: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIO/867Gn6gWVC9L/2TosddbUBIfUwN1FA755XCQA20kG web (sshelf)";
+
+    #[test]
+    fn the_install_command_carries_the_key_safely() {
+        let args = install_args("web", KEY).unwrap();
+        assert_eq!(&args[..3], ["-t", "--", "web"]);
+        let script = &args[3];
+        assert!(script.contains(&format!("grep -qxF '{KEY}'")), "{script}");
+        assert!(!script.contains(';'), "Windows Terminal splits on ;");
+        for bad in ["a'b", "a;b", "a\nb", ""] {
+            assert!(install_script(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    /// The script itself, run by the local POSIX shell on a temp home: adds
+    /// the key once, with private permissions, and keeps existing lines.
+    #[cfg(unix)]
+    #[test]
+    fn the_install_script_adds_the_key_once() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::{Command, Stdio};
+        let home = tempfile::tempdir().unwrap();
+        fs::create_dir(home.path().join(".ssh")).unwrap();
+        let file = home.path().join(".ssh").join("authorized_keys");
+        fs::write(&file, "ssh-rsa AAAA old\n").unwrap();
+        let script = install_script(KEY).unwrap();
+        for _ in 0..2 {
+            Command::new("sh")
+                .args(["-c", &script])
+                .env("HOME", home.path())
+                .stdin(Stdio::null())
+                .status()
+                .unwrap();
+        }
+        assert_eq!(
+            fs::read_to_string(&file).unwrap(),
+            format!("ssh-rsa AAAA old\n{KEY}\n")
+        );
+        let fresh = tempfile::tempdir().unwrap();
+        Command::new("sh")
+            .args(["-c", &script])
+            .env("HOME", fresh.path())
+            .stdin(Stdio::null())
+            .status()
+            .unwrap();
+        let created = fresh.path().join(".ssh").join("authorized_keys");
+        assert_eq!(fs::read_to_string(&created).unwrap(), format!("{KEY}\n"));
+        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&created), 0o600);
+        assert_eq!(mode(&fresh.path().join(".ssh")), 0o700);
     }
 }
