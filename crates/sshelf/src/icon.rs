@@ -1,0 +1,83 @@
+//! The app icon, drawn in code (no image assets yet): a rounded One Dark
+//! square with three shelf bars, plus a green dot while tunnels run (tray).
+
+use crate::theme::Palette;
+
+/// Width and height in pixels.
+pub const SIZE: u32 = 32;
+
+/// RGBA pixels, row by row.
+pub fn rgba(running: bool) -> Vec<u8> {
+    let p = &Palette::ONE_DARK;
+    let size = SIZE as f32;
+    let mut pixels = Vec::with_capacity((SIZE * SIZE * 4) as usize);
+    for y in 0..SIZE {
+        for x in 0..SIZE {
+            let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
+            let mut color = [0, 0, 0, 0];
+            // Rounded square, 1 px margin, 6 px corner radius.
+            if inside_rounded(fx, fy, 1.0, size - 1.0, 6.0) {
+                color = rgb(p.accent);
+            }
+            // Three shelf bars.
+            let bar = (8.0..24.0).contains(&fx)
+                && [8.5, 14.5, 20.5]
+                    .iter()
+                    .any(|top| (*top..top + 3.0).contains(&fy));
+            if bar {
+                color = rgb(p.bg_dark);
+            }
+            if running {
+                let d = ((fx - 25.0).powi(2) + (fy - 25.0).powi(2)).sqrt();
+                if d <= 6.5 {
+                    color = rgb(if d <= 5.0 { p.green } else { p.bg_dark });
+                }
+            }
+            pixels.extend_from_slice(&color);
+        }
+    }
+    pixels
+}
+
+pub fn egui_icon() -> egui::IconData {
+    egui::IconData {
+        rgba: rgba(false),
+        width: SIZE,
+        height: SIZE,
+    }
+}
+
+fn rgb(c: egui::Color32) -> [u8; 4] {
+    [c.r(), c.g(), c.b(), 255]
+}
+
+fn inside_rounded(x: f32, y: f32, min: f32, max: f32, radius: f32) -> bool {
+    if !(min..max).contains(&x) || !(min..max).contains(&y) {
+        return false;
+    }
+    let cx = x.clamp(min + radius, max - radius);
+    let cy = y.clamp(min + radius, max - radius);
+    (x - cx).powi(2) + (y - cy).powi(2) <= radius * radius
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pixel(pixels: &[u8], x: u32, y: u32) -> [u8; 4] {
+        let i = ((y * SIZE + x) * 4) as usize;
+        pixels[i..i + 4].try_into().unwrap()
+    }
+
+    #[test]
+    fn icon_has_corners_bars_and_a_running_dot() {
+        let idle = rgba(false);
+        assert_eq!(idle.len(), (SIZE * SIZE * 4) as usize);
+        assert_eq!(pixel(&idle, 0, 0)[3], 0, "transparent corner");
+        assert_eq!(pixel(&idle, 4, 16), rgb(Palette::ONE_DARK.accent));
+        assert_eq!(pixel(&idle, 12, 9), rgb(Palette::ONE_DARK.bg_dark));
+        let running = rgba(true);
+        assert_eq!(pixel(&running, 25, 25), rgb(Palette::ONE_DARK.green));
+        assert_ne!(pixel(&idle, 25, 25), pixel(&running, 25, 25));
+    }
+}

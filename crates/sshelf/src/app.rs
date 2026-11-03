@@ -4,7 +4,7 @@
 use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 
-use egui::RichText;
+use egui::{RichText, ViewportCommand};
 use sshelf_core::core::{AppData, Command, ConfigSnapshot, Core, Event, SshInfo};
 use sshelf_core::paths::Paths;
 use sshelf_core::supervisor::Snapshot;
@@ -17,6 +17,7 @@ use crate::orphans_window::{self, OrphansWindow};
 use crate::settings_view::SettingsView;
 use crate::sidebar::{self, View};
 use crate::theme::{self, Palette};
+use crate::tray::{self, Tray, TrayAction};
 use crate::tunnels_view::TunnelsView;
 
 enum Status {
@@ -39,6 +40,8 @@ pub struct SshelfApp {
     orphans: OrphansWindow,
     hostkeys: HostKeyModals,
     close: CloseGuard,
+    /// `None` when the platform could not create one.
+    tray: Option<Tray>,
     status: Option<Status>,
 }
 
@@ -46,6 +49,11 @@ impl SshelfApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         theme::apply(&cc.egui_ctx);
         let ctx = cc.egui_ctx.clone();
+        // The event loop runs by now, as macOS requires for tray icons.
+        let (tray, tray_error) = match Tray::create(&cc.egui_ctx) {
+            Ok(tray) => (Some(tray), None),
+            Err(e) => (None, Some(format!("No tray icon: {e}"))),
+        };
         let (core, startup_error) = match Paths::detect() {
             Some(paths) => (
                 Some(Core::start(paths, Arc::new(move || ctx.request_repaint()))),
@@ -71,8 +79,36 @@ impl SshelfApp {
             orphans: OrphansWindow::default(),
             hostkeys: HostKeyModals::default(),
             close: CloseGuard::default(),
-            status: None,
+            tray,
+            status: tray_error.map(Status::Error),
         }
+    }
+
+    /// Carries out tray clicks and keeps the tray menu current.
+    fn run_tray(&mut self, ctx: &egui::Context) {
+        let Some(tray) = &mut self.tray else {
+            return;
+        };
+        for action in tray.actions() {
+            match action.command() {
+                Some(command) => self.send(vec![command]),
+                None if action == TrayAction::Show => {
+                    ctx.send_viewport_cmd(ViewportCommand::Visible(true));
+                    ctx.send_viewport_cmd(ViewportCommand::Minimized(false));
+                    ctx.send_viewport_cmd(ViewportCommand::Focus);
+                }
+                // The same close request as the window's (SPEC.md §10).
+                None => ctx.send_viewport_cmd(ViewportCommand::Close),
+            }
+        }
+        let Some(tray) = &mut self.tray else {
+            return;
+        };
+        tray.update(tray::model(
+            self.data.as_deref(),
+            self.config.as_deref().and_then(|c| c.hosts()),
+            self.tunnel_states.as_deref(),
+        ));
     }
 
     fn apply_events(&mut self) {
@@ -147,6 +183,13 @@ impl SshelfApp {
 }
 
 impl eframe::App for SshelfApp {
+    /// Runs every frame, and also while the window is hidden: core events and
+    /// the tray are handled here, the drawing in [`Self::ui`].
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.apply_events();
+        self.run_tray(ctx);
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let p = &Palette::ONE_DARK;
         if let Some(error) = &self.startup_error {
@@ -155,7 +198,6 @@ impl eframe::App for SshelfApp {
             });
             return;
         }
-        self.apply_events();
 
         let orphans = self
             .data

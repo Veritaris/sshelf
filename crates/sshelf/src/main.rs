@@ -8,12 +8,16 @@ mod host_detail;
 mod host_editor;
 mod hostkey_modal;
 mod hosts_view;
+mod icon;
 mod orphans_window;
 mod settings_view;
 mod sidebar;
 mod theme;
+mod tray;
 mod tunnels_view;
 mod util;
+
+use std::sync::Arc;
 
 use app::SshelfApp;
 
@@ -22,7 +26,8 @@ fn main() -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([960.0, 640.0])
             .with_min_inner_size([640.0, 420.0])
-            .with_title("sshelf"),
+            .with_title("sshelf")
+            .with_icon(Arc::new(icon::egui_icon())),
         ..Default::default()
     };
 

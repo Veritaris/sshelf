@@ -310,7 +310,13 @@ Before starting a tunnel, determine the host key state using values from `ssh -G
 ### Tray (milestone 6)
 
 - Menu: last N connected hosts (click → open terminal session), groups with start/stop, active tunnels with stop, Show window, Quit.
-- If the platform has no tray (e.g. GNOME without an extension), don't offer *Minimize to tray*.
+  - *Connect* submenu: the last 8 distinct hosts launched from sshelf that still exist (any alias counts for its host), newest first.
+  - *Groups*: "Start X", or "Stop X" with "(starting)" / "(2/3 running)" while not fully up.
+  - *Active tunnels*: "Stop X" for a tunnel started by hand (it releases that start, §7); a tunnel only groups hold is shown disabled, "X (used by Work)".
+  - Clicking the icon itself shows the window; the menu opens on right click. The tooltip counts running tunnels, and the icon gets a green dot while any run.
+- The tray works from `App::logic`, which eframe keeps calling while the window is hidden (core events and tray clicks request a repaint): the menu stays current and actions run without the window.
+- Backends (`tray-icon` crate): native on Windows and macOS; on Linux the KSNI backend (StatusNotifierItem over D-Bus, no GTK).
+- If the platform has no tray (e.g. GNOME without an extension), don't offer *Minimize to tray*. On Linux a tray exists when `org.kde.StatusNotifierWatcher` has an owner on the session bus; this is checked at startup and with *Refresh* in Settings, which shows the result.
 - macOS: create on the main thread; consider hiding the Dock icon while minimized.
 
 ---

@@ -19,6 +19,13 @@ eframe = { version = "0.37.0", default-features = false, features = [
     "x11",
 ] }
 
+# Tray icon and menu (SPEC.md §10). Native on Windows/macOS; on Linux the
+# pure-Rust KSNI (StatusNotifierItem over D-Bus) backend, without GTK.
+tray-icon = { version = "0.26.1", default-features = false }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+tray-icon = { version = "0.26.1", default-features = false, features = ["ksni"] }
+
 [dev-dependencies]
 # Headless UI tests: drive views through their accessibility labels.
 egui_kittest = { version = "0.37.0" }
