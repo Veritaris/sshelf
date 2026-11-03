@@ -510,8 +510,12 @@ impl HostsView {
         if response.hovered() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         }
+        // The row is already allocated: a child that reports its size back
+        // would move the grid's cursor up into the card, so the next row
+        // would start on top of this one.
         let inner = rect.shrink(14.0);
-        ui.scope_builder(UiBuilder::new().max_rect(inner), |ui| {
+        {
+            let ui = &mut ui.new_child(UiBuilder::new().max_rect(inner));
             ui.spacing_mut().item_spacing.y = 8.0;
             ui.allocate_ui_with_layout(
                 vec2(inner.width(), 20.0),
@@ -550,7 +554,7 @@ impl HostsView {
             if let Some((text, color)) = tunnels.line() {
                 ui.label(RichText::new(text).size(12.0).color(color));
             }
-        });
+        }
         let chosen = host_menu(&response, meta, can_connect, meta_writable);
         (response, chosen)
     }
@@ -1590,6 +1594,23 @@ mod tests {
         let card = harness.get_by_label("db").rect();
         let pane = harness.get_by_label("Defined at").rect();
         assert!(card.right() < pane.left(), "{card:?} beside {pane:?}");
+    }
+
+    #[test]
+    fn card_rows_never_overlap() {
+        let config = snapshot("Host one\nHost two\nHost three\n");
+        let mut data = AppData::new(PathBuf::from("app"));
+        data.hosts_status = LoadStatus::Loaded;
+        data.settings.host_list_style = HostListStyle::Cards;
+        data.settings.cards_group_by = CardsGroupBy::None;
+        let mut harness = harness(config, Arc::new(data));
+        harness.step();
+        let first = harness.get_by_label("one").rect();
+        let below = harness.get_by_label("three").rect();
+        assert!(
+            below.top() >= first.bottom() + CARD_GAP - 0.5,
+            "{below:?} under {first:?}"
+        );
     }
 
     #[test]
