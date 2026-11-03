@@ -194,7 +194,9 @@ impl HostsView {
                     top: 0,
                     bottom: 16,
                 }))
-                .show(ui, |ui| self.cards(ui, set, hosts, data, states, ssh))
+                .show(ui, |ui| {
+                    self.cards(ui, (set, config.generation), hosts, data, states, ssh)
+                })
                 .inner
         } else {
             let action = egui::Panel::left("host_list")
@@ -351,11 +353,12 @@ impl HostsView {
     }
 
     /// The hosts as cards in two columns, grouped by tag, file or nothing
-    /// (SPEC.md §10 *Hosts list style*).
+    /// (SPEC.md §10 *Hosts list style*). A card asks for `ssh -G` (for its
+    /// `user@host`) once it scrolls into view.
     fn cards(
         &mut self,
         ui: &mut Ui,
-        set: &ConfigSet,
+        (set, generation): (&ConfigSet, u64),
         hosts: &HostList,
         data: &AppData,
         states: Option<&Snapshot>,
@@ -448,6 +451,11 @@ impl HostsView {
                                 row.min + vec2(column as f32 * (width + CARD_GAP), 0.0),
                                 vec2(width, height),
                             );
+                            if ui.is_rect_visible(rect) {
+                                action
+                                    .commands
+                                    .extend(self.detail.resolve(host.primary(), generation));
+                            }
                             let tunnels = host_tunnels(host, data, states);
                             let (response, chosen) = self.card(
                                 ui,
@@ -1594,6 +1602,21 @@ mod tests {
         let card = harness.get_by_label("db").rect();
         let pane = harness.get_by_label("Defined at").rect();
         assert!(card.right() < pane.left(), "{card:?} beside {pane:?}");
+    }
+
+    #[test]
+    fn cards_resolve_the_hosts_in_view_once() {
+        let mut harness = cards_harness();
+        harness.step();
+        harness.step();
+        let commands = &harness.state().1;
+        assert_eq!(
+            commands,
+            &[
+                Command::Resolve("db".into()),
+                Command::Resolve("web".into())
+            ]
+        );
     }
 
     #[test]

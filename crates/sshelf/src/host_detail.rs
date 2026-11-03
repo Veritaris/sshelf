@@ -106,8 +106,18 @@ impl HostDetail {
         self.new_tunnel.take()
     }
 
-    /// `user@host[:port]` from the `ssh -G` result already fetched for
-    /// `alias` (the cards view runs nothing of its own).
+    /// Asks for `ssh -G` on `alias` once per config generation, unless the
+    /// current result is already here.
+    pub fn resolve(&mut self, alias: &str, generation: u64) -> Option<Command> {
+        let current = self
+            .resolved
+            .get(alias)
+            .is_some_and(|(g, _)| *g == generation);
+        (!current && self.requested.insert((alias.to_string(), generation)))
+            .then(|| Command::Resolve(alias.to_string()))
+    }
+
+    /// `user@host[:port]` from the `ssh -G` result fetched for `alias`.
     pub fn address(&self, alias: &str) -> Option<String> {
         let (_, Ok(resolved)) = self.resolved.get(alias)? else {
             return None;
@@ -180,13 +190,11 @@ impl HostDetail {
         let read_only = config.read_only(host.at.file);
         let alias = host.primary().to_string();
         self.sync_draft(&alias, data.hosts.get(host).cloned().unwrap_or_default());
+        commands.extend(self.resolve(&alias, generation));
         let current = self
             .resolved
             .get(&alias)
             .is_some_and(|(g, _)| *g == generation);
-        if !current && self.requested.insert((alias.clone(), generation)) {
-            commands.push(Command::Resolve(alias.clone()));
-        }
         // The route needs `ssh -G` per hop: only for hosts that jump.
         let resolved = self
             .resolved
