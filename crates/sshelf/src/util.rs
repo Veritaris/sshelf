@@ -6,6 +6,7 @@ use sshconf::{ConfigSet, LineRef};
 use sshelf_core::health::{Health, HealthSnapshot};
 
 use crate::theme::Palette;
+use crate::widgets::{marks, popup};
 
 /// `"3 h ago"`-style age of `time`.
 pub fn ago(time: SystemTime) -> String {
@@ -33,31 +34,48 @@ pub fn location(set: &ConfigSet, at: LineRef) -> (String, String) {
     (format!("{name}:{line}"), set.location(at))
 }
 
-/// A painted health mark (SPEC.md §12, M8): a yellow ring while checking,
-/// then green (auth OK), yellow (reachable, but key or host key trouble) or
-/// red (unreachable). Nothing before the first check; hover tells more.
-pub fn health_mark(ui: &mut egui::Ui, health: Option<&HealthSnapshot>, alias: &str) {
+/// A painted health mark of `diameter` (SPEC.md §10, M7/M8 design): a
+/// pulsing yellow ring while checking, then green (login OK), yellow
+/// (reachable, but key or host key trouble) or red (unreachable); Comment
+/// Grey before the first check. Hover tells more.
+pub fn health_mark(
+    ui: &mut egui::Ui,
+    health: Option<&HealthSnapshot>,
+    alias: &str,
+    diameter: f32,
+) -> egui::Response {
     let p = &Palette::ONE_DARK;
     let checking = health.is_some_and(|h| h.checking.contains(alias));
     let report = health.and_then(|h| h.reports.get(alias));
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
-    let center = rect.center();
-    let text = if checking {
-        ui.painter()
-            .circle_stroke(center, 4.0, egui::Stroke::new(1.5, p.yellow));
-        "Checking…".to_string()
-    } else if let Some(report) = report {
-        let color = match report.health {
-            Health::Ok { .. } => p.green,
-            Health::AuthFailed | Health::HostKeyUnknown | Health::HostKeyChanged => p.yellow,
-            Health::Unreachable(_) => p.red,
-        };
-        ui.painter().circle_filled(center, 4.0, color);
-        format!("{} ({})", report.health.describe(), ago(report.checked_at))
-    } else {
-        return;
+    if checking {
+        let response = marks::pulsing_ring(ui, diameter, p.yellow);
+        return popup::tip_below(response, |ui| {
+            ui.label("Checking…");
+        });
+    }
+    let (color, text, detail) = match report {
+        Some(report) => (
+            match report.health {
+                Health::Ok { .. } => p.green,
+                Health::AuthFailed | Health::HostKeyUnknown | Health::HostKeyChanged => p.yellow,
+                Health::Unreachable(_) => p.red,
+            },
+            report.health.describe(),
+            format!("checked {}", ago(report.checked_at)),
+        ),
+        None => (
+            p.comment,
+            "Not checked yet".to_string(),
+            "Check logs in without a password".to_string(),
+        ),
     };
-    response.on_hover_text(text);
+    let (rect, response) =
+        ui.allocate_exact_size(egui::Vec2::splat(diameter), egui::Sense::hover());
+    marks::paint_dot(ui.painter(), rect.center(), diameter, color);
+    popup::tip_below(response, |ui| {
+        ui.label(text);
+        ui.label(egui::RichText::new(detail).color(p.dim));
+    })
 }
 
 #[cfg(test)]

@@ -11,15 +11,19 @@ pub const FAMILY: &str = "lucide";
 /// Icon size in small buttons and next to text.
 pub const INLINE: f32 = 14.0;
 
+pub const ACTIVITY: char = '\u{e038}';
 pub const ARROW_RIGHT_LEFT: char = '\u{e417}';
+pub const ASTERISK: char = '\u{e1ef}';
 pub const CIRCLE_CHECK: char = '\u{e226}';
 pub const CIRCLE_X: char = '\u{e084}';
 pub const INFO: char = '\u{e0f9}';
 pub const LAYERS: char = '\u{e529}';
 pub const MINUS: char = '\u{e11c}';
 pub const PLAY: char = '\u{e13c}';
+pub const PLUS: char = '\u{e13d}';
 pub const REFRESH_CW: char = '\u{e145}';
 pub const ROTATE_CW: char = '\u{e149}';
+pub const SEARCH: char = '\u{e151}';
 pub const SERVER: char = '\u{e153}';
 pub const SETTINGS: char = '\u{e154}';
 pub const SHIELD_ALERT: char = '\u{e1fe}';
@@ -32,15 +36,19 @@ pub const X: char = '\u{e1b2}';
 /// Every icon above, for the glyph check in [`crate::fonts`].
 #[cfg(test)]
 pub const ALL: &[char] = &[
+    ACTIVITY,
     ARROW_RIGHT_LEFT,
+    ASTERISK,
     CIRCLE_CHECK,
     CIRCLE_X,
     INFO,
     LAYERS,
     MINUS,
     PLAY,
+    PLUS,
     REFRESH_CW,
     ROTATE_CW,
+    SEARCH,
     SERVER,
     SETTINGS,
     SHIELD_ALERT,

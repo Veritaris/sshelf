@@ -106,6 +106,11 @@ impl HostDetail {
         self.new_tunnel.take()
     }
 
+    /// "New tunnel…" from somewhere else (the host list's menu).
+    pub fn request_new_tunnel(&mut self, alias: String) {
+        self.new_tunnel = Some(alias);
+    }
+
     pub fn take_action(&mut self) -> Option<DetailAction> {
         self.action.take()
     }
@@ -502,7 +507,7 @@ fn health_line(
     let report = health.and_then(|h| h.reports.get(alias));
     ui.horizontal(|ui| {
         ui.label(RichText::new("Health").color(p.dim));
-        util::health_mark(ui, health, alias);
+        util::health_mark(ui, health, alias, 8.0);
         match (checking, report) {
             (true, _) => {
                 ui.spinner();

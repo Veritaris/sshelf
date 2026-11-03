@@ -297,8 +297,12 @@ impl eframe::App for SshelfApp {
                     ui,
                     self.config.as_deref(),
                     self.data.as_deref(),
+                    self.tunnel_states.as_deref(),
                     self.ssh.as_deref(),
                 );
+                for notice in self.hosts.take_notices() {
+                    self.toasts.push(notice);
+                }
             }
             View::Tunnels => {
                 commands = self.tunnels.show(

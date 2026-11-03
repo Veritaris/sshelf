@@ -19,6 +19,9 @@ pub struct Palette {
     pub border: Color32,
     /// Magenta: selection, primary actions, links.
     pub accent: Color32,
+    /// Primary buttons, hovered and pressed.
+    pub accent_hover: Color32,
+    pub accent_pressed: Color32,
     pub text: Color32,
     /// Secondary text: other aliases, file names, hints.
     pub dim: Color32,
@@ -35,26 +38,34 @@ pub struct Palette {
     pub yellow_tint: Color32,
     /// Light Red mixed into the background: error banners, the error status bar.
     pub red_tint: Color32,
+    /// Green mixed into the background: success banners, "running" chips.
+    pub green_tint: Color32,
+    /// Disabled menu items.
+    pub disabled_text: Color32,
 }
 
 impl Palette {
     pub const ONE_DARK: Self = Self {
-        bg: Color32::from_rgb(40, 44, 52),             // #282c34
-        bg_dark: Color32::from_rgb(33, 37, 43),        // #21252b
-        surface: Color32::from_rgb(44, 49, 58),        // #2c313a
-        selection: Color32::from_rgb(62, 68, 81),      // #3e4451
-        border: Color32::from_rgb(75, 82, 99),         // #4b5263
-        accent: Color32::from_rgb(198, 120, 221),      // #c678dd
-        text: Color32::from_rgb(171, 178, 191),        // #abb2bf
-        dim: Color32::from_rgb(154, 161, 173),         // #9aa1ad
-        text_strong: Color32::from_rgb(215, 218, 224), // #d7dae0
-        green: Color32::from_rgb(152, 195, 121),       // #98c379
-        yellow: Color32::from_rgb(229, 192, 123),      // #e5c07b
-        red: Color32::from_rgb(224, 108, 117),         // #e06c75
-        comment: Color32::from_rgb(92, 99, 112),       // #5c6370
-        tooltip: Color32::from_rgb(24, 26, 31),        // #181a1f
-        yellow_tint: Color32::from_rgb(59, 53, 39),    // #3b3527
-        red_tint: Color32::from_rgb(58, 42, 46),       // #3a2a2e
+        bg: Color32::from_rgb(40, 44, 52),               // #282c34
+        bg_dark: Color32::from_rgb(33, 37, 43),          // #21252b
+        surface: Color32::from_rgb(44, 49, 58),          // #2c313a
+        selection: Color32::from_rgb(62, 68, 81),        // #3e4451
+        border: Color32::from_rgb(75, 82, 99),           // #4b5263
+        accent: Color32::from_rgb(198, 120, 221),        // #c678dd
+        accent_hover: Color32::from_rgb(208, 142, 228),  // #d08ee4
+        accent_pressed: Color32::from_rgb(177, 95, 200), // #b15fc8
+        text: Color32::from_rgb(171, 178, 191),          // #abb2bf
+        dim: Color32::from_rgb(154, 161, 173),           // #9aa1ad
+        text_strong: Color32::from_rgb(215, 218, 224),   // #d7dae0
+        green: Color32::from_rgb(152, 195, 121),         // #98c379
+        yellow: Color32::from_rgb(229, 192, 123),        // #e5c07b
+        red: Color32::from_rgb(224, 108, 117),           // #e06c75
+        comment: Color32::from_rgb(92, 99, 112),         // #5c6370
+        tooltip: Color32::from_rgb(24, 26, 31),          // #181a1f
+        yellow_tint: Color32::from_rgb(59, 53, 39),      // #3b3527
+        red_tint: Color32::from_rgb(58, 42, 46),         // #3a2a2e
+        green_tint: Color32::from_rgb(43, 53, 40),       // #2b3528
+        disabled_text: Color32::from_rgb(127, 132, 142), // #7f848e
     };
 }
 
@@ -82,6 +93,13 @@ pub mod timing {
     pub const TOAST_FADE: f32 = 0.120;
     /// How long a toast stays before it fades out (paused while hovered).
     pub const TOAST_HOLD: f32 = 3.0;
+    /// Context menu fade (and 98 → 100 % scale) in and out; also the fade of
+    /// a menu's hover highlight when the pointer leaves it.
+    pub const MENU: f32 = 0.120;
+    /// The hover highlight sliding between menu rows.
+    pub const MENU_SLIDE: f32 = 0.050;
+    /// One full pulse (100 → 40 → 100 %) of a starting or waiting ring.
+    pub const PULSE: f32 = 1.0;
 }
 
 /// Forces the dark theme and installs the One Dark visuals on `ctx`.

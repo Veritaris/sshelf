@@ -4,6 +4,8 @@
 
 use egui::{Context, Id, Rect};
 
+use crate::theme::timing;
+
 /// A CSS-style `cubic-bezier(x1, y1, x2, y2)` easing curve.
 #[derive(Debug, Clone, Copy)]
 pub struct CubicBezier {
@@ -119,6 +121,20 @@ pub fn fade(ctx: &Context, id: Id, on: bool, seconds: f32, easing: fn(f32) -> f3
     ctx.animate_bool_with_time_and_easing(id, on, seconds, easing)
 }
 
+/// Opacity of a pulsing ring (a starting or waiting mark): 1 → 0.4 → 1 every
+/// [`timing::PULSE`] seconds; a steady 1 with *Reduce motion*. Asks for the
+/// next frame while it is drawn (so only while visible).
+pub fn pulse(ctx: &Context) -> f32 {
+    if reduce_motion(ctx) {
+        return 1.0;
+    }
+    let period = f64::from(timing::PULSE);
+    let t = (ctx.input(|i| i.time) % period / period) as f32;
+    let there_and_back = if t < 0.5 { t * 2.0 } else { (1.0 - t) * 2.0 };
+    ctx.request_repaint();
+    1.0 - 0.6 * IN_OUT.eval(there_and_back)
+}
+
 #[derive(Debug, Clone, Copy)]
 struct RectTween {
     key: usize,
@@ -158,6 +174,12 @@ pub fn tween_rect(ctx: &Context, id: Id, key: usize, target: Rect, seconds: f32)
     } else {
         target
     }
+}
+
+/// Drops `id`'s tween, so the next [`tween_rect`] starts at its target
+/// instead of sliding there.
+pub fn forget_tween(ctx: &Context, id: Id) {
+    ctx.data_mut(|d| d.remove::<RectTween>(id));
 }
 
 fn at(tween: &RectTween, now: f64, seconds: f32) -> Rect {
