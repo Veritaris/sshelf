@@ -499,6 +499,43 @@ fn changed_host_key_is_reviewed_and_replaced() {
 }
 
 #[test]
+fn routes_list_the_jump_hosts_first_hop_first() {
+    let tmp = tempfile::tempdir().unwrap();
+    let paths = Paths::new(&tmp.path().join("home"), tmp.path().join("app"));
+    fs::create_dir_all(&paths.ssh_dir).unwrap();
+    fs::write(
+        &paths.ssh_config,
+        "Host db-via-gw\nHost db-jump\nHost plain\n",
+    )
+    .unwrap();
+    Store::new(&paths.app_dir)
+        .save(&Settings {
+            ssh_path: Some(fake_ssh()),
+            ..Settings::default()
+        })
+        .unwrap();
+    let (core, events) = Core::start(paths, Arc::new(|| {}));
+    wait_for(&events, "the config", host_aliases);
+
+    let route = |alias: &str| {
+        core.send(Command::ResolveRoute(alias.into()));
+        wait_for(&events, "a route", |e| match e {
+            Event::Route {
+                alias: a, result, ..
+            } if a == alias => Some(result),
+            _ => None,
+        })
+    };
+    // fake-ssh: `<x>-via-<y>` jumps through `<x>-jump`.
+    let hops = route("db-via-gw").unwrap();
+    let names: Vec<&str> = hops.iter().map(|h| h.destination.as_str()).collect();
+    assert_eq!(names, ["db-jump"]);
+    assert_eq!(hops[0].hostname, "db-jump.example.com");
+    assert!(route("plain").unwrap().is_empty());
+    drop(core);
+}
+
+#[test]
 fn groups_marked_for_launch_start_with_sshelf() {
     let tmp = tempfile::tempdir().unwrap();
     let paths = Paths::new(&tmp.path().join("home"), tmp.path().join("app"));

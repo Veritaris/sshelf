@@ -4,8 +4,8 @@
 use std::collections::{HashMap, HashSet};
 
 use egui::RichText;
-use sshconf::{ConfigSet, HostEntry};
-use sshelf_core::core::{AppData, Command, ConfigSnapshot, SshInfo};
+use sshconf::{ConfigSet, HostEntry, HostList};
+use sshelf_core::core::{AppData, Command, ConfigSnapshot, RouteHop, SshInfo};
 use sshelf_core::health::{Health, HealthSnapshot};
 use sshelf_core::hints;
 use sshelf_core::metadata::{Color, HostMeta};
@@ -46,13 +46,18 @@ pub struct HostDetail {
     new_tunnel: Option<String>,
     /// "Edit" / "Rename…" was clicked for this host.
     action: Option<DetailAction>,
+    /// Alias → (config generation, jump hosts on the way).
+    routes: HashMap<String, (u64, Result<Vec<RouteHop>, String>)>,
+    routes_requested: HashSet<(String, u64)>,
 }
 
-/// Editing actions the hosts view carries out.
+/// Actions the hosts view carries out.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DetailAction {
     Edit(String),
     Rename(String),
+    /// A hop on the route was clicked: show that host.
+    Select(String),
 }
 
 #[derive(Default, Clone, PartialEq)]
@@ -104,6 +109,21 @@ impl HostDetail {
         self.action.take()
     }
 
+    pub fn on_route(
+        &mut self,
+        alias: String,
+        generation: u64,
+        result: Result<Vec<RouteHop>, String>,
+    ) {
+        let newer = self
+            .routes
+            .get(&alias)
+            .is_none_or(|(known, _)| generation >= *known);
+        if newer {
+            self.routes.insert(alias, (generation, result));
+        }
+    }
+
     pub fn on_resolved(
         &mut self,
         alias: String,
@@ -143,12 +163,38 @@ impl HostDetail {
         if !current && self.requested.insert((alias.clone(), generation)) {
             commands.push(Command::Resolve(alias.clone()));
         }
+        // The route needs `ssh -G` per hop: only for hosts that jump.
+        let resolved = self
+            .resolved
+            .get(&alias)
+            .filter(|(g, _)| *g == generation)
+            .and_then(|(_, r)| r.as_ref().ok());
+        let jumps = resolved
+            .and_then(|r| r.get("proxyjump"))
+            .is_some_and(|j| !j.eq_ignore_ascii_case("none"));
+        if jumps && self.routes_requested.insert((alias.clone(), generation)) {
+            commands.push(Command::ResolveRoute(alias.clone()));
+        }
+        let proxy_command = resolved
+            .and_then(|r| r.get("proxycommand"))
+            .filter(|c| !c.eq_ignore_ascii_case("none"))
+            .map(str::to_string);
+        let route = jumps.then(|| {
+            self.routes
+                .get(&alias)
+                .filter(|(g, _)| *g == generation)
+                .map(|(_, r)| r.clone())
+        });
+        let hosts = config.hosts();
 
         egui::ScrollArea::vertical()
             .id_salt("host_detail")
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 self.header(ui, host, (set, read_only), data, ssh, &mut commands);
+                if let Some(select) = route_line(ui, &alias, route, proxy_command, hosts) {
+                    self.action = Some(DetailAction::Select(select));
+                }
                 health_line(ui, &alias, health, ssh, &mut commands);
                 ui.separator();
                 self.metadata(ui, &alias, data, &mut commands);
@@ -373,6 +419,68 @@ impl HostDetail {
                 }
             });
     }
+}
+
+/// Between route hops; `→` is not in egui's bundled fonts.
+const ARROW: &str = "›";
+
+/// "Route: you › bastion › db-gw › this host" (SPEC.md §12, M8). Hops that
+/// are hosts of the config can be clicked; returns the clicked one.
+/// `route` is `None` for hosts without `ProxyJump`, `Some(None)` while it
+/// is being worked out.
+fn route_line(
+    ui: &mut egui::Ui,
+    alias: &str,
+    route: Option<Option<Result<Vec<RouteHop>, String>>>,
+    proxy_command: Option<String>,
+    hosts: Option<&HostList>,
+) -> Option<String> {
+    let p = &Palette::ONE_DARK;
+    let mut clicked = None;
+    if route.is_none() && proxy_command.is_none() {
+        return None;
+    }
+    ui.horizontal_wrapped(|ui| {
+        ui.label(RichText::new("Route").color(p.dim));
+        ui.label("you");
+        match route {
+            Some(Some(Ok(hops))) => {
+                for hop in hops {
+                    ui.label(RichText::new(ARROW).color(p.dim));
+                    let tip = format!("{}:{}", hop.hostname, hop.port);
+                    let known = hosts.and_then(|h| h.find(&hop.destination));
+                    match known {
+                        Some(host) => {
+                            if ui.link(&hop.destination).on_hover_text(tip).clicked() {
+                                clicked = Some(host.primary().to_string());
+                            }
+                        }
+                        None => {
+                            ui.label(RichText::new(&hop.destination).monospace())
+                                .on_hover_text(tip);
+                        }
+                    }
+                }
+            }
+            Some(Some(Err(e))) => {
+                ui.label(RichText::new(format!("{ARROW} ?")).color(p.dim));
+                ui.colored_label(p.yellow, e);
+            }
+            Some(None) => {
+                ui.label(RichText::new(ARROW).color(p.dim));
+                ui.spinner();
+            }
+            None => {}
+        }
+        if let Some(command) = &proxy_command {
+            ui.label(RichText::new(ARROW).color(p.dim));
+            ui.label(RichText::new("ProxyCommand").italics())
+                .on_hover_text(command);
+        }
+        ui.label(RichText::new(ARROW).color(p.dim));
+        ui.label(RichText::new(alias).strong());
+    });
+    clicked
 }
 
 /// "Health: Auth OK, login took 240 ms · 2 min ago [Check]" and a hint for

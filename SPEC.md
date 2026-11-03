@@ -408,6 +408,7 @@ Each milestone ends with its acceptance criteria met, tests green on all three O
 - "Start on app launch" per group.
   - As built: `start_on_launch = true` on a group in `tunnels.toml` (missing means off), set in the group editor ("Start when sshelf starts"; the list says "starts with sshelf"). After the first config load, core starts those groups once, through the normal start: host keys are checked first, and an unknown key brings the window up to ask (§9). A config or ssh problem is reported instead.
 - `ProxyJump` chain visualization (breadcrumb first, graph later).
+  - As built: "Route: you › bastion › db-gw › web" in the host detail, for hosts whose effective config has a `ProxyJump` (no extra `ssh -G` for the rest). Core walks the chain like the host key checks do (§9: nested jumps first, each hop once, depth-limited) with `ssh -G` per hop, off the UI thread. Hops that are hosts of the config are links that select them; others show their address on hover. A `ProxyCommand` shows as a "ProxyCommand" step with the command on hover. No graph yet.
 - Optional hardware-key generation via terminal `ssh-keygen`.
 
 ---

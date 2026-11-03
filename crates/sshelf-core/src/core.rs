@@ -130,7 +130,20 @@ pub enum Command {
     },
     /// Check these hosts' health (SPEC.md §12, M8); a few at a time.
     CheckHealth(Vec<String>),
+    /// Work out every jump host on the way to an alias (`ssh -G` per hop);
+    /// answered by [`Event::Route`].
+    ResolveRoute(String),
     Shutdown,
+}
+
+/// One jump host on a route (SPEC.md §12, M8).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouteHop {
+    /// As written in `ProxyJump`: an alias or `[user@]host[:port]`.
+    pub destination: String,
+    /// What ssh connects to.
+    pub hostname: String,
+    pub port: u16,
 }
 
 /// An unknown host key waiting for the user (SPEC.md §9).
@@ -204,6 +217,13 @@ pub enum Event {
     Notice(String),
     /// Health results so far and the checks under way.
     Health(Arc<HealthSnapshot>),
+    /// The jump hosts on the way to `alias`, first hop first (empty: direct).
+    Route {
+        alias: String,
+        /// [`ConfigSnapshot::generation`] the result belongs to.
+        generation: u64,
+        result: Result<Vec<RouteHop>, String>,
+    },
     Error(String),
 }
 
@@ -638,6 +658,7 @@ impl Worker {
                     }
                 }
                 Command::AddKeyToAgent { path, encrypted } => self.add_to_agent(&path, encrypted),
+                Command::ResolveRoute(alias) => self.resolve_route(alias),
                 Command::CheckHealth(aliases) => {
                     for alias in aliases {
                         if self.health.checking.insert(alias.clone()) {
@@ -1317,6 +1338,35 @@ impl Worker {
                 terminal,
                 tray: tray_host::available(),
             })));
+        });
+    }
+
+    /// The jump hosts on the way to `alias`, from the same walk the host
+    /// key checks use (nested `ProxyJump`s, each hop once, depth-limited).
+    fn resolve_route(&self, alias: String) {
+        let generation = self.config.generation;
+        let tools = self.tools.clone();
+        let home = self.paths.home.clone();
+        let emitter = self.emitter.clone();
+        thread::spawn(move || {
+            let result = tools.and_then(|tools| {
+                let chain = hostkeys::chain(&tools, &home, std::slice::from_ref(&alias))?;
+                // The last entry is the destination itself.
+                Ok(chain
+                    .into_iter()
+                    .filter(|(target, _)| target.destination != alias)
+                    .map(|(target, _)| RouteHop {
+                        destination: target.destination,
+                        hostname: target.hostname,
+                        port: target.port,
+                    })
+                    .collect())
+            });
+            emitter.emit(Event::Route {
+                alias,
+                generation,
+                result,
+            });
         });
     }
 

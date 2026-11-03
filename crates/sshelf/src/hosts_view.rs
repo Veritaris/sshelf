@@ -140,6 +140,7 @@ impl HostsView {
         match self.detail.take_action() {
             Some(DetailAction::Edit(alias)) => self.editor.open(config, &alias),
             Some(DetailAction::Rename(alias)) => self.editor.open_rename(&alias),
+            Some(DetailAction::Select(alias)) => self.selected = Some(alias),
             None => {}
         }
         commands.extend(self.editor.show_rename(ui.ctx(), config, data));
@@ -375,7 +376,7 @@ mod tests {
     use std::sync::Arc;
 
     use egui_kittest::Harness;
-    use egui_kittest::kittest::Queryable;
+    use egui_kittest::kittest::{NodeT, Queryable};
     use sshconf::{ConfigSet, HostList, ResolveOptions};
     use sshelf_core::core::{AppData, Command, ConfigSnapshot, ConfigState};
     use sshelf_core::metadata::{HostMeta, HostsFile};
@@ -534,6 +535,51 @@ mod tests {
         harness.step();
         harness.get_by_label("Reachable, host key not known yet");
         harness.get_by_label_contains("Connect once to see and accept the host key");
+    }
+
+    #[test]
+    fn the_route_is_resolved_for_jumping_hosts_and_hops_are_links() {
+        use sshelf_core::core::RouteHop;
+        use sshelf_core::ssh::Resolved;
+
+        let (config, data) = fixture();
+        let mut harness = harness(config, data);
+        harness.step();
+        harness.get_by_label("web").click();
+        harness.step();
+        harness.step();
+        harness.state_mut().0.detail.on_resolved(
+            "web".into(),
+            1,
+            Ok(Resolved::parse(
+                "hostname web.example.com\nproxyjump db\nproxycommand none\n",
+            )),
+        );
+        harness.step();
+        assert_eq!(
+            harness.state().1.last(),
+            Some(&Command::ResolveRoute("web".into()))
+        );
+        harness.state_mut().0.detail.on_route(
+            "web".into(),
+            1,
+            Ok(vec![RouteHop {
+                destination: "db".into(),
+                hostname: "db.internal".into(),
+                port: 22,
+            }]),
+        );
+        harness.step();
+        harness.get_by_label("you");
+        // The hop is a link (the list row has the same name).
+        harness
+            .get_all_by_label("db")
+            .find(|n| n.accesskit_node().role() == egui::accesskit::Role::Link)
+            .expect("db as a link on the route")
+            .click();
+        harness.step();
+        harness.step();
+        assert_eq!(harness.state().0.selected.as_deref(), Some("db"));
     }
 
     #[test]

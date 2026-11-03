@@ -130,6 +130,11 @@ impl SshelfApp {
                 }
                 Event::Notice(text) => self.toasts.push(text),
                 Event::Health(health) => self.hosts.on_health(health),
+                Event::Route {
+                    alias,
+                    generation,
+                    result,
+                } => self.hosts.detail.on_route(alias, generation, result),
                 Event::KeyGenerated { id, result } => {
                     self.hosts.editor.on_key_generated(id, result);
                 }
