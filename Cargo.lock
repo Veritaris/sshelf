@@ -3647,6 +3647,7 @@ dependencies = [
  "sshelf-core",
  "tempfile",
  "tray-icon",
+ "zeroize",
 ]
 
 [[package]]

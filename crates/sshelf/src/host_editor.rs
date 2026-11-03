@@ -5,15 +5,17 @@
 
 use std::collections::HashMap;
 use std::ops::Range;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use egui::RichText;
 use sshconf::diff::{self, DiffOp};
 use sshconf::{FileId, LineKind, edit};
 use sshelf_core::config_edit::{Change, Edit, Problem};
-use sshelf_core::core::{AppData, Command, ConfigSnapshot};
+use sshelf_core::core::{AppData, Command, ConfigSnapshot, SshInfo};
+use sshelf_core::keygen::GeneratedKey;
 use sshelf_core::rename;
 
+use crate::key_dialog::{KeyAction, KeyDialog};
 use crate::theme::Palette;
 
 /// How a form field edits its directive.
@@ -231,6 +233,22 @@ impl Session {
         }
     }
 
+    /// Adds `IdentityFile <file>` (after any existing ones) and
+    /// `IdentitiesOnly yes`, so ssh offers just this key (SPEC.md §11).
+    fn use_key(&mut self, identity_file: &str) {
+        let mut files = edit::values(&self.text, "IdentityFile");
+        if !files
+            .iter()
+            .any(|f| f.first().map(String::as_str) == Some(identity_file))
+        {
+            files.push(vec![identity_file.to_string()]);
+        }
+        self.text = edit::set_all(&self.text, "IdentityFile", &files);
+        self.text = edit::set(&self.text, "IdentitiesOnly", Some(&["yes".to_string()]));
+        // The form must show the new values, not what was typed before.
+        self.focus = None;
+    }
+
     /// Invalid lines of the current text (instant, no ssh).
     fn live_problems(&self) -> Vec<Problem> {
         self.text
@@ -280,6 +298,7 @@ pub struct HostEditor {
     status: Option<(bool, String)>,
     /// A new host that was saved, for the host list to select.
     created: Option<String>,
+    keys: KeyDialog,
 }
 
 impl HostEditor {
@@ -448,6 +467,7 @@ impl HostEditor {
         let mut commands = Vec::new();
         let mut close = false;
         let mut reopen = false;
+        let mut open_keys = None;
         let id = self.next_id + 1;
         let Some(session) = &mut self.session else {
             return commands;
@@ -487,6 +507,17 @@ impl HostEditor {
                 ui.horizontal(|ui| {
                     ui.selectable_value(&mut session.tab, Tab::Form, "Form");
                     ui.selectable_value(&mut session.tab, Tab::Raw, "Raw text");
+                    ui.separator();
+                    if ui
+                        .button("Generate key…")
+                        .on_hover_text("Create a new key pair for this host (SPEC §11)")
+                        .clicked()
+                    {
+                        open_keys = Some(match &session.new {
+                            Some(_) => session.new_alias(),
+                            None => session.alias.clone(),
+                        });
+                    }
                 });
                 ui.add_space(4.0);
                 match session.tab {
@@ -510,6 +541,47 @@ impl HostEditor {
             self.session = Session::open(snapshot, &alias).ok();
         } else if close {
             self.session = None;
+        }
+        if let Some(alias) = open_keys {
+            let ssh_dir = snapshot
+                .path
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_default();
+            self.keys.open(&alias, &ssh_dir);
+        }
+        commands
+    }
+
+    pub fn on_key_generated(&mut self, id: u64, result: Result<GeneratedKey, String>) {
+        self.keys.on_generated(id, result);
+    }
+
+    /// The "Generate key" window, if open; it outlives the editor, so a key
+    /// can be installed after the host is saved.
+    pub fn show_keys(
+        &mut self,
+        ctx: &egui::Context,
+        snapshot: &ConfigSnapshot,
+        ssh: Option<&SshInfo>,
+    ) -> Vec<Command> {
+        let id = self.next_id + 1;
+        let editing = self.session.is_some();
+        if let Some(session) = &self.session {
+            let alias = match &session.new {
+                Some(_) => session.new_alias(),
+                None => session.alias.clone(),
+            };
+            self.keys.follow_alias(&alias);
+        }
+        let (commands, action) = self.keys.show(ctx, id, snapshot, ssh, editing);
+        if !commands.is_empty() {
+            self.next_id = id;
+        }
+        if let (Some(KeyAction::UseInHost { identity_file }), Some(session)) =
+            (action, &mut self.session)
+        {
+            session.use_key(&identity_file);
         }
         commands
     }
@@ -1070,6 +1142,8 @@ mod tests {
                     .editor
                     .show_rename(ui.ctx(), &state.snapshot, &state.data);
                 state.commands.extend(commands);
+                let commands = state.editor.show_keys(ui.ctx(), &state.snapshot, None);
+                state.commands.extend(commands);
             },
             State {
                 editor,
@@ -1358,6 +1432,38 @@ mod tests {
         let session = harness.state().editor.session.as_ref().unwrap();
         assert_eq!(session.file, PathBuf::from("home/.ssh/config"));
         assert!(session.base.is_empty());
+    }
+
+    #[test]
+    fn a_generated_key_can_be_used_in_the_host() {
+        let mut harness = harness(CONFIG);
+        steps(&mut harness);
+        harness.get_by_label("Generate key…").click();
+        steps(&mut harness);
+        harness.get_by_label("Generate").click();
+        steps(&mut harness);
+        let Some(Command::GenerateKey { id, request }) = harness.state().commands.last().cloned()
+        else {
+            panic!("no key requested");
+        };
+        assert!(request.path.ends_with("id_ed25519_web"), "{request:?}");
+        let key = sshelf_core::keygen::GeneratedKey {
+            public_path: sshelf_core::keygen::public_path(&request.path),
+            path: request.path,
+            public_line: "ssh-ed25519 AAAA web (sshelf)".into(),
+            fingerprint: "SHA256:x".into(),
+            encrypted: false,
+        };
+        harness.state_mut().editor.on_key_generated(id, Ok(key));
+        steps(&mut harness);
+        harness.get_by_label("Use in this host").click();
+        steps(&mut harness);
+        assert_eq!(
+            text(&harness),
+            "Host web\n    HostName old.example\n    IdentityFile ~/.ssh/id_ed25519_web\n    IdentitiesOnly yes\n"
+        );
+        // Saving is the editor's usual Save.
+        harness.get_by_label("Changes (2 lines)");
     }
 
     #[test]

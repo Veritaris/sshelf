@@ -9,6 +9,7 @@ mod host_editor;
 mod hostkey_modal;
 mod hosts_view;
 mod icon;
+mod key_dialog;
 mod orphans_window;
 mod settings_view;
 mod sidebar;

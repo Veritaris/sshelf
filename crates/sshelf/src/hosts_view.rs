@@ -60,7 +60,9 @@ impl HostsView {
             ConfigState::Loaded { set, hosts } => (set, hosts),
             ConfigState::Missing => {
                 if self.editor.is_open() {
-                    return self.editor.show(ui, config);
+                    let mut commands = self.editor.show(ui, config);
+                    commands.extend(self.editor.show_keys(ui.ctx(), config, ssh));
+                    return commands;
                 }
                 ui.heading("No ssh config yet");
                 ui.label(format!(
@@ -125,6 +127,7 @@ impl HostsView {
             None => {}
         }
         commands.extend(self.editor.show_rename(ui.ctx(), config, data));
+        commands.extend(self.editor.show_keys(ui.ctx(), config, ssh));
         commands
     }
 

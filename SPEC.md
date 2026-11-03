@@ -341,6 +341,7 @@ Available when adding/editing a host.
     - KDF rounds default to 16 (`ssh-keygen`'s default), 1–1000. The comment defaults to `<alias> (sshelf)` and may not contain quotes, backslashes or line breaks (it ends up in the install command). The file name defaults to `~/.ssh/<id_ed25519|id_ecdsa|id_rsa>_<alias>`; the key or its `.pub` existing refuses the name.
 - Hardware keys (`ed25519-sk`, `ecdsa-sk`) require device interaction → run `ssh-keygen` in a terminal. Optional, later.
 - File permissions: mode `600` on Unix; on Windows restrict the file ACL to the current user (OpenSSH rejects keys with open permissions).
+- As built, the editor's *Generate key…* opens a window (not a modal: the editor stays usable for saving, and the window outlives it) with the options, then the fingerprint, the public key (with Copy) and the follow-ups as buttons rather than checkboxes, since some need the host saved first: *Use in this host* adds the lines below to the draft (saved with the editor's Save and validation; `IdentityFile ~/.ssh/<name>` when the key is in `~/.ssh`), *Add to agent*, *Install on server* (enabled once the alias is in the saved config). While a new host's alias is typed, the window follows it (install target, default file name and comment). An existing file is reported when *Generate* is clicked: the UI does not look at the disk.
 - Follow-up actions (checkboxes):
   - Add `IdentityFile` + `IdentitiesOnly yes` to the host block.
   - Add to agent (`ssh-add`; on macOS `--apple-use-keychain`).

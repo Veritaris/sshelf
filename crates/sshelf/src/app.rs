@@ -129,8 +129,9 @@ impl SshelfApp {
                     self.toasts.push(format!("Opened a terminal for {alias}"));
                 }
                 Event::Notice(text) => self.toasts.push(text),
-                // The key dialog arrives with the host editor's key actions.
-                Event::KeyGenerated { .. } => {}
+                Event::KeyGenerated { id, result } => {
+                    self.hosts.editor.on_key_generated(id, result);
+                }
                 Event::Error(message) => self.error = Some(message),
                 Event::Tunnels(states) => self.tunnel_states = Some(states),
                 // A start from the tray may need an answer: show the window.
