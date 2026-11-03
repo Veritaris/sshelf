@@ -1521,6 +1521,35 @@ mod tests {
     }
 
     #[test]
+    fn a_custom_colour_saves_only_when_used() {
+        let (config, data) = fixture();
+        let mut harness = harness(config, data);
+        harness.step();
+        select(&mut harness, "web");
+        harness.get_by_label("Custom colour…").click();
+        harness.step();
+        harness.step();
+        let before = harness.state().1.len();
+        // Cancel keeps the colour as it was.
+        harness.get_by_label("Cancel").click();
+        harness.step();
+        harness.step();
+        assert_eq!(harness.state().1.len(), before);
+        assert!(harness.query_by_label("Use colour").is_none());
+
+        harness.get_by_label("Custom colour…").click();
+        harness.step();
+        harness.step();
+        harness.get_by_label("Use colour").click();
+        harness.step();
+        harness.step();
+        // The picker starts on Blue, a swatch of its own; any colour is
+        // stored the same way.
+        assert!(last_meta(&harness).color.is_some());
+        assert!(harness.query_by_label("Use colour").is_none());
+    }
+
+    #[test]
     fn notes_save_only_when_asked() {
         let (config, data) = fixture();
         let mut harness = harness(config, data);

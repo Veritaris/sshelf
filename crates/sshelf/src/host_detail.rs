@@ -25,6 +25,7 @@ use sshelf_core::tunnels::{DEFAULT_BIND, Forward, ForwardKind, Tunnel};
 use crate::theme::{Palette, SWATCHES, radius, timing};
 use crate::tunnels_view::state_label;
 use crate::widgets::button::{self, Button};
+use crate::widgets::color::{self, Picking};
 use crate::widgets::{copy, marks, nav, popup, text};
 use crate::{fonts, icons, motion, util};
 
@@ -99,6 +100,8 @@ pub struct HostDetail {
     notes: String,
     /// The "+ tag" field while open, and whether it got focus yet.
     new_tag: Option<(String, bool)>,
+    /// The custom colour picker while open, with the colour in it.
+    picker: Option<Picking>,
     tab: Tab,
     /// Alias → `ssh -G` result.
     resolved: HashMap<String, ResolvedAt>,
@@ -310,6 +313,7 @@ impl HostDetail {
             self.sent = None;
             self.notes = meta.notes.clone();
             self.new_tag = None;
+            self.picker = None;
             self.filter.clear();
         }
         if self.sent.as_ref() == Some(&meta) {
@@ -603,8 +607,9 @@ impl HostDetail {
         }
     }
 
-    /// *none*, the five host colours and, when the stored colour is none of
-    /// them, that one as a sixth, selected swatch (SPEC.md §10).
+    /// *none*, the five host colours, the stored colour as a sixth, selected
+    /// swatch when it is none of them, and "+" for any other colour
+    /// (SPEC.md §10).
     fn swatches(&mut self, ui: &mut Ui, alias: &str, commands: &mut Vec<Command>) {
         let current = self
             .base
@@ -612,6 +617,7 @@ impl HostDetail {
             .map(|Color([r, g, b])| Color32::from_rgb(r, g, b));
         let custom = current.filter(|c| SWATCHES.iter().all(|(_, s)| s != c));
         let mut picked = None;
+        let mut plus = None;
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
             if swatch(ui, None, "No colour", current.is_none()).clicked() {
@@ -627,7 +633,25 @@ impl HostDetail {
                 let name = format!("Custom #{r:02x}{g:02x}{b:02x}");
                 swatch(ui, Some(color), &name, true);
             }
+            let response = plus_swatch(ui);
+            if response.clicked() {
+                self.picker = match self.picker {
+                    Some(_) => None,
+                    None => Some(Picking::new(current.unwrap_or(SWATCHES[0].1))),
+                };
+            }
+            plus = Some(response);
         });
+        if let (Some(picking), Some(plus)) = (&mut self.picker, plus) {
+            match color_picker(ui, &plus, picking) {
+                Picker::Open => {}
+                Picker::Use(color) => {
+                    self.picker = None;
+                    picked = Some(Some(color));
+                }
+                Picker::Cancel => self.picker = None,
+            }
+        }
         if let Some(color) = picked.filter(|c| *c != current) {
             let meta = HostMeta {
                 color: color.map(|c| Color([c.r(), c.g(), c.b()])),
@@ -1134,6 +1158,102 @@ fn swatch(ui: &mut Ui, color: Option<Color32>, name: &str, selected: bool) -> Re
     popup::tip_below(response, |ui| {
         ui.label(name);
     })
+}
+
+/// The "+" swatch that opens the custom colour picker.
+fn plus_swatch(ui: &mut Ui) -> Response {
+    let p = &Palette::ONE_DARK;
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(22.0), Sense::click());
+    response
+        .widget_info(|| WidgetInfo::labeled(Role::Button, response.enabled(), "Custom colour…"));
+    let hover = motion::fade(
+        ui.ctx(),
+        response.id.with("hover"),
+        response.hovered(),
+        timing::HOVER,
+        motion::ease_out,
+    );
+    let painter = ui.painter();
+    painter.circle_stroke(
+        rect.center(),
+        7.5,
+        Stroke::new(1.0, p.border.lerp_to_gamma(p.text, hover)),
+    );
+    painter.text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        icons::PLUS,
+        icons::font(12.0),
+        p.dim.lerp_to_gamma(p.text_strong, hover),
+    );
+    let response = response.on_hover_cursor(CursorIcon::PointingHand);
+    popup::tip_below(response, |ui| {
+        ui.label("Pick any colour");
+    })
+}
+
+/// About how tall the custom colour picker is, with its buttons.
+const PICKER_HEIGHT: f32 = 280.0;
+
+/// What the custom colour picker did this frame.
+enum Picker {
+    Open,
+    Use(Color32),
+    Cancel,
+}
+
+/// The custom colour picker below the "+" swatch, then *Use colour* /
+/// *Cancel*. Nothing is saved before *Use colour*; Esc or a click
+/// elsewhere cancels.
+fn color_picker(ui: &Ui, plus: &Response, picking: &mut Picking) -> Picker {
+    let p = &Palette::ONE_DARK;
+    let ctx = ui.ctx();
+    let mut result = None;
+    // Below the "+", or above it when there is no room (the swatches sit
+    // low in the pane), so it never covers the swatch row.
+    let room_below = ctx.content_rect().bottom() - plus.rect.bottom();
+    let (pos, pivot) = if room_below > PICKER_HEIGHT {
+        (plus.rect.left_bottom() + vec2(0.0, 6.0), Align2::LEFT_TOP)
+    } else {
+        (plus.rect.left_top() - vec2(0.0, 6.0), Align2::LEFT_BOTTOM)
+    };
+    let area = egui::Area::new(plus.id.with("picker"))
+        .order(egui::Order::Foreground)
+        .pivot(pivot)
+        .fixed_pos(pos)
+        .show(ctx, |ui| {
+            Frame::new()
+                .fill(p.bg_dark)
+                .stroke(Stroke::new(1.0, p.selection))
+                .corner_radius(radius::CONTROL)
+                .inner_margin(Margin::same(12))
+                .show(ui, |ui| {
+                    color::picker(ui, picking);
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add(Button::new("Use colour").primary().small())
+                            .clicked()
+                        {
+                            result = Some(Picker::Use(picking.color()));
+                        }
+                        if ui.add(Button::new("Cancel").small()).clicked() {
+                            result = Some(Picker::Cancel);
+                        }
+                    });
+                });
+        });
+    let escape = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+    let outside = ctx.input(|i| {
+        i.pointer.any_pressed()
+            && i.pointer
+                .interact_pos()
+                .is_some_and(|pos| !area.response.rect.contains(pos) && !plus.rect.contains(pos))
+    });
+    match result {
+        Some(result) => result,
+        None if escape || outside => Picker::Cancel,
+        None => Picker::Open,
+    }
 }
 
 /// The table's "OPTION / VALUE" header row.
