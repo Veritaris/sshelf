@@ -101,9 +101,74 @@ struct Session {
     /// Form field text while it has focus: (field, row) → text.
     buffers: HashMap<(usize, usize), String>,
     focus: Option<(usize, usize)>,
+    /// A new host: the files it may go to (SPEC.md §4); `None` when editing.
+    new: Option<Vec<PathBuf>>,
 }
 
 impl Session {
+    /// A new host for the main config (or the first writable file).
+    fn new_host(snapshot: &ConfigSnapshot) -> Result<Self, String> {
+        let targets = snapshot.writable_files();
+        let file = targets
+            .iter()
+            .find(|f| **f == snapshot.path)
+            .or(targets.first())
+            .cloned()
+            .ok_or("no config file can be written")?;
+        // The form adds directive lines as they are filled in.
+        let text = "Host ".to_string();
+        let mut session = Self {
+            alias: String::new(),
+            file: PathBuf::new(),
+            file_id: 0,
+            base: Vec::new(),
+            lines: 0..0,
+            original: String::new(),
+            text,
+            tab: Tab::Form,
+            pending: None,
+            checked: None,
+            conflict: None,
+            overwrite_confirmed: false,
+            buffers: HashMap::new(),
+            focus: None,
+            new: Some(targets),
+        };
+        session.target(snapshot, file);
+        Ok(session)
+    }
+
+    /// Points a new host at `file`, as the snapshot has it.
+    fn target(&mut self, snapshot: &ConfigSnapshot, file: PathBuf) {
+        let loaded = snapshot
+            .set()
+            .and_then(|set| set.files.iter().enumerate().find(|(_, f)| f.path == file));
+        (self.file_id, self.base) = match loaded {
+            Some((id, f)) => (id, f.to_bytes()),
+            None => (0, Vec::new()),
+        };
+        self.file = file;
+        self.checked = None;
+    }
+
+    /// The alias a new host gets: the first word of its `Host` line.
+    fn new_alias(&self) -> String {
+        edit::header_aliases(&self.text)
+            .and_then(|a| a.into_iter().next())
+            .unwrap_or_default()
+    }
+
+    /// Why a new host cannot be saved under its name yet.
+    fn name_problem(&self, snapshot: &ConfigSnapshot) -> Option<String> {
+        self.new.as_ref()?;
+        let alias = self.new_alias();
+        if alias.is_empty() {
+            return Some("Give the host a name.".into());
+        }
+        let empty = sshconf::HostList::default();
+        rename::check_new_alias(&alias, snapshot.hosts().unwrap_or(&empty)).err()
+    }
+
     /// Opens `alias`'s own block as the snapshot has it.
     fn open(snapshot: &ConfigSnapshot, alias: &str) -> Result<Self, String> {
         let set = snapshot.set().ok_or("the ssh config is not loaded")?;
@@ -134,6 +199,7 @@ impl Session {
             overwrite_confirmed: false,
             buffers: HashMap::new(),
             focus: None,
+            new: None,
         })
     }
 
@@ -146,14 +212,21 @@ impl Session {
         let alias = edit::header_aliases(&self.text)
             .and_then(|a| a.into_iter().next())
             .unwrap_or_else(|| self.alias.clone());
+        let change = if self.new.is_some() {
+            Change::Insert {
+                text: self.text.clone(),
+            }
+        } else {
+            Change::Replace {
+                lines: self.lines.clone(),
+                text: self.text.clone(),
+            }
+        };
         Edit {
             id,
             file: self.file.clone(),
             base: self.base.clone(),
-            change: Change::Replace {
-                lines: self.lines.clone(),
-                text: self.text.clone(),
-            },
+            change,
             alias,
         }
     }
@@ -205,6 +278,8 @@ pub struct HostEditor {
     next_id: u64,
     /// For the status bar: (is error, text).
     status: Option<(bool, String)>,
+    /// A new host that was saved, for the host list to select.
+    created: Option<String>,
 }
 
 impl HostEditor {
@@ -215,6 +290,11 @@ impl HostEditor {
     /// Alias of the host being edited.
     pub fn alias(&self) -> Option<&str> {
         self.session.as_ref().map(|s| s.alias.as_str())
+    }
+
+    /// A new host is being written (it has no alias in the list yet).
+    pub fn is_new(&self) -> bool {
+        self.session.as_ref().is_some_and(|s| s.new.is_some())
     }
 
     pub fn is_dirty(&self) -> bool {
@@ -230,6 +310,19 @@ impl HostEditor {
             Ok(session) => self.session = Some(session),
             Err(e) => self.status = Some((true, format!("cannot edit {alias}: {e}"))),
         }
+    }
+
+    /// Starts a new host (SPEC.md §4: it goes before the first catch-all block).
+    pub fn open_new(&mut self, snapshot: &ConfigSnapshot) {
+        match Session::new_host(snapshot) {
+            Ok(session) => self.session = Some(session),
+            Err(e) => self.status = Some((true, format!("cannot add a host: {e}"))),
+        }
+    }
+
+    /// The alias of a host that was just added, once.
+    pub fn take_created(&mut self) -> Option<String> {
+        self.created.take()
     }
 
     pub fn open_rename(&mut self, alias: &str) {
@@ -270,7 +363,11 @@ impl HostEditor {
         if now == session.base {
             return;
         }
-        if session.dirty() {
+        if session.new.is_some() {
+            // Nothing existing is replaced: the insert point is found again.
+            let file = session.file.clone();
+            session.target(snapshot, file);
+        } else if session.dirty() {
             session.conflict = Some(now);
         } else {
             let tab = session.tab;
@@ -320,7 +417,13 @@ impl HostEditor {
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            self.status = Some((false, format!("Saved {} in {name}", session.alias)));
+            if session.new.is_some() {
+                let alias = session.new_alias();
+                self.status = Some((false, format!("Added {alias} to {name}")));
+                self.created = Some(alias);
+            } else {
+                self.status = Some((false, format!("Saved {} in {name}", session.alias)));
+            }
         }
     }
 
@@ -355,14 +458,16 @@ impl HostEditor {
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    ui.heading(
-                        RichText::new(format!("Editing {}", session.alias))
-                            .color(p.accent)
-                            .strong(),
-                    );
-                });
-                ui.label(RichText::new(session.file.display().to_string()).color(p.dim));
+                let title = match &session.new {
+                    Some(_) => "New host".to_string(),
+                    None => format!("Editing {}", session.alias),
+                };
+                ui.heading(RichText::new(title).color(p.accent).strong());
+                if let Some(targets) = session.new.clone() {
+                    target_picker(ui, session, snapshot, &targets);
+                } else {
+                    ui.label(RichText::new(session.file.display().to_string()).color(p.dim));
+                }
                 if session.file_id != 0 {
                     ui.label(
                         RichText::new(
@@ -389,15 +494,18 @@ impl HostEditor {
                     Tab::Raw => raw(ui, session),
                 }
                 ui.separator();
-                problems(ui, session);
+                let name_problem = session.name_problem(snapshot);
+                problems(ui, session, name_problem.as_deref());
                 changes(ui, session);
                 ui.separator();
-                close = buttons(ui, session, id, &mut commands);
+                close = buttons(ui, session, name_problem.is_some(), id, &mut commands);
             });
         if !commands.is_empty() {
             self.next_id = id;
         }
-        if reopen {
+        if reopen && session.new.is_some() {
+            self.session = None;
+        } else if reopen {
             let alias = session.alias.clone();
             self.session = Session::open(snapshot, &alias).ok();
         } else if close {
@@ -484,6 +592,39 @@ impl HostEditor {
     }
 }
 
+/// Which file a new host goes to: writable loaded files (SPEC.md §4).
+fn target_picker(
+    ui: &mut egui::Ui,
+    session: &mut Session,
+    snapshot: &ConfigSnapshot,
+    targets: &[PathBuf],
+) {
+    let p = &Palette::ONE_DARK;
+    let mut chosen = session.file.clone();
+    ui.horizontal(|ui| {
+        let label = ui.label("Add to");
+        egui::ComboBox::from_id_salt("new_host_file")
+            .selected_text(chosen.display().to_string())
+            .width(420.0)
+            .show_ui(ui, |ui| {
+                for target in targets {
+                    ui.selectable_value(&mut chosen, target.clone(), target.display().to_string());
+                }
+            })
+            .response
+            .labelled_by(label.id);
+    });
+    if chosen != session.file {
+        session.target(snapshot, chosen);
+    }
+    let note = if session.base.is_empty() && snapshot.set().is_none() {
+        "The file does not exist yet; it is created with this host."
+    } else {
+        "It goes before the first `Host *` / `Match all` block, so those defaults do not override it."
+    };
+    ui.label(RichText::new(note).small().color(p.dim));
+}
+
 /// Splits a form value into arguments; `None` when it is empty.
 fn words(value: &str, split: bool) -> Option<Vec<String>> {
     let value = value.trim();
@@ -501,6 +642,29 @@ fn form(ui: &mut egui::Ui, session: &mut Session) {
         .num_columns(2)
         .spacing([16.0, 6.0])
         .show(ui, |ui| {
+            if session.new.is_some() {
+                // The `Host` line of a new host; existing hosts use Rename….
+                let label = ui.label("Alias");
+                let key = (usize::MAX, 0);
+                let derived = session.new_alias();
+                let buffer = session.field_text(key, derived);
+                let response = ui
+                    .add(
+                        egui::TextEdit::singleline(buffer)
+                            .hint_text("the name you type after ssh")
+                            .desired_width(320.0),
+                    )
+                    .labelled_by(label.id);
+                let value = buffer.trim().to_string();
+                session.track_focus(key, &response);
+                if response.changed() {
+                    session.text = match session.text.split_once('\n') {
+                        Some((_, rest)) => format!("Host {value}\n{rest}"),
+                        None => format!("Host {value}"),
+                    };
+                }
+                ui.end_row();
+            }
             for (index, &(keyword, field)) in FIELDS.iter().enumerate() {
                 let label = ui.label(keyword);
                 let current = edit::values(&session.text, keyword);
@@ -618,10 +782,15 @@ fn raw(ui: &mut egui::Ui, session: &mut Session) {
 }
 
 /// Live problems, plus the last validation if it is for the current text.
-fn problems(ui: &mut egui::Ui, session: &Session) {
+fn problems(ui: &mut egui::Ui, session: &Session, name_problem: Option<&str>) {
     let p = &Palette::ONE_DARK;
     let line_of = |n: usize| session.lines.start + n + 1;
     let mut shown: Vec<Problem> = session.live_problems();
+    if let Some(problem) = name_problem {
+        ui.colored_label(p.yellow, problem);
+        // An empty `Host` line is the same problem, already explained.
+        shown.retain(|p| p.line != Some(0));
+    }
     match &session.checked {
         Some((text, Ok(found))) if *text == session.text => {
             for problem in found {
@@ -640,6 +809,9 @@ fn problems(ui: &mut egui::Ui, session: &Session) {
     }
     for problem in &shown {
         let text = match problem.line {
+            Some(n) if session.new.is_some() => {
+                format!("line {} of the new host: {}", n + 1, problem.message)
+            }
             Some(n) => format!("line {}: {}", line_of(n), problem.message),
             None => problem.message.clone(),
         };
@@ -732,7 +904,19 @@ fn conflict(
         .map(|f| f.to_bytes())
         .unwrap_or_default();
     let reloaded = current == disk;
-    let fresh = Session::open(snapshot, &session.alias).ok();
+    let fresh = match &session.new {
+        // A new host only adds lines: it can always move to the new version.
+        Some(_) => {
+            let mut fresh = Session::new_host(snapshot).ok();
+            if let Some(f) = &mut fresh {
+                f.target(snapshot, session.file.clone());
+                f.lines = session.lines.clone();
+                f.original = session.original.clone();
+            }
+            fresh
+        }
+        None => Session::open(snapshot, &session.alias).ok(),
+    };
     let rebase = fresh.filter(|f| reloaded && f.original == session.original);
     ui.horizontal(|ui| {
         if ui
@@ -781,12 +965,18 @@ fn conflict(
 }
 
 /// Check / Save / Close; returns whether the editor closes.
-fn buttons(ui: &mut egui::Ui, session: &mut Session, id: u64, commands: &mut Vec<Command>) -> bool {
+fn buttons(
+    ui: &mut egui::Ui,
+    session: &mut Session,
+    unnamed: bool,
+    id: u64,
+    commands: &mut Vec<Command>,
+) -> bool {
     let p = &Palette::ONE_DARK;
     let mut close = false;
     ui.horizontal(|ui| {
         let busy = session.pending.is_some();
-        let blocked = !session.live_problems().is_empty();
+        let blocked = unnamed || !session.live_problems().is_empty();
         let can_save = session.dirty() && !busy && !blocked && session.conflict.is_none();
         if ui
             .add_enabled(can_save, egui::Button::new("Save"))
@@ -1031,6 +1221,143 @@ mod tests {
         let edit = saved_edit(&harness);
         assert_eq!(edit.base, changed_again.as_bytes());
         assert!(matches!(edit.change, Change::Replace { ref lines, .. } if *lines == (1..4)));
+    }
+
+    fn new_host_harness(snapshot: Arc<ConfigSnapshot>) -> Harness<'static, State> {
+        let mut editor = HostEditor::default();
+        editor.open_new(&snapshot);
+        assert!(editor.is_new());
+        Harness::builder().with_size([900.0, 900.0]).build_ui_state(
+            |ui, state: &mut State| {
+                let commands = state.editor.show(ui, &state.snapshot);
+                state.commands.extend(commands);
+            },
+            State {
+                editor,
+                snapshot,
+                data: AppData::new(PathBuf::from("app")),
+                commands: Vec::new(),
+            },
+        )
+    }
+
+    #[test]
+    fn a_new_host_needs_a_free_name_and_is_inserted() {
+        let snapshot = snapshot(CONFIG);
+        let path = snapshot.path.clone();
+        let mut harness = new_host_harness(snapshot);
+        steps(&mut harness);
+        harness.get_by_label("New host");
+        harness.get_by_label("Give the host a name.");
+        assert!(harness.get_by_label("Save").accesskit_node().is_disabled());
+
+        harness.get_by_label("Alias").click();
+        harness.step();
+        harness.get_by_label("Alias").type_text("web");
+        steps(&mut harness);
+        harness.get_by_label("`web` is already a host");
+        assert!(harness.get_by_label("Save").accesskit_node().is_disabled());
+
+        harness.get_by_label("Alias").type_text("2");
+        harness.get_by_label("HostName").click();
+        harness.step();
+        harness.get_by_label("HostName").type_text("web2.example");
+        steps(&mut harness);
+        assert_eq!(text(&harness), "Host web2\n    HostName web2.example");
+        harness.get_by_label("Save").click();
+        steps(&mut harness);
+        let edit = saved_edit(&harness);
+        assert_eq!(edit.file, path);
+        assert_eq!(edit.alias, "web2");
+        assert_eq!(
+            edit.change,
+            Change::Insert {
+                text: "Host web2\n    HostName web2.example".into()
+            }
+        );
+        harness.state_mut().editor.on_saved(edit.id);
+        assert_eq!(
+            harness.state_mut().editor.take_created().as_deref(),
+            Some("web2")
+        );
+        assert_eq!(
+            harness.state_mut().editor.take_status(),
+            Some((false, "Added web2 to config".into()))
+        );
+    }
+
+    #[test]
+    fn a_new_host_can_go_to_an_included_file_but_not_a_read_only_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("config");
+        fs::create_dir_all(tmp.path().join("conf.d")).unwrap();
+        fs::write(&config, "Include conf.d/*\nHost *\n    User me\n").unwrap();
+        fs::write(tmp.path().join("conf.d").join("work"), "Host w\n").unwrap();
+        fs::write(tmp.path().join("conf.d").join("locked"), "Host l\n").unwrap();
+        let mut opts = ResolveOptions::new(tmp.path());
+        opts.ssh_dir = tmp.path().to_path_buf();
+        let set = ConfigSet::load(&config, &opts).unwrap();
+        assert_eq!(set.files.len(), 3);
+        let read_only = set
+            .files
+            .iter()
+            .map(|f| {
+                f.path
+                    .ends_with("locked")
+                    .then(|| "the file is read-only".to_string())
+            })
+            .collect();
+        let hosts = HostList::from_set(&set);
+        let snapshot = Arc::new(ConfigSnapshot {
+            generation: 1,
+            path: config.clone(),
+            state: ConfigState::Loaded { set, hosts },
+            read_only,
+        });
+        let targets = snapshot.writable_files();
+        assert_eq!(targets.len(), 2);
+        assert!(!targets.iter().any(|t| t.ends_with("locked")));
+
+        let mut harness = new_host_harness(Arc::clone(&snapshot));
+        steps(&mut harness);
+        assert_eq!(
+            harness.state().editor.session.as_ref().unwrap().file,
+            config
+        );
+        let work = targets
+            .iter()
+            .find(|t| t.ends_with("work"))
+            .unwrap()
+            .clone();
+        let state = harness.state_mut();
+        state
+            .editor
+            .session
+            .as_mut()
+            .unwrap()
+            .target(&snapshot, work.clone());
+        let session = state.editor.session.as_ref().unwrap();
+        assert_eq!(session.base, b"Host w\n");
+        // Globs expand sorted: config, conf.d/locked, conf.d/work.
+        assert_eq!(session.file_id, 2);
+        steps(&mut harness);
+        harness.get_by_label_contains("validated on its own");
+    }
+
+    #[test]
+    fn a_missing_config_is_created_by_the_first_host() {
+        let snapshot = Arc::new(ConfigSnapshot {
+            generation: 1,
+            path: PathBuf::from("home/.ssh/config"),
+            state: ConfigState::Missing,
+            read_only: Vec::new(),
+        });
+        let mut harness = new_host_harness(snapshot);
+        steps(&mut harness);
+        harness.get_by_label("The file does not exist yet; it is created with this host.");
+        let session = harness.state().editor.session.as_ref().unwrap();
+        assert_eq!(session.file, PathBuf::from("home/.ssh/config"));
+        assert!(session.base.is_empty());
     }
 
     #[test]

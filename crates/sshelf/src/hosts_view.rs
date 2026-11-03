@@ -59,11 +59,17 @@ impl HostsView {
         let (set, hosts) = match &config.state {
             ConfigState::Loaded { set, hosts } => (set, hosts),
             ConfigState::Missing => {
+                if self.editor.is_open() {
+                    return self.editor.show(ui, config);
+                }
                 ui.heading("No ssh config yet");
                 ui.label(format!(
                     "sshelf shows the hosts from {} as soon as it exists.",
                     config.path.display()
                 ));
+                if ui.button("+ New host").clicked() {
+                    self.editor.open_new(config);
+                }
                 return Vec::new();
             }
             ConfigState::Error(e) => {
@@ -73,14 +79,23 @@ impl HostsView {
             }
         };
 
-        egui::Panel::left("host_list")
+        if let Some(alias) = self.editor.take_created() {
+            self.selected = Some(alias);
+        }
+        let new_host = egui::Panel::left("host_list")
             .resizable(true)
             .default_size(340.0)
             .min_size(240.0)
-            .show(ui, |ui| self.list(ui, set, hosts, data));
+            .show(ui, |ui| self.list(ui, set, hosts, data))
+            .inner;
+        if new_host {
+            self.editor.open_new(config);
+            self.selected = None;
+        }
 
         // Another host was picked: an editor without changes gives way.
         if self.editor.is_open()
+            && !self.editor.is_new()
             && self.editor.alias() != self.selected.as_deref()
             && !self.editor.is_dirty()
         {
@@ -113,9 +128,20 @@ impl HostsView {
         commands
     }
 
-    fn list(&mut self, ui: &mut egui::Ui, set: &ConfigSet, hosts: &HostList, data: &AppData) {
+    /// The host list; returns whether "New host" was clicked.
+    fn list(
+        &mut self,
+        ui: &mut egui::Ui,
+        set: &ConfigSet,
+        hosts: &HostList,
+        data: &AppData,
+    ) -> bool {
         let p = &Palette::ONE_DARK;
         ui.add_space(6.0);
+        let new_host = ui
+            .button("+ New host")
+            .on_hover_text("Add a host to your ssh config")
+            .clicked();
         ui.add(
             egui::TextEdit::singleline(&mut self.search)
                 .hint_text("Search aliases, tags, notes")
@@ -157,6 +183,7 @@ impl HostsView {
                 ui.add_space(8.0);
                 patterns(ui, set, hosts);
             });
+        new_host
     }
 
     fn matches(&self, host: &HostEntry, meta: Option<&HostMeta>, needle: &str) -> bool {
