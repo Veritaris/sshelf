@@ -291,42 +291,55 @@ impl eframe::App for SshelfApp {
         self.toasts.show(ui.ctx());
 
         let mut commands = Vec::new();
-        egui::CentralPanel::default().show(ui, |ui| match self.view {
-            View::Hosts => {
-                commands = self.hosts.show(
-                    ui,
-                    self.config.as_deref(),
-                    self.data.as_deref(),
-                    self.tunnel_states.as_deref(),
-                    self.ssh.as_deref(),
-                );
-                for notice in self.hosts.take_notices() {
-                    self.toasts.push(notice);
+        // Hosts sits flush with the right and bottom edges: the cards'
+        // detail pane runs to the window edge and the status bar.
+        let frame = egui::Frame::central_panel(ui.style());
+        let frame = match self.view {
+            View::Hosts => frame.inner_margin(egui::Margin {
+                right: 0,
+                bottom: 0,
+                ..frame.inner_margin
+            }),
+            _ => frame,
+        };
+        egui::CentralPanel::default()
+            .frame(frame)
+            .show(ui, |ui| match self.view {
+                View::Hosts => {
+                    commands = self.hosts.show(
+                        ui,
+                        self.config.as_deref(),
+                        self.data.as_deref(),
+                        self.tunnel_states.as_deref(),
+                        self.ssh.as_deref(),
+                    );
+                    for notice in self.hosts.take_notices() {
+                        self.toasts.push(notice);
+                    }
                 }
-            }
-            View::Tunnels => {
-                commands = self.tunnels.show(
-                    ui,
-                    self.config.as_deref(),
-                    self.data.as_deref(),
-                    self.tunnel_states.as_deref(),
-                    self.ssh.as_deref(),
-                );
-            }
-            View::Groups => {
-                commands =
-                    self.groups
-                        .show(ui, self.data.as_deref(), self.tunnel_states.as_deref());
-            }
-            View::Settings => {
-                commands = self.settings.show(
-                    ui,
-                    self.data.as_deref(),
-                    self.ssh.as_deref(),
-                    self.config.as_deref().map(|c| c.path.as_path()),
-                );
-            }
-        });
+                View::Tunnels => {
+                    commands = self.tunnels.show(
+                        ui,
+                        self.config.as_deref(),
+                        self.data.as_deref(),
+                        self.tunnel_states.as_deref(),
+                        self.ssh.as_deref(),
+                    );
+                }
+                View::Groups => {
+                    commands =
+                        self.groups
+                            .show(ui, self.data.as_deref(), self.tunnel_states.as_deref());
+                }
+                View::Settings => {
+                    commands = self.settings.show(
+                        ui,
+                        self.data.as_deref(),
+                        self.ssh.as_deref(),
+                        self.config.as_deref().map(|c| c.path.as_path()),
+                    );
+                }
+            });
         if self.orphans.open
             && let Some(data) = &self.data
         {

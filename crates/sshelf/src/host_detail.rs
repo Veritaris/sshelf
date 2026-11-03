@@ -932,8 +932,8 @@ fn card<R>(ui: &mut Ui, title: &str, add: impl FnOnce(&mut Ui) -> R) -> R {
 }
 
 /// The favourite star: a toggle whose Lucide outline fades from grey to
-/// Light Yellow (Lucide has no filled star); its tooltip says what a click
-/// does, or why it can't.
+/// Light Yellow (Lucide has no filled star), with a background only on
+/// hover; its tooltip says what a click does, or why it can't.
 fn star(ui: &mut Ui, favorite: bool, read_only: Option<&str>) -> Response {
     let p = &Palette::ONE_DARK;
     let name = if favorite {
@@ -965,11 +965,10 @@ fn star(ui: &mut Ui, favorite: bool, read_only: Option<&str>) -> Response {
         motion::ease_out,
     );
     let painter = ui.painter();
-    painter.rect_filled(
-        rect,
-        radius::CONTROL,
-        p.surface.lerp_to_gamma(p.selection, hover),
-    );
+    // No background at rest; one fades in on hover.
+    if hover > 0.0 {
+        painter.rect_filled(rect, radius::CONTROL, p.surface.gamma_multiply(hover));
+    }
     painter.text(
         rect.center(),
         Align2::CENTER_CENTER,
