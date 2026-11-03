@@ -358,9 +358,9 @@ All timings below are final and live as constants in one place (`theme.rs`). egu
 
 | Element | Cursor | Motion | Duration | Easing |
 |---|---|---|---|---|
-| Buttons, rail items, list rows, cards, tabs, switches, chips, star, menu items | `PointingHand` | hover background fade | 80 ms | out |
+| Buttons, rail items, cards, tabs, switches, chips, star | `PointingHand` | hover background fade | 80 ms | out |
 | Selection in rail, lists, tabs, segmented controls | — | **sliding highlight**: the active background (or tab underline) moves and resizes from the old item to the new one; text colour cross-fades | 180 ms | in-out |
-| Hover highlight inside dropdowns and context menus | — | slides between rows; fades out in place when the pointer leaves; on re-entry it appears on the hovered row without sliding | 50 ms slide, 120 ms fade | in-out / out |
+| Hover highlight in list rows, dropdowns and context menus (`PointingHand`) | — | slides between rows; fades out in place when the pointer leaves; on re-entry it appears on the hovered row without sliding. In lists it is the raised colour `#2C313A` under the selected row's `#3E4451` | 50 ms slide, 120 ms fade | in-out / out |
 | Switch | `PointingHand` | knob slides, track colour fades | 200 ms | in-out |
 | Tooltip | — | appears after 400 ms of hover, then fades in with a 3 px slide; fades out the same way; the next tooltip within 300 ms shows at once | 120 ms | out (in) / in (out) |
 | Context menu (right click) | — | fades in and scales 98 → 100 % from the click point; fades out | 120 ms | out |

@@ -18,7 +18,7 @@ use crate::host_editor::HostEditor;
 use crate::theme::{Palette, timing};
 use crate::widgets::button::Button;
 use crate::widgets::empty::empty_state;
-use crate::widgets::{marks, popup, text};
+use crate::widgets::{marks, nav, popup, text};
 use crate::{fonts, icons, motion, util};
 
 /// Width of the host list pane.
@@ -313,11 +313,14 @@ impl HostsView {
                 if rows.is_empty() {
                     self.empty(ui, hosts, &mut action);
                 } else {
+                    // Hover under selection, both under the rows.
+                    let hover_slot = ui.painter().add(egui::Shape::Noop);
                     let highlight = ui.painter().add(egui::Shape::Noop);
                     let mut selected_rect = None;
+                    let mut hovered = None;
                     let can_connect = ssh.is_none_or(|s| s.tools.is_ok());
                     let meta_writable = !matches!(data.hosts_status, LoadStatus::ReadOnly(_));
-                    for (host, meta) in &rows {
+                    for (index, (host, meta)) in rows.iter().enumerate() {
                         let tunnels = host_tunnels(host, data, states);
                         let (response, chosen) = self.row(
                             ui,
@@ -330,6 +333,9 @@ impl HostsView {
                         if self.selected.as_deref() == Some(host.primary()) {
                             selected_rect = Some(response.rect);
                         }
+                        if response.hovered() {
+                            hovered = Some((index, response.rect));
+                        }
                         if response.clicked() {
                             self.selected = Some(host.primary().to_string());
                         }
@@ -337,6 +343,13 @@ impl HostsView {
                             action.row = Some((host.primary().to_string(), chosen));
                         }
                     }
+                    nav::hover_highlight(
+                        ui,
+                        egui::Id::unique("host_list_hover"),
+                        hover_slot,
+                        hovered,
+                        p.surface,
+                    );
                     // The selection background slides from row to row.
                     if let (Some(target), Some(alias)) = (selected_rect, &self.selected) {
                         let key = egui::Id::unique(alias).value() as usize;
@@ -519,22 +532,14 @@ impl HostsView {
         response.widget_info(|| {
             egui::WidgetInfo::selected(egui::Role::Button, enabled, selected, alias)
         });
-        let menu_open = popup::menu_is_open(&response);
-        let hover = motion::fade(
-            ui.ctx(),
-            response.id.with("hover"),
-            (response.hovered() || menu_open) && !selected,
-            timing::HOVER,
-            motion::ease_out,
-        );
-        if hover > 0.0 {
-            ui.painter().rect_filled(
-                rect,
-                crate::theme::radius::CONTROL,
-                p.surface.gamma_multiply(hover),
-            );
+        if response.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         }
-        if menu_open && !selected {
+        // Hover is the list's sliding highlight; a row whose menu is open
+        // keeps a raised, outlined background while the pointer is away.
+        if popup::menu_is_open(&response) && !selected {
+            ui.painter()
+                .rect_filled(rect, crate::theme::radius::CONTROL, p.surface);
             marks::outline(ui.painter(), rect, p.border);
         }
         let text_color = if selected { p.text_strong } else { p.text };

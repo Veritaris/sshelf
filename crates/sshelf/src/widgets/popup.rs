@@ -11,13 +11,14 @@
 
 use egui::emath::TSTransform;
 use egui::{
-    Align2, Area, Color32, CursorIcon, FontId, Frame, Id, Key, Margin, Order, Pos2, Rect, Response,
-    Role, Sense, Shape, Stroke, Ui, WidgetInfo, vec2,
+    Align2, Area, CursorIcon, FontId, Frame, Id, Key, Margin, Order, Pos2, Rect, Response, Role,
+    Sense, Shape, Stroke, Ui, WidgetInfo, vec2,
 };
 
 use crate::icons;
 use crate::motion;
 use crate::theme::{Palette, radius, timing};
+use crate::widgets::nav;
 
 /// Distance between the widget and its tooltip.
 const GAP: f32 = 8.0;
@@ -319,40 +320,13 @@ impl<'a> Menu<'a> {
     /// Paints the hover highlight; returns whether an item was chosen.
     fn finish(self) -> bool {
         let p = &Palette::ONE_DARK;
-        let ctx = self.ui.ctx().clone();
-        let tween_id = self.id.with("highlight");
-        let visible = motion::fade(
-            &ctx,
-            self.id.with("highlight_visible"),
-            self.hovered.is_some(),
-            timing::MENU,
-            motion::ease_out,
-        );
-        match self.hovered {
-            Some((index, target)) => {
-                // Coming back after the highlight faded: appear in place.
-                if visible < 0.01 {
-                    motion::forget_tween(&ctx, tween_id);
-                }
-                let rect = motion::tween_rect(&ctx, tween_id, index, target, timing::MENU_SLIDE);
-                ctx.data_mut(|d| d.insert_temp(self.id.with("highlight_last"), rect));
-                self.paint_highlight(rect, p.selection.gamma_multiply(visible.max(0.01)));
-            }
-            None if visible > 0.0 => {
-                if let Some(rect) = ctx.data(|d| d.get_temp::<Rect>(self.id.with("highlight_last")))
-                {
-                    self.paint_highlight(rect, p.selection.gamma_multiply(visible));
-                }
-            }
-            None => {}
-        }
-        self.chosen
-    }
-
-    fn paint_highlight(&self, rect: Rect, color: Color32) {
-        self.ui.painter().set(
+        nav::hover_highlight(
+            self.ui,
+            self.id.with("highlight"),
             self.highlight,
-            Shape::rect_filled(rect, radius::CONTROL, color),
+            self.hovered,
+            p.selection,
         );
+        self.chosen
     }
 }
