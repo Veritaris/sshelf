@@ -11,7 +11,8 @@
 //! - `FAKE_SSH_EXIT=<code>`: exit code (default 0).
 //! - `-V`: print a version line on stderr, like ssh.
 //! - `-G [--] <alias>`: print a resolved config for `alias`; aliases starting
-//!   with `fail` exit 255 with an error, like a bad config.
+//!   with `fail` exit 255 with an error, like a bad config. With `-F <file>`,
+//!   each `Bogus …` line of the file is reported as a bad option (exit 255).
 //! - `--record <file>`: append all arguments (one line, `\x1f`-separated) to
 //!   `file`, so tests can see how it was launched.
 //! - `-N … <alias>`: a tunnel. Binds every `-L`/`-D` port (exits like
@@ -91,6 +92,9 @@ fn main() -> ExitCode {
     }
     if args.iter().any(|a| a == "-G") {
         let alias = args.last().map(String::as_str).unwrap_or_default();
+        if let Some(code) = check_config(&args) {
+            return code;
+        }
         if alias.starts_with("fail") {
             eprintln!("fake-ssh: cannot resolve {alias}: line 1: Bad configuration option");
             return ExitCode::from(255);
@@ -116,6 +120,33 @@ fn main() -> ExitCode {
         .and_then(|v| v.parse::<u8>().ok())
         .unwrap_or(0);
     ExitCode::from(code)
+}
+
+/// `-G -F <file>`: every line whose first word is `Bogus` is reported like
+/// ssh reports an unknown option, and ssh's exit code 255 follows.
+fn check_config(args: &[String]) -> Option<ExitCode> {
+    let file = args
+        .iter()
+        .position(|a| a == "-F")
+        .and_then(|i| args.get(i + 1))?;
+    let text = std::fs::read_to_string(file).unwrap_or_default();
+    let bad: Vec<usize> = text
+        .lines()
+        .enumerate()
+        .filter(|(_, l)| l.split_whitespace().next() == Some("Bogus"))
+        .map(|(i, _)| i + 1)
+        .collect();
+    for line in &bad {
+        eprintln!("{file}: line {line}: Bad configuration option: bogus");
+    }
+    if bad.is_empty() {
+        return None;
+    }
+    eprintln!(
+        "{file}: terminating, {} bad configuration options",
+        bad.len()
+    );
+    Some(ExitCode::from(255))
 }
 
 /// Value of `-o Name=value` (quotes removed).

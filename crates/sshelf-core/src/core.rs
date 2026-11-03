@@ -1,10 +1,12 @@
 //! The core service (SPEC.md §2): owns every file and process. The UI sends
 //! [`Command`]s and renders [`Event`]s; after each event the repaint callback
-//! runs, so the UI never polls. The ssh config is only ever read. Tunnels run
-//! in the [`Supervisor`], whose events are relayed as [`Event::Tunnels`].
+//! runs, so the UI never polls. The ssh config is written only by validated
+//! edits, through [`ConfigWriter`]. Tunnels run in the [`Supervisor`], whose
+//! events are relayed as [`Event::Tunnels`].
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
@@ -13,6 +15,7 @@ use std::time::SystemTime;
 use sshconf::{ConfigSet, HostList, WatchDir};
 
 use crate::agent_service::{self, AgentService};
+use crate::config_edit::{self, ConfigWriter, Edit, Problem};
 use crate::history::History;
 use crate::hostkeys::{self, ChangedKey, Keygen, KnownHostsWriter, UnknownKey};
 use crate::metadata::{HostMeta, HostsFile};
@@ -88,6 +91,14 @@ pub enum Command {
     /// Replace the old key of a [`ChangedKeyPrompt`] and start the tunnel again.
     ReplaceHostKey(u64),
     CancelChangedKey(u64),
+    /// Validate an edit without saving it; answered by [`Event::EditChecked`].
+    CheckEdit(Edit),
+    /// Validate and write an edit. Refused with [`Event::EditConflict`] if the
+    /// file changed since the edit started, unless `overwrite` is set.
+    SaveEdit {
+        edit: Edit,
+        overwrite: bool,
+    },
     Shutdown,
 }
 
@@ -137,6 +148,22 @@ pub enum Event {
     HostKeyChanged(Arc<ChangedKeyPrompt>),
     /// The prompt with this id is settled.
     HostKeyClosed(u64),
+    /// Validation of edit `id`: the problems it would introduce (a save with
+    /// problems is not written), or why it could not be checked.
+    EditChecked {
+        id: u64,
+        result: Result<Vec<Problem>, String>,
+    },
+    /// Edit `id` was written; a new [`Event::Config`] follows.
+    EditSaved {
+        id: u64,
+    },
+    /// Edit `id` was not saved: its file changed on disk since editing
+    /// started. `disk` is what the file holds now.
+    EditConflict {
+        id: u64,
+        disk: Arc<Vec<u8>>,
+    },
     Error(String),
 }
 
@@ -158,6 +185,8 @@ pub struct ConfigSnapshot {
     pub generation: u64,
     pub path: PathBuf,
     pub state: ConfigState,
+    /// Per loaded file ([`sshconf::FileId`]): why sshelf will not write it.
+    pub read_only: Vec<Option<String>>,
 }
 
 impl ConfigSnapshot {
@@ -165,6 +194,34 @@ impl ConfigSnapshot {
         match &self.state {
             ConfigState::Loaded { hosts, .. } => Some(hosts),
             _ => None,
+        }
+    }
+
+    pub fn set(&self) -> Option<&ConfigSet> {
+        match &self.state {
+            ConfigState::Loaded { set, .. } => Some(set),
+            _ => None,
+        }
+    }
+
+    /// Why file `id` cannot be edited, if it cannot.
+    pub fn read_only(&self, id: sshconf::FileId) -> Option<&str> {
+        self.read_only.get(id).and_then(|r| r.as_deref())
+    }
+
+    /// Files new hosts can go to: writable loaded files, or the main config
+    /// when it does not exist yet.
+    pub fn writable_files(&self) -> Vec<PathBuf> {
+        match &self.state {
+            ConfigState::Loaded { set, .. } => set
+                .files
+                .iter()
+                .enumerate()
+                .filter(|(id, _)| self.read_only(*id).is_none())
+                .map(|(_, f)| f.path.clone())
+                .collect(),
+            ConfigState::Missing => vec![self.path.clone()],
+            ConfigState::Error(_) => Vec::new(),
         }
     }
 }
@@ -236,6 +293,19 @@ enum Message {
         tunnel_id: String,
         result: Result<ChangedKey, String>,
     },
+    /// An edit was validated in the background.
+    EditValidated {
+        edit: Edit,
+        then: AfterCheck,
+        result: Result<Vec<Problem>, String>,
+    },
+}
+
+/// What happens once an edit is valid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AfterCheck {
+    Report,
+    Save { overwrite: bool },
 }
 
 /// Handle to the core thread; dropping it shuts the core down and stops
@@ -311,6 +381,7 @@ struct Worker {
     supervisor: Option<Supervisor>,
     tunnel_states: Arc<Snapshot>,
     writer: KnownHostsWriter,
+    config_writer: ConfigWriter,
     next_prompt: u64,
     unknown_keys: BTreeMap<u64, (StartRequest, UnknownKey)>,
     changed_keys: BTreeMap<u64, (String, ChangedKey)>,
@@ -342,7 +413,9 @@ impl Worker {
             generation: 0,
             path: paths.ssh_config.clone(),
             state: ConfigState::Missing,
+            read_only: Vec::new(),
         });
+        let config_writer = ConfigWriter::new(paths.app_dir.join("backups"));
         Self {
             paths,
             emitter,
@@ -356,6 +429,7 @@ impl Worker {
             supervisor: None,
             tunnel_states: Arc::new(Snapshot::default()),
             writer: KnownHostsWriter::default(),
+            config_writer,
             next_prompt: 0,
             unknown_keys: BTreeMap::new(),
             changed_keys: BTreeMap::new(),
@@ -397,6 +471,10 @@ impl Worker {
                 }
                 Message::KeyReview { tunnel_id, result } => {
                     self.key_reviewed(tunnel_id, result);
+                    continue;
+                }
+                Message::EditValidated { edit, then, result } => {
+                    self.edit_validated(edit, then, result);
                     continue;
                 }
                 Message::Command(command) => command,
@@ -464,6 +542,10 @@ impl Worker {
                         .then_some(())
                         .ok_or_else(|| format!("group has no tunnel `{tunnel_id}`"))
                 }),
+                Command::CheckEdit(edit) => self.check_edit(edit, AfterCheck::Report),
+                Command::SaveEdit { edit, overwrite } => {
+                    self.check_edit(edit, AfterCheck::Save { overwrite })
+                }
                 // Dropping the supervisor stops every tunnel.
                 Command::Shutdown => break,
             }
@@ -505,10 +587,19 @@ impl Worker {
                 self.emitter.emit(Event::Error(problem));
             }
         }
+        let read_only = match &state {
+            ConfigState::Loaded { set, .. } => set
+                .files
+                .iter()
+                .map(|f| config_edit::read_only_reason(&f.path))
+                .collect(),
+            _ => Vec::new(),
+        };
         self.config = Arc::new(ConfigSnapshot {
             generation: self.config.generation + 1,
             path: self.paths.ssh_config.clone(),
             state,
+            read_only,
         });
         self.emitter.emit(Event::Config(Arc::clone(&self.config)));
         self.publish_data();
@@ -895,6 +986,80 @@ impl Worker {
             }
             Err(e) => self.error(e.to_string()),
         }
+    }
+
+    /// Only files of the loaded config set (or the main config before it
+    /// exists) are ever written, and none that is read-only.
+    fn editable(&self, file: &Path) -> Result<(), String> {
+        if file == self.paths.ssh_config && matches!(self.config.state, ConfigState::Missing) {
+            return Ok(());
+        }
+        let id = self
+            .config
+            .set()
+            .and_then(|set| set.files.iter().position(|f| f.path == file))
+            .ok_or_else(|| format!("{} is not part of the loaded ssh config", file.display()))?;
+        match self.config.read_only(id) {
+            Some(reason) => Err(format!("{}: {reason}", file.display())),
+            None => Ok(()),
+        }
+    }
+
+    /// Validates `edit` in the background (`ssh -G -F`, SPEC.md §5).
+    fn check_edit(&mut self, edit: Edit, then: AfterCheck) {
+        let ssh = match (self.editable(&edit.file), &self.tools) {
+            (Err(e), _) => return self.edit_checked(edit.id, Err(e)),
+            (_, Err(e)) => return self.edit_checked(edit.id, Err(format!("cannot validate: {e}"))),
+            (Ok(()), Ok(tools)) => tools.ssh.clone(),
+        };
+        let tx = self.self_tx.clone();
+        thread::spawn(move || {
+            let result = config_edit::validate(&ssh, &edit);
+            let _ = tx.send(Message::EditValidated { edit, then, result });
+        });
+    }
+
+    fn edit_checked(&self, id: u64, result: Result<Vec<Problem>, String>) {
+        self.emitter.emit(Event::EditChecked { id, result });
+    }
+
+    fn edit_validated(
+        &mut self,
+        edit: Edit,
+        then: AfterCheck,
+        result: Result<Vec<Problem>, String>,
+    ) {
+        let overwrite = match (then, &result) {
+            (AfterCheck::Save { overwrite }, Ok(problems)) if problems.is_empty() => overwrite,
+            _ => return self.edit_checked(edit.id, result),
+        };
+        if let Err(e) = self.editable(&edit.file) {
+            return self.edit_checked(edit.id, Err(e));
+        }
+        let disk = match fs::read(&edit.file) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(e) => {
+                return self.edit_checked(
+                    edit.id,
+                    Err(format!("reading {}: {e}", edit.file.display())),
+                );
+            }
+        };
+        if disk != edit.base && !overwrite {
+            return self.emitter.emit(Event::EditConflict {
+                id: edit.id,
+                disk: Arc::new(disk),
+            });
+        }
+        let written = edit
+            .candidate()
+            .and_then(|(file, _)| self.config_writer.write(&edit.file, &file.to_bytes()));
+        if let Err(e) = written {
+            return self.edit_checked(edit.id, Err(e));
+        }
+        self.reload();
+        self.emitter.emit(Event::EditSaved { id: edit.id });
     }
 
     /// Locates the tools now; version, agent and service are checked in the

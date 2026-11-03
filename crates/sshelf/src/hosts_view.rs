@@ -307,6 +307,7 @@ mod tests {
             generation: 1,
             path: config,
             state: ConfigState::Loaded { set, hosts },
+            read_only: Vec::new(),
         };
         let mut meta = HostsFile::default();
         meta.hosts.insert(

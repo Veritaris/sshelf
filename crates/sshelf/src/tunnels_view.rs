@@ -558,6 +558,7 @@ mod tests {
                 generation: 1,
                 path,
                 state: ConfigState::Loaded { set, hosts },
+                read_only: Vec::new(),
             }),
             data: Arc::new(data),
             states: Arc::new(Snapshot {

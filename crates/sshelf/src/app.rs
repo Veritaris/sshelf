@@ -100,6 +100,10 @@ impl SshelfApp {
                 Event::HostKeyPrompt(prompt) => self.hostkeys.on_unknown(prompt),
                 Event::HostKeyChanged(prompt) => self.hostkeys.on_changed(prompt),
                 Event::HostKeyClosed(id) => self.hostkeys.on_closed(id),
+                // The host editor comes in the next commit.
+                Event::EditChecked { .. }
+                | Event::EditSaved { .. }
+                | Event::EditConflict { .. } => {}
             }
         }
     }

@@ -122,9 +122,13 @@ The read-only "resolved" panel shows `ssh -G <alias>` output for the selected ho
 
 - Edit blocks **in place in whichever file they live**.
 - New hosts go to a user-chosen file (default: main config). Within the file, insert **before the first wildcard `Host *` / `Match all` block**, never simply appended at the end — otherwise wildcard defaults override the new host's values because the first match wins.
-- Blocks from files that are not writable are read-only, with the reason shown.
-- Only changed lines are rewritten; everything else is byte-identical.
+  - "Wildcard block" means a `Host` line with a bare, non-negated `*` pattern, or `Match all`; narrower wildcards (`Host *.corp`) do not count. The new block also goes above the comment lines directly over that block, and is separated by blank lines. Without such a block it is appended.
+  - A missing main config is created by the first new host (mode `600` on Unix).
+- Blocks from files that are not writable are read-only, with the reason shown (the file has the read-only attribute or is not a regular file). Only files of the loaded config set are ever written.
+- Only changed lines are rewritten; everything else is byte-identical. A changed line keeps the line ending of the line it replaces; added lines use the file's usual ending; whether the file ends with a newline is kept. A changed directive keeps its indentation, keyword spelling, separator and trailing comment.
 - Backup before first write per session; atomic writes.
+  - Backups go to `backups/<file>.<time>.bak` in the app data dir, **not** next to the file: a backup in e.g. `~/.ssh/conf.d/` could be matched by an `Include conf.d/*` glob and loaded by ssh.
+  - A symlinked config file is written through to its target (the link stays); on Unix the file keeps its permissions.
 
 ### External changes
 
@@ -140,6 +144,10 @@ The read-only "resolved" panel shows `ssh -G <alias>` output for the selected ho
 - A raw text editor for the whole block, for everything else.
 - Both edit the same CST node, so they stay in sync.
 - **Validation:** parse with `sshconf`, then write the candidate config to a temp file and run `ssh -G -F <tempfile> <alias>`. Map ssh's errors (with line numbers) back to the editor. Saving is blocked while validation fails.
+  - `sshconf` problems (invalid lines) show while typing; `ssh -G -F` runs on *Check* and on *Save* (it starts a process, so not on every keystroke).
+  - ssh reports errors for every block of the file (`<file> line N: …`, OpenSSH 9.5p1). Errors it already reports for the file as it was do not block saving, so one old bad line elsewhere never makes every edit unsaveable.
+  - The candidate is the edited file alone: an `Include`d file is validated as if it were the whole config. That catches its syntax and option errors, not effects of the files around it; the editor says so.
+  - On save the file is read again: if it no longer matches the bytes the edit started from, nothing is written and the conflict is shown (§4 "External changes").
 - Renaming a host updates the alias in the config and all app data referencing it, as one operation.
 
 ---
