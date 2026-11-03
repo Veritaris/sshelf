@@ -260,11 +260,20 @@ fn files_section(ui: &mut egui::Ui, data: &AppData, ssh_config: Option<&Path>) {
         .show(ui, |ui| {
             if let Some(config) = ssh_config {
                 ui.label("ssh config");
-                ui.label(format!("{} (only read, never written)", config.display()));
+                ui.label(format!(
+                    "{} (written only when you save an edit)",
+                    config.display()
+                ));
                 ui.end_row();
             }
             ui.label("App data");
             ui.label(data.app_dir.display().to_string());
+            ui.end_row();
+            ui.label("Config backups");
+            ui.label(format!(
+                "{} (a copy before the first change in a session)",
+                data.app_dir.join("backups").display()
+            ));
             ui.end_row();
             for (name, status) in [
                 ("settings.toml", &data.settings_status),
