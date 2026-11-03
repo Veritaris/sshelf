@@ -178,7 +178,14 @@ impl HostsView {
                         .inner_margin(Margin::symmetric(24, 20)),
                 )
                 .show(ui, |ui| {
-                    self.detail_pane(ui, hosts, config, data, ssh, &mut commands);
+                    // A right panel whose content overflows moves its left
+                    // edge right (egui keeps the far edge and cuts the size
+                    // from there), and the cards then spread underneath it.
+                    // A child that never reports its size keeps it in place.
+                    let rect = ui.max_rect();
+                    let mut inner = ui.new_child(egui::UiBuilder::new().max_rect(rect));
+                    inner.shrink_clip_rect(rect);
+                    self.detail_pane(&mut inner, hosts, config, data, ssh, &mut commands);
                 });
             egui::CentralPanel::default()
                 .frame(Frame::NONE.inner_margin(Margin {
@@ -1565,6 +1572,24 @@ mod tests {
             harness.step();
         }
         harness.get_by_label("Defined at");
+    }
+
+    #[test]
+    fn wide_details_never_push_the_cards_under_the_pane() {
+        let alias = "a-very-long-alias-that-is-much-wider-than-the-detail-pane-of-the-cards-view";
+        let config = snapshot(&format!("Host {alias}\nHost db\n"));
+        let mut data = AppData::new(PathBuf::from("app"));
+        data.hosts_status = LoadStatus::Loaded;
+        data.settings.host_list_style = HostListStyle::Cards;
+        let mut harness = harness(config, Arc::new(data));
+        harness.step();
+        harness.get_by_label(alias).click();
+        for _ in 0..3 {
+            harness.step();
+        }
+        let card = harness.get_by_label("db").rect();
+        let pane = harness.get_by_label("Defined at").rect();
+        assert!(card.right() < pane.left(), "{card:?} beside {pane:?}");
     }
 
     #[test]
