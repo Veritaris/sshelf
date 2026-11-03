@@ -411,3 +411,5 @@ A small, trustworthy desktop tool where:
 - `kubectl port-forward` profiles alongside SSH tunnels (k3s workflows).
 - Embedded terminal.
 - Support for alternative ssh distributions on Windows.
+- macOS: hide the Dock icon while minimized to the tray (activation policy *accessory*), and show the window again from the Dock (needs Objective-C calls; not done in M6).
+- Re-detect a tray host appearing or disappearing on Linux without *Refresh* (watch `NameOwnerChanged` for `org.kde.StatusNotifierWatcher`).
