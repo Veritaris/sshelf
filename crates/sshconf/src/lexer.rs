@@ -41,6 +41,65 @@ pub fn head(raw: &str) -> Head<'_> {
     Head::Keyword { keyword, rest }
 }
 
+/// Where the parts of a keyword line sit in its raw text, for rewriting the
+/// arguments while keeping indentation, keyword spelling and separator.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Layout<'a> {
+    pub indent: &'a str,
+    pub keyword: &'a str,
+    /// Text between the keyword and the arguments (whitespace and/or `=`).
+    pub separator: &'a str,
+    /// Arguments as written, without trailing whitespace.
+    pub rest: &'a str,
+}
+
+/// The [`Layout`] of a keyword line; `None` for blank and comment lines.
+pub fn layout(raw: &str) -> Option<Layout<'_>> {
+    let Head::Keyword { keyword, rest } = head(raw) else {
+        return None;
+    };
+    let offset = |s: &str| s.as_ptr() as usize - raw.as_ptr() as usize;
+    let start = offset(keyword);
+    let end = start + keyword.len();
+    let rest_start = if rest.is_empty() {
+        raw.trim_end_matches(TRAILING_WS).len().max(end)
+    } else {
+        offset(rest)
+    };
+    Some(Layout {
+        indent: &raw[..start],
+        keyword,
+        separator: &raw[end..rest_start],
+        rest,
+    })
+}
+
+/// Writes `value` as one word that [`split_args`] reads back unchanged:
+/// as is when that already works, otherwise in double quotes with `"` and
+/// backslashes that would form an escape written as `\"` and `\\`.
+pub fn quote(value: &str) -> String {
+    let plain = !value.is_empty()
+        && !value.starts_with('#')
+        && !value.contains([' ', '\t', '"', '\''])
+        && !value.contains("\\\\");
+    if plain {
+        return value.to_string();
+    }
+    let chars: Vec<char> = value.chars().collect();
+    let mut out = String::from("\"");
+    for (i, &c) in chars.iter().enumerate() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' if matches!(chars.get(i + 1), None | Some('\\' | '"' | '\'')) => {
+                out.push_str("\\\\")
+            }
+            _ => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 /// Arguments of a line and its trailing comment (`# …`, kept verbatim).
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Args {
@@ -194,6 +253,47 @@ mod tests {
             split_args("#only").unwrap().comment.as_deref(),
             Some("#only")
         );
+    }
+
+    #[test]
+    fn layout_parts() {
+        let l = layout("\t HostName = example.com # x  ").unwrap();
+        assert_eq!(l.indent, "\t ");
+        assert_eq!(l.keyword, "HostName");
+        assert_eq!(l.separator, " = ");
+        assert_eq!(l.rest, "example.com # x");
+        let l = layout("Port=22").unwrap();
+        assert_eq!((l.separator, l.rest), ("=", "22"));
+        let l = layout("  Port  ").unwrap();
+        assert_eq!((l.indent, l.separator, l.rest), ("  ", "", ""));
+        assert_eq!(layout("  # c"), None);
+        assert_eq!(layout(""), None);
+    }
+
+    #[test]
+    fn quoted_values_read_back_unchanged() {
+        for value in [
+            "plain",
+            "",
+            "two words",
+            "tab\there",
+            "#hash",
+            "mid#hash",
+            r#"say "hi""#,
+            "it's",
+            r"C:\Users\me\.ssh\id",
+            r"C:\Program Files\x",
+            r"double\\slash",
+            r"ends\",
+            r#"a\"b"#,
+            r"a\'b",
+        ] {
+            let word = quote(value);
+            assert_eq!(values(&word), [value], "{value:?} written as {word}");
+        }
+        assert_eq!(quote("plain"), "plain");
+        assert_eq!(quote(r"C:\Users\me"), r"C:\Users\me");
+        assert_eq!(quote("two words"), "\"two words\"");
     }
 
     #[test]

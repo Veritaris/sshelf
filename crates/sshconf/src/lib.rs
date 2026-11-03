@@ -5,6 +5,8 @@
 //! comments, whitespace, CRLF, ordering, unknown directives — survive edits.
 //! See SPEC.md §4.
 
+pub mod diff;
+pub mod edit;
 mod error;
 mod file;
 mod hosts;

@@ -118,7 +118,7 @@ impl LineKind {
                     comment,
                 })
             }
-            lower if RAW_COMMANDS.contains(&lower) => LineKind::Directive(Directive {
+            lower if is_raw_command(lower) => LineKind::Directive(Directive {
                 keyword: keyword.to_string(),
                 args: if rest.is_empty() {
                     Vec::new()
@@ -139,6 +139,11 @@ impl LineKind {
     pub fn is_header(&self) -> bool {
         matches!(self, LineKind::HostHeader(_) | LineKind::MatchHeader(_))
     }
+}
+
+/// Whether `keyword` takes the raw rest of the line as its value.
+pub(crate) fn is_raw_command(keyword: &str) -> bool {
+    RAW_COMMANDS.iter().any(|k| k.eq_ignore_ascii_case(keyword))
 }
 
 fn invalid(reason: &str) -> LineKind {
