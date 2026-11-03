@@ -281,7 +281,7 @@ Before starting a tunnel, determine the host key state using values from `ssh -G
 
 ### Layout
 
-- **Sidebar:** Hosts · Tunnels · Groups · Settings, plus the orphan warning indicator.
+- **Sidebar:** an icon rail with Hosts · Tunnels · Groups · Settings, plus the orphan warning indicator (see *Visual design*).
 - **Main area:** list + detail pane.
 - **Feedback:** successes (settings saved, host saved/added/renamed, terminal opened) show as a toast in the bottom-right corner that fades after ~3 s; errors stay in the status bar until dismissed.
   - Hosts: list (search, tags, favorites, *New host*) with a separate collapsible *Patterns* section; detail pane with source file, metadata, actions (Connect, New tunnel, Edit, Rename…), and the `ssh -G` resolved panel.
@@ -319,10 +319,80 @@ Before starting a tunnel, determine the host key state using values from `ssh -G
   - *Groups*: "Start X", or "Stop X" with "(starting)" / "(2/3 running)" while not fully up.
   - *Active tunnels*: "Stop X" for a tunnel started by hand (it releases that start, §7); a tunnel only groups hold is shown disabled, "X (used by Work)".
   - Clicking the icon itself shows the window; the menu opens on right click. The tooltip counts running tunnels, and the icon gets a green dot while any run.
+- **Tray menu (redesign):** left click on the icon shows and focuses the window; right click opens the **sshelf menu**, a small borderless, always-on-top viewport docked above the icon (16 px corners, same widgets and states as the window: group switches, active tunnels with stop, Connect list, *Show window*, *Quit*). It closes on focus loss or `Esc`.
+  - The native `tray-icon` menu with the same items stays as the fallback: used when the icon's position isn't known (`TrayIconEvent` gives no rect, e.g. some KSNI hosts) and when *Settings › Window & tray › Tray menu* is set to *System menu* (`tray_menu = "sshelf" | "system"`, default `"sshelf"`).
+  - The flyout must work while the main window is hidden, so it is driven from `App::logic` like the rest of the tray. Verify during implementation that eframe renders a secondary viewport while the root viewport is hidden; if it can't, the fallback menu is used while hidden.
 - The tray works from `App::logic`, which eframe keeps calling while the window is hidden (core events and tray clicks request a repaint): the menu stays current and actions run without the window.
 - Backends (`tray-icon` crate): native on Windows and macOS; on Linux the KSNI backend (StatusNotifierItem over D-Bus, no GTK).
 - If the platform has no tray (e.g. GNOME without an extension), don't offer *Minimize to tray*. On Linux a tray exists when `org.kde.StatusNotifierWatcher` has an owner on the session bus; this is checked at startup and with *Refresh* in Settings, which shows the result.
 - macOS: create on the main thread; consider hiding the Dock icon while minimized.
+
+### Visual design
+
+The visual reference is the design canvas "sshelf redesign — wireframes" (private to the owner); its boards are copied into `docs/design/` (see its README). This section is the rule; the boards show it. If they disagree, this section wins until it is updated.
+
+- **Window:** frameless (no OS title bar or border), corners rounded 16 px, flat (no shadows inside the app; dialogs and popups only get a 1 px `#3E4451` outline).
+  - The top 44 px of the content area is the drag strip (`ViewportCommand::StartDrag`); it holds only *Minimize* and *Close* on the right (hover: Minimize turns Light Yellow, Close Light Red). No maximize button; double-clicking the strip maximizes / restores.
+  - Resizing works from all edges and corners (`ViewportCommand::BeginResize` on a 6 px border), since the OS frame is gone. Minimum size 960 × 600.
+  - Rounded corners need a transparent viewport (`with_transparent(true)`) with the app painted as a rounded rect. If a platform can't do transparency, fall back to square corners, never to the OS frame.
+- **Layout:** a 64 px icon rail on the left (app icon, Hosts, Tunnels, Groups; orphan indicator and Settings at the bottom), then list pane + detail pane, then a 28 px status bar. Rail items show a tooltip with the name and shortcut (`Ctrl+1…4`).
+- **Hosts list style** is a setting (*Settings › Appearance › Host list style*: **List** or **Cards**, default List; cards can be grouped by tag, file or not at all). Stored in `settings.toml` as `host_list_style = "list" | "cards"` and `cards_group_by = "tag" | "file" | "none"`. Both views use the same detail content; in Cards the detail is a right-hand pane.
+- **Colours (One Dark):** background `#282C34`; rail, inputs, popups `#21252B`; raised / hover `#2C313A`; selected `#3E4451`; outline `#4B5263`; text `#ABB2BF`; strong text `#D7DAE0`; secondary text `#9AA1AD` (Comment Grey `#5C6370` only for marks and syntax, never body text: it fails contrast). Accent Magenta `#C678DD` (selection, primary button, focus inside inputs, switches, checkboxes). Status: running Green `#98C379`, starting / degraded / warning Light Yellow `#E5C07B`, failed / error Light Red `#E06C75`, destructive buttons Dark Red `#BE5046` with white text, info / links / keyboard focus Blue `#61AFEF`. Tinted banners and status chips mix the status colour about 15 % into the background.
+- **Radii:** 1 px (table rows, code bars, the inner side of joined pieces), 4 px (checkboxes only), 8 px (controls, cards, menus, chips), 16 px (window, dialogs, tray flyout, large panels). No other values.
+- **Type:** UI font Inter (Ubuntu acceptable), mono JetBrains Mono for values, paths, aliases and logs. Sizes: 22/600 titles, 16/600 pane headings, 13/600 sections, 14 list items, 13 body and controls, 12 secondary, 11 overlines. Spacing in 4/8 px steps.
+- **Icons:** Lucide (ISC licence) everywhere, loaded as an icon font (`lucide.ttf` from the `lucide-static` package) in its own `FontFamily::Name("lucide")`. No emoji and no self-drawn icons; status dots and the app icon are painted shapes. Sizes: 16 default, 14 in small buttons and inline text, 12 in keyboard hints, 20–28 in empty states. The icon names per action are on the canvas (*Components › Icons*).
+- **Status marks:** a filled dot is a settled state (running green, stopped grey, failed red); a ring is a transition (starting yellow, stopping grey, waiting for the user blue). The app and tray icon carry one dot: green while anything runs, yellow while starting or degraded, red when something failed.
+- **Destructive confirmations:** the safe action is the primary button and gets focus; the destructive one uses Dark Red.
+
+### Interaction and motion
+
+All timings below are final and live as constants in one place (`theme.rs`), used through egui's `animate_*_with_time`. Easing "in-out" is `cubic-bezier(.65,0,.35,1)`, "out" is `cubic-bezier(.2,.8,.2,1)`, "in" is `cubic-bezier(.4,0,1,1)`. The playable reference is the canvas board *Interaction and motion*.
+
+| Element | Cursor | Motion | Duration | Easing |
+|---|---|---|---|---|
+| Buttons, rail items, list rows, cards, tabs, switches, chips, star, menu items | `PointingHand` | hover background fade | 80 ms | out |
+| Selection in rail, lists, tabs, segmented controls | — | **sliding highlight**: the active background (or tab underline) moves and resizes from the old item to the new one; text colour cross-fades | 180 ms | in-out |
+| Hover highlight inside dropdowns and context menus | — | slides between rows; fades out in place when the pointer leaves; on re-entry it appears on the hovered row without sliding | 50 ms slide, 120 ms fade | in-out / out |
+| Switch | `PointingHand` | knob slides, track colour fades | 200 ms | in-out |
+| Tooltip | — | appears after 400 ms of hover, then fades in with a 3 px slide; fades out the same way; the next tooltip within 300 ms shows at once | 120 ms | out (in) / in (out) |
+| Context menu (right click) | — | fades in and scales 98 → 100 % from the click point; fades out | 120 ms | out |
+| Copyable value row | `Copy` | row background and copy icon fade in; click copies, toast "Copied <field>" | 80 ms | out |
+| Text inputs, raw editor | `Text` | focus outline fade | 80 ms | out |
+| Disabled controls | `NotAllowed` | none; a tooltip says why it is disabled | — | — |
+| Toast | — | fades in with a 6 px rise; fades out after 3 s; hover pauses | 120 ms | out |
+| Starting / waiting ring | — | opacity pulses 100 → 40 → 100 % (`request_repaint_after`, only while visible) | 1 s loop | in-out |
+
+- **Reduce motion** (*Settings › Appearance*, `reduce_motion = true`): every duration becomes 0 and the pulse is static.
+- **Switch colour:** the on-colour is a parameter, Magenta when not passed. The boards use the default everywhere, group switches included (running state is shown by the status dot next to them).
+- **Favorites:** the star next to the host title is a toggle button (adds / removes the favorite); its tooltip says what a click will do; the fill fades in 120 ms.
+- **Copy on hover:** in host detail, effective config and tunnel forwards, hovering a value row shows a copy icon 8 px right after the value. A long value truncates earlier to leave room for the icon, so the icon is always visible. A click anywhere on the row copies the full value (never the truncated text).
+- **Truncated text:** every alias, path, value and log line that may not fit goes through one wrapper (`truncated_label`). It truncates with an ellipsis (in the middle for paths, so the file name stays visible) and shows a tooltip with the full value, with the tooltip fade above, only when the text was actually cut.
+- **Forwards** are edited as separate fields, never as one `host:port` string: *L*: bind address, local port → IP / host on the remote machine : remote port. *R* mirrors it: bind on server, remote port → IP / host on this machine : local port. *D*: bind address and local port. The host editor writes them back as one directive line (`LocalForward 6443 127.0.0.1:6443`); the bind address of a host's `LocalForward` stays in *Raw text*.
+- **Keyboard:** every action reachable by mouse is reachable by keyboard; focus shows a 2 px Blue ring with a 2 px gap (keyboard focus only, not on click).
+
+### Dropdown
+
+One dropdown component is used for every select. The playable reference is the canvas board *Dropdown*.
+
+- **Parameters:** `max_visible` (rows shown before the list scrolls, default **10**), `searchable` (search field at the top), `multi` (multi-select with checkboxes). Checkboxes exist only in multi-select dropdowns; everywhere else on/off is a switch.
+- **Open / close:** the panel is revealed from the top edge downward by clipping, with no fade (**200 ms**, out); closing rolls it back up (**140 ms**, in). It opens upward when there's no room below; the chevron turns with it.
+- **Rows:** 30 px each; list height = min(rows, `max_visible`) × 30. Beyond that the list scrolls with a thin scrollbar and a 20 px fade at the bottom edge. Opening scrolls the selected row into view.
+- **Hover / keyboard highlight:** as in the motion table (50 ms slide). It follows ↑↓ and scrolls the row into view.
+- **Single-select:** the selected row shows a Lucide check on the right (fades 120 ms); picking closes the dropdown.
+- **Searchable:** the search field is fixed at the top and focused on open. Typing filters by case-insensitive substring; the list height glides to the new row count (120 ms, in-out); the highlight moves to the first match. No result shows one "No … match" row. A clear button appears in the field when it has text.
+- **Multi-select:**
+  - Toggling keeps the dropdown open. The checkbox (16 px, 4 px corners) fills Magenta and the tick draws itself in (**100 ms**, in-out); unchecking reverses it.
+  - The footer shows "N selected" (and "· M shown" when searchable), *Clear* (empties the selection, not the search) and *Done*.
+  - Selections hidden by the search are kept and counted.
+  - The closed control shows the selected values as chips, as many as fit; a long value is truncated inside its chip. The rest collapse into a Magenta "+N" chip; hovering it for 300 ms shows those values as chips in a tooltip (120 ms fade). A newly added chip scales in (120 ms).
+- **Keyboard:** Enter / Space / ↓ on the closed control opens it; typing goes to the search when `searchable`; ↑↓ move; Enter picks (single) or toggles (multi); Space toggles (multi); Esc or a click outside closes (multi-select keeps its changes).
+- **Where:** single — IdentitiesOnly, ForwardAgent, Group by, closing behaviour; single + search — tunnel host, *Save to* file; multi — tunnels in a group; multi + search — tag filter, hosts in the cards view.
+
+### Design of features already in the spec (M7, M8)
+
+- **Health:** a 6 px dot at the right end of every host row and card: Green = login OK, Light Yellow = reachable but sshelf can't log in yet (no key accepted, or host key not known yet), Light Red = unreachable, Comment Grey = not checked yet; a ring while a check runs. Every yellow and red state shows a tinted banner under the Health line with the reason and its fix: *Load key into agent* (disabled with the reason when the agent service is stopped) and *Generate key…* for no key; *Review host key…* (the §9 dialog) and *Connect in terminal* for an unknown host key; ssh's last line and *Edit host* for unreachable. While *Check all* runs, its button shows a ring and "7 / 19"; clicking it again stops. Hovering the dot shows the result, latency, ssh's reason and when it was checked. The host detail has a *Health* line (dot, result, login time, "checked N min ago", *Check*). *Check all* is an icon button (Lucide `activity`) next to *New host*, with a tooltip.
+- **Key generation:** *Generate key…* (Lucide `key-round`) sits next to the *Form / Raw text* tabs in the host editor. The dialog uses the standard dropdown for the algorithm (Ed25519 marked "recommended"; security keys in their own group, noted as opening a terminal), password fields with a show/hide eye, a stepper for KDF rounds, a file field with *Browse…*, and a yellow banner while the passphrase is empty. The result dialog shows fingerprint, type and passphrase state, the public key with a copy icon, and *Next steps* as rows (button + one-line explanation): *Use in this host*, *Add to agent* (disabled with the reason when the agent isn't available), *Install on server*.
+- **Switches, not checkboxes:** the tunnel's *Reconnect automatically* and the group's *Start with sshelf* are Magenta switches. A group's tunnels are picked with the multi-select dropdown (rows show tunnel name and host). Groups that start with sshelf show a "starts with sshelf" chip (Lucide `power`) in their detail.
 
 ---
 
@@ -411,6 +481,12 @@ Each milestone ends with its acceptance criteria met, tests green on all three O
   - As built: "Route: you › bastion › db-gw › web" in the host detail, for hosts whose effective config has a `ProxyJump` (no extra `ssh -G` for the rest). Core walks the chain like the host key checks do (§9: nested jumps first, each hop once, depth-limited) with `ssh -G` per hop, off the UI thread. Hops that are hosts of the config are links that select them; others show their address on hover. A `ProxyCommand` shows as a "ProxyCommand" step with the command on hover. No graph yet.
 - Optional hardware-key generation via terminal `ssh-keygen`.
   - As built: *Ed25519-SK* and *ECDSA-SK (security key)* in the key dialog. *Generate* opens the user's terminal with `ssh-keygen -t ed25519-sk -a <rounds> -C <comment> -f <file>` (§10's terminal rules); the device touch, PIN and passphrase all happen there, so sshelf never sees them. *Done* then reads only `<file>.pub` (never the private key file, §1) and shows the fingerprint and the usual follow-ups; *Add to agent* uses the terminal, since sshelf cannot tell whether a passphrase was set. Windows' built-in OpenSSH talks to the key through Windows Hello.
+
+### M9 — UI redesign
+- Everything in §10 *Visual design*, *Interaction and motion* and *Dropdown*, plus the M7/M8 design notes there, applied to every existing screen and the tray. Reference boards: `docs/design/` (its README lists what each one shows).
+- Order: theme constants in `theme.rs` (colours, radii, timings), the Lucide font, the frameless rounded window (drag strip, edge resize), the shared widgets (icon rail, sliding highlight, switch, dropdown, truncated label, copy-on-hover row, animated tooltip and context menu, toast), then the screens, then the sshelf tray menu.
+- No behaviour changes beyond those sections. New `settings.toml` keys (`host_list_style`, `cards_group_by`, `reduce_motion`, `tray_menu`) default when missing, so the file version stays the same.
+- **Done when:** every screen matches its board (layout, colours, radii, icons, timings); *Reduce motion* turns all animation off; the sshelf tray menu works with the window hidden or falls back to the system menu; UI tests and CI pass on all three OSes.
 
 ---
 
