@@ -25,6 +25,7 @@ pub const COPY: char = '\u{e09e}';
 pub const INFO: char = '\u{e0f9}';
 pub const KEY_ROUND: char = '\u{e4a3}';
 pub const LAYERS: char = '\u{e529}';
+pub const LOCK: char = '\u{e10b}';
 pub const MINUS: char = '\u{e11c}';
 pub const PLAY: char = '\u{e13c}';
 pub const PLUS: char = '\u{e13d}';
@@ -57,6 +58,7 @@ pub const ALL: &[char] = &[
     INFO,
     KEY_ROUND,
     LAYERS,
+    LOCK,
     MINUS,
     PLAY,
     PLUS,

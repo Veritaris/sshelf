@@ -1,7 +1,9 @@
 //! The dropdown (SPEC.md §10 *Dropdown*), single-select so far: the panel
 //! rolls open from the trigger by clipping (200 ms "out", closing 140 ms
-//! "in"), upward when there is no room below; 30 px rows with the sliding
-//! hover highlight; a Magenta check on the selected row; ↑↓ Enter Esc.
+//! "in"), upward when there is no room below; 30 px rows (36 px with a
+//! second line, as *Save to* has) with the sliding hover highlight; a
+//! Magenta check on the selected row; disabled rows with their reason;
+//! ↑↓ Enter Esc.
 
 use egui::{
     Align2, Area, CursorIcon, FontId, Frame, Id, Key, Margin, Modifiers, Order, Rect, Response,
@@ -13,6 +15,8 @@ use crate::widgets::nav;
 use crate::{icons, motion};
 
 const ROW: f32 = 30.0;
+/// A row with a second line.
+const TALL_ROW: f32 = 36.0;
 /// Space between the trigger and the panel.
 const GAP: f32 = 6.0;
 const OPEN: f32 = 0.200;
@@ -27,13 +31,34 @@ struct State {
     highlight: usize,
 }
 
+/// One option: its value, label, an optional second line, and why it
+/// can't be picked (a disabled row shows a lock and the reason instead).
+#[derive(Debug, Clone)]
+pub struct Choice<T> {
+    pub value: T,
+    pub label: String,
+    pub detail: Option<String>,
+    pub disabled: Option<String>,
+}
+
+/// How the closed control looks.
+#[derive(Debug, Clone, Copy)]
+enum Trigger {
+    /// A small raised button (e.g. "Group by tag").
+    Button,
+    /// An input-like field of this width (form selects).
+    Field(f32),
+}
+
 /// A single-select dropdown over `options`, showing `selected`.
 pub struct Dropdown<'a, T> {
     id: Id,
     name: &'a str,
-    options: &'a [(T, &'a str)],
+    choices: Vec<Choice<T>>,
     /// The closed control's text, e.g. "Group by tag".
     trigger: String,
+    look: Trigger,
+    mono: bool,
     max_visible: usize,
 }
 
@@ -42,20 +67,69 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
     pub fn new(
         id: impl std::hash::Hash + std::fmt::Debug,
         name: &'a str,
-        options: &'a [(T, &'a str)],
+        options: &[(T, &str)],
+        trigger: impl Into<String>,
+    ) -> Self {
+        let choices = options
+            .iter()
+            .map(|(value, label)| Choice {
+                value: *value,
+                label: label.to_string(),
+                detail: None,
+                disabled: None,
+            })
+            .collect();
+        Self::with_choices(id, name, choices, trigger)
+    }
+
+    /// Options with second lines or disabled rows.
+    pub fn with_choices(
+        id: impl std::hash::Hash + std::fmt::Debug,
+        name: &'a str,
+        choices: Vec<Choice<T>>,
         trigger: impl Into<String>,
     ) -> Self {
         Self {
             id: Id::unique(id),
             name,
-            options,
+            choices,
             trigger: trigger.into(),
+            look: Trigger::Button,
+            mono: false,
             max_visible: 10,
         }
     }
 
-    /// Shows the small button-like trigger and, while open, the panel.
-    /// Returns the option picked this frame.
+    /// An input-like closed control `width` wide.
+    pub fn field(mut self, width: f32) -> Self {
+        self.look = Trigger::Field(width);
+        self
+    }
+
+    /// Labels in mono (paths).
+    pub fn mono(mut self) -> Self {
+        self.mono = true;
+        self
+    }
+
+    fn row_height(&self) -> f32 {
+        let tall = self
+            .choices
+            .iter()
+            .any(|c| c.detail.is_some() || c.disabled.is_some());
+        if tall { TALL_ROW } else { ROW }
+    }
+
+    fn label_font(&self) -> FontId {
+        if self.mono {
+            FontId::monospace(12.0)
+        } else {
+            FontId::proportional(13.0)
+        }
+    }
+
+    /// Shows the closed control and, while open, the panel. Returns the
+    /// option picked this frame.
     pub fn show(self, ui: &mut Ui, selected: T) -> Option<T> {
         let p = &Palette::ONE_DARK;
         let ctx = ui.ctx().clone();
@@ -64,9 +138,9 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
             .unwrap_or_default();
         let trigger = self.trigger(ui, state.open);
         let selected_index = self
-            .options
+            .choices
             .iter()
-            .position(|(v, _)| *v == selected)
+            .position(|c| c.value == selected)
             .unwrap_or(0);
         let mut picked = None;
 
@@ -83,7 +157,7 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
             state.open = false;
         }
         if state.open {
-            let last = self.options.len().saturating_sub(1);
+            let last = self.choices.len().saturating_sub(1);
             ctx.input_mut(|i| {
                 if i.consume_key(Modifiers::NONE, Key::ArrowDown) {
                     state.highlight = (state.highlight + 1).min(last);
@@ -91,7 +165,12 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
                 if i.consume_key(Modifiers::NONE, Key::ArrowUp) {
                     state.highlight = state.highlight.saturating_sub(1);
                 }
-                if i.consume_key(Modifiers::NONE, Key::Enter) {
+                if i.consume_key(Modifiers::NONE, Key::Enter)
+                    && self
+                        .choices
+                        .get(state.highlight)
+                        .is_some_and(|c| c.disabled.is_none())
+                {
                     picked = Some(state.highlight);
                 }
                 if i.consume_key(Modifiers::NONE, Key::Escape) {
@@ -112,8 +191,9 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
             },
         );
         if shown > 0.0 {
-            let rows = self.options.len().min(self.max_visible);
-            let height = rows as f32 * ROW + 8.0;
+            let row = self.row_height();
+            let rows = self.choices.len().min(self.max_visible);
+            let height = rows as f32 * row + 8.0;
             let width = trigger.rect.width().max(180.0);
             let below = trigger.rect.bottom() + GAP;
             let room_below = ctx.content_rect().bottom() - below;
@@ -166,17 +246,21 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
             state.open = false;
         }
         ctx.data_mut(|d| d.insert_temp(self.id, state));
-        picked.map(|i| self.options[i].0)
+        picked.map(|i| self.choices[i].value)
     }
 
-    /// The closed control: a small raised button with the text and a
-    /// chevron that turns while the panel is open.
+    /// The closed control, with a chevron that turns while the panel is
+    /// open.
     fn trigger(&self, ui: &mut Ui, open: bool) -> Response {
         let p = &Palette::ONE_DARK;
-        let galley =
-            ui.painter()
-                .layout_no_wrap(self.trigger.clone(), FontId::proportional(12.0), p.text);
-        let size = vec2(galley.size().x + 10.0 + 6.0 + 14.0 + 8.0, 28.0);
+        let (font, size) = match self.look {
+            Trigger::Button => (FontId::proportional(12.0), None),
+            Trigger::Field(width) => (self.label_font(), Some(vec2(width, 32.0))),
+        };
+        let galley = ui
+            .painter()
+            .layout_no_wrap(self.trigger.clone(), font, p.text);
+        let size = size.unwrap_or(vec2(galley.size().x + 10.0 + 6.0 + 14.0 + 8.0, 28.0));
         let (rect, response) = ui.allocate_exact_size(size, Sense::click());
         let enabled = response.enabled();
         let (name, value) = (self.name, self.trigger.clone());
@@ -193,13 +277,35 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
             motion::ease_out,
         );
         let painter = ui.painter();
-        painter.rect_filled(
-            rect,
-            radius::CONTROL,
-            p.surface.lerp_to_gamma(p.selection, hover),
-        );
+        match self.look {
+            Trigger::Button => {
+                painter.rect_filled(
+                    rect,
+                    radius::CONTROL,
+                    p.surface.lerp_to_gamma(p.selection, hover),
+                );
+            }
+            Trigger::Field(_) => {
+                painter.rect_filled(rect, radius::CONTROL, p.bg_dark);
+                let outline = if open {
+                    p.accent
+                } else {
+                    p.selection.lerp_to_gamma(p.border, hover)
+                };
+                painter.rect_stroke(
+                    rect,
+                    radius::CONTROL,
+                    Stroke::new(1.0, outline),
+                    egui::StrokeKind::Inside,
+                );
+            }
+        }
+        let left = match self.look {
+            Trigger::Button => 10.0,
+            Trigger::Field(_) => 12.0,
+        };
         painter.galley(
-            pos2(rect.left() + 10.0, rect.center().y - galley.size().y / 2.0),
+            pos2(rect.left() + left, rect.center().y - galley.size().y / 2.0),
             galley,
             p.text,
         );
@@ -234,6 +340,7 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
         max_height: f32,
     ) -> Option<usize> {
         let p = &Palette::ONE_DARK;
+        let row = self.row_height();
         let mut picked = None;
         egui::ScrollArea::vertical()
             .id_salt(self.id.with("scroll"))
@@ -242,31 +349,73 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 let slot = ui.painter().add(Shape::Noop);
                 let mut highlighted = None;
-                for (index, (_, label)) in self.options.iter().enumerate() {
+                for (index, choice) in self.choices.iter().enumerate() {
+                    let enabled = choice.disabled.is_none();
+                    let sense = if enabled {
+                        Sense::click()
+                    } else {
+                        Sense::hover()
+                    };
                     let (rect, response) =
-                        ui.allocate_exact_size(vec2(ui.available_width(), ROW), Sense::click());
+                        ui.allocate_exact_size(vec2(ui.available_width(), row), sense);
                     let is_selected = index == selected;
                     response.widget_info(|| {
-                        WidgetInfo::selected(Role::ListBoxOption, true, is_selected, *label)
+                        WidgetInfo::selected(
+                            Role::ListBoxOption,
+                            enabled,
+                            is_selected,
+                            &choice.label,
+                        )
                     });
-                    if response.hovered() {
+                    if response.hovered() && enabled {
                         state.highlight = index;
                     }
-                    if response.clicked() {
+                    if response.clicked() && enabled {
                         picked = Some(index);
                     }
-                    if index == state.highlight {
+                    if index == state.highlight && enabled {
                         highlighted = Some((index, rect));
                     }
                     let strong = index == state.highlight || is_selected;
-                    let color = if strong { p.text_strong } else { p.text };
+                    let color = match (enabled, strong) {
+                        (false, _) => p.disabled_text,
+                        (true, true) => p.text_strong,
+                        (true, false) => p.text,
+                    };
+                    let second = choice.disabled.as_ref().or(choice.detail.as_ref());
+                    let label_y = if second.is_some() {
+                        rect.top() + 10.0
+                    } else {
+                        rect.center().y
+                    };
                     ui.painter().text(
-                        pos2(rect.left() + 10.0, rect.center().y),
+                        pos2(rect.left() + 10.0, label_y),
                         Align2::LEFT_CENTER,
-                        *label,
-                        FontId::proportional(13.0),
+                        &choice.label,
+                        self.label_font(),
                         color,
                     );
+                    if let Some(second) = second {
+                        let mut x = rect.left() + 10.0;
+                        let y = rect.bottom() - 10.0;
+                        if !enabled {
+                            ui.painter().text(
+                                pos2(x + 6.0, y),
+                                Align2::CENTER_CENTER,
+                                icons::LOCK,
+                                icons::font(11.0),
+                                p.disabled_text,
+                            );
+                            x += 16.0;
+                        }
+                        ui.painter().text(
+                            pos2(x, y),
+                            Align2::LEFT_CENTER,
+                            second,
+                            FontId::proportional(11.0),
+                            if enabled { p.dim } else { p.disabled_text },
+                        );
+                    }
                     let check = motion::fade(
                         ui.ctx(),
                         self.id.with(("check", index)),
@@ -283,7 +432,11 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
                             p.accent.gamma_multiply(check),
                         );
                     }
-                    response.on_hover_cursor(CursorIcon::PointingHand);
+                    if enabled {
+                        response.on_hover_cursor(CursorIcon::PointingHand);
+                    } else if response.hovered() {
+                        ui.ctx().set_cursor_icon(CursorIcon::NotAllowed);
+                    }
                 }
                 nav::hover_highlight(
                     ui,

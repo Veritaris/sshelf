@@ -50,6 +50,11 @@ pub struct Palette {
     pub zebra: Color32,
     /// Separators inside cards; a hovered copyable row.
     pub separator: Color32,
+    /// Dark Red: destructive buttons (white text), and hovered.
+    pub danger: Color32,
+    pub danger_hover: Color32,
+    /// Modal overlay.
+    pub overlay: Color32,
 }
 
 /// Host colours (*Notes & tags*), named for their swatches' tooltips; none
@@ -88,6 +93,9 @@ impl Palette {
         link_hover: Color32::from_rgb(140, 196, 245),    // #8cc4f5
         zebra: Color32::from_rgb(42, 46, 54),            // #2a2e36
         separator: Color32::from_rgb(53, 59, 69),        // #353b45
+        danger: Color32::from_rgb(190, 80, 70),          // #be5046
+        danger_hover: Color32::from_rgb(204, 96, 86),    // #cc6056
+        overlay: Color32::from_rgba_unmultiplied_const(24, 26, 31, 184), // rgba(24,26,31,.72)
     };
 }
 

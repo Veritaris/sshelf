@@ -6,6 +6,7 @@ pub mod color;
 pub mod copy;
 pub mod dropdown;
 pub mod empty;
+pub mod field;
 pub mod marks;
 pub mod nav;
 pub mod popup;

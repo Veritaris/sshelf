@@ -34,6 +34,8 @@ const DETAIL_WIDTH: f32 = 520.0;
 const CARD_GAP: f32 = 10.0;
 const ROW_HEIGHT: f32 = 40.0;
 const ROW_GAP: f32 = 2.0;
+/// The hosts beside an open editor are dimmed (still clickable).
+const EDITING_OPACITY: f32 = 0.55;
 
 /// Which hosts the list shows: one filter at a time (SPEC.md §10 *Layout*).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -147,7 +149,8 @@ impl HostsView {
             ConfigState::Loaded { set, hosts } => (set, hosts),
             ConfigState::Missing => {
                 if self.editor.is_open() {
-                    let mut commands = self.editor.show(ui, config);
+                    let pane = ui.available_width();
+                    let mut commands = self.editor.show(ui, config, pane, p.bg_dark);
                     commands.extend(self.editor.show_keys(ui.ctx(), config, ssh));
                     return commands;
                 }
@@ -213,7 +216,7 @@ impl HostsView {
                     let rect = ui.max_rect();
                     let mut inner = ui.new_child(egui::UiBuilder::new().max_rect(rect));
                     inner.shrink_clip_rect(rect);
-                    self.detail_pane(&mut inner, hosts, &shown, &mut commands);
+                    self.detail_pane(&mut inner, hosts, (&shown, DETAIL_WIDTH), &mut commands);
                 });
             egui::CentralPanel::default()
                 .frame(Frame::NONE.inner_margin(Margin {
@@ -223,6 +226,10 @@ impl HostsView {
                     bottom: 16,
                 }))
                 .show(ui, |ui| {
+                    // An open editor dims the hosts beside it.
+                    if self.editor.is_open() {
+                        ui.multiply_opacity(EDITING_OPACITY);
+                    }
                     self.cards(ui, (set, config.generation), hosts, data, states, ssh)
                 })
                 .inner
@@ -244,6 +251,9 @@ impl HostsView {
                         rect.y_range(),
                         egui::Stroke::new(1.0, p.bg_dark),
                     );
+                    if self.editor.is_open() {
+                        ui.multiply_opacity(EDITING_OPACITY);
+                    }
                     self.list(ui, set, hosts, data, states, ssh)
                 })
                 .inner;
@@ -255,7 +265,10 @@ impl HostsView {
                     bottom: 24,
                 }))
                 .show(ui, |ui| {
-                    self.detail_pane(ui, hosts, &shown, &mut commands);
+                    // The pane's width with its margins, for the editor's
+                    // stacking rule.
+                    let pane = ui.max_rect().width() + 64.0;
+                    self.detail_pane(ui, hosts, (&shown, pane), &mut commands);
                 });
             action
         };
@@ -305,7 +318,7 @@ impl HostsView {
             Some(DetailAction::OpenTunnel(id)) => self.navigate = Some(Navigate::Tunnel(id)),
             None => {}
         }
-        commands.extend(self.editor.show_rename(ui.ctx(), config, data));
+        commands.extend(self.editor.show_rename(ui.ctx(), config, data, states));
         commands.extend(self.editor.show_keys(ui.ctx(), config, ssh));
         commands
     }
@@ -315,12 +328,12 @@ impl HostsView {
         &mut self,
         ui: &mut Ui,
         hosts: &HostList,
-        shown: &Shown,
+        (shown, pane): (&Shown, f32),
         commands: &mut Vec<Command>,
     ) {
         let p = &Palette::ONE_DARK;
         if self.editor.is_open() {
-            commands.extend(self.editor.show(ui, shown.config));
+            commands.extend(self.editor.show(ui, shown.config, pane, shown.inset));
             return;
         }
         match self.selected.as_deref().and_then(|a| hosts.find(a)) {

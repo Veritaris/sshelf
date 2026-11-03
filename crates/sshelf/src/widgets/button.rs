@@ -1,9 +1,12 @@
 //! Buttons (SPEC.md §10, board *Components*): Primary (Magenta), Secondary
-//! (raised) and icon-only; 32 px high (28 small), 8 px corners, the hover
-//! background fading in 80 ms. An icon is painted, so it is never part of
-//! the accessible name.
+//! (raised), Ghost (flat until hovered), Danger (Dark Red, white text),
+//! Warning (Light Yellow) and icon-only; 32 px high (28 small, 36 in
+//! dialogs), 8 px corners, the hover background fading in 80 ms. An icon is
+//! painted, so it is never part of the accessible name.
 
-use egui::{Align2, CursorIcon, FontId, Response, Role, Sense, Ui, Widget, WidgetInfo, vec2};
+use egui::{
+    Align2, Color32, CursorIcon, FontId, Response, Role, Sense, Ui, Widget, WidgetInfo, vec2,
+};
 
 use crate::theme::{Palette, radius, timing};
 use crate::widgets::{marks, popup};
@@ -13,6 +16,16 @@ use crate::{fonts, icons, motion};
 pub enum Kind {
     Primary,
     Secondary,
+    Ghost,
+    Danger,
+    Warning,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Size {
+    Small,
+    Default,
+    Dialog,
 }
 
 /// What sits before the text.
@@ -31,7 +44,7 @@ pub struct Button<'a> {
     /// Accessible name and tooltip of an icon-only button.
     name: Option<&'a str>,
     tip: Option<&'a str>,
-    small: bool,
+    size: Size,
 }
 
 impl<'a> Button<'a> {
@@ -42,13 +55,36 @@ impl<'a> Button<'a> {
             kind: Kind::Secondary,
             name: None,
             tip: None,
-            small: false,
+            size: Size::Default,
         }
     }
 
     /// 28 px high, 12 px text, 14 px icon (health lines, banners, rows).
     pub fn small(mut self) -> Self {
-        self.small = true;
+        self.size = Size::Small;
+        self
+    }
+
+    /// 36 px high, for dialogs.
+    pub fn dialog(mut self) -> Self {
+        self.size = Size::Dialog;
+        self
+    }
+
+    pub fn ghost(mut self) -> Self {
+        self.kind = Kind::Ghost;
+        self
+    }
+
+    /// Destructive: Dark Red with white text.
+    pub fn danger(mut self) -> Self {
+        self.kind = Kind::Danger;
+        self
+    }
+
+    /// The way out of a warning (Light Yellow, dark text).
+    pub fn warning(mut self) -> Self {
+        self.kind = Kind::Warning;
         self
     }
 
@@ -60,7 +96,7 @@ impl<'a> Button<'a> {
             kind: Kind::Secondary,
             name: Some(name),
             tip: Some(name),
-            small: false,
+            size: Size::Default,
         }
     }
 
@@ -98,18 +134,26 @@ impl Widget for Button<'_> {
     fn ui(self, ui: &mut Ui) -> Response {
         let p = &Palette::ONE_DARK;
         // Height, padding, icon and text size.
-        let (height, padding, icon_size, text_size) = if self.small {
-            (28.0, 10.0, 14.0, 12.0)
-        } else {
-            (32.0, 12.0, 16.0, 13.0)
+        let (height, padding, icon_size, text_size) = match self.size {
+            Size::Small => (28.0, 10.0, 14.0, 12.0),
+            Size::Default => (32.0, 12.0, 16.0, 13.0),
+            Size::Dialog => (36.0, 14.0, 16.0, 13.0),
         };
         let font = match self.kind {
-            Kind::Primary => fonts::semibold(text_size),
-            Kind::Secondary => FontId::proportional(text_size),
+            Kind::Primary | Kind::Danger | Kind::Warning => fonts::semibold(text_size),
+            Kind::Secondary | Kind::Ghost => FontId::proportional(text_size),
         };
         let (fg, fill, hover_fill, pressed_fill) = match self.kind {
             Kind::Primary => (p.bg_dark, p.accent, p.accent_hover, p.accent_pressed),
             Kind::Secondary => (p.text, p.surface, p.selection, p.border),
+            Kind::Ghost => (p.text, Color32::TRANSPARENT, p.surface, p.selection),
+            Kind::Danger => (Color32::WHITE, p.danger, p.danger_hover, p.danger),
+            Kind::Warning => (
+                p.bg_dark,
+                p.yellow,
+                p.yellow.lerp_to_gamma(Color32::WHITE, 0.15),
+                p.yellow,
+            ),
         };
         let galley = (!self.text.is_empty())
             .then(|| ui.painter().layout_no_wrap(self.text.clone(), font, fg));

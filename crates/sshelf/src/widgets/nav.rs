@@ -64,6 +64,67 @@ pub fn hover_highlight(
     }
 }
 
+/// A segmented control (e.g. Form / Raw text): small segments on an inset
+/// strip; the selected one's background slides to the next selection.
+/// Returns the segment clicked.
+pub fn segmented(ui: &mut Ui, id: Id, labels: &[&str], selected: usize) -> Option<usize> {
+    let p = &Palette::ONE_DARK;
+    const HEIGHT: f32 = 28.0;
+    const PADDING: f32 = 10.0;
+    let font = FontId::proportional(12.0);
+    let galleys: Vec<_> = labels
+        .iter()
+        .map(|l| {
+            ui.painter()
+                .layout_no_wrap(l.to_string(), font.clone(), p.text)
+        })
+        .collect();
+    let widths: Vec<f32> = galleys.iter().map(|g| g.size().x + PADDING * 2.0).collect();
+    let total = widths.iter().sum::<f32>() + 2.0 * (labels.len() as f32 - 1.0) + 4.0;
+    let (outer, _) = ui.allocate_exact_size(vec2(total, HEIGHT + 4.0), Sense::hover());
+    ui.painter().rect_filled(outer, radius::CONTROL, p.bg_dark);
+    let slot = ui.painter().add(Shape::Noop);
+    let mut clicked = None;
+    let mut x = outer.left() + 2.0;
+    for (index, (label, galley)) in labels.iter().zip(galleys).enumerate() {
+        let rect = Rect::from_min_size(pos2(x, outer.top() + 2.0), vec2(widths[index], HEIGHT));
+        x += widths[index] + 2.0;
+        let response = ui.interact(rect, id.with(index), Sense::click());
+        let is_selected = index == selected;
+        response.widget_info(|| {
+            WidgetInfo::selected(Role::Tab, response.enabled(), is_selected, *label)
+        });
+        if is_selected {
+            let target =
+                motion::tween_rect(ui.ctx(), id.with("highlight"), index, rect, timing::SLIDE);
+            ui.painter().set(
+                slot,
+                Shape::rect_filled(target, radius::CONTROL, p.selection),
+            );
+        }
+        let active = motion::fade(
+            ui.ctx(),
+            id.with(("active", index)),
+            is_selected || response.hovered(),
+            timing::SLIDE,
+            motion::ease_in_out,
+        );
+        ui.painter().galley_with_override_text_color(
+            pos2(
+                rect.left() + PADDING,
+                rect.center().y - galley.size().y / 2.0,
+            ),
+            galley,
+            p.text.lerp_to_gamma(p.text_strong, active),
+        );
+        if response.clicked() && !is_selected {
+            clicked = Some(index);
+        }
+        response.on_hover_cursor(CursorIcon::PointingHand);
+    }
+    clicked
+}
+
 const TAB_HEIGHT: f32 = 32.0;
 const TAB_PADDING: f32 = 12.0;
 
