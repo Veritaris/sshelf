@@ -33,9 +33,11 @@ impl SettingsView {
         }
     }
 
+    /// Follows the saved settings: always when the draft has no edits, and
+    /// when the draft is exactly what was saved (it was just saved from here).
     fn sync(&mut self, saved: &Settings) {
         let dirty = self.base.as_ref().is_some_and(|b| self.draft() != *b);
-        if self.base.as_ref() != Some(saved) && !dirty {
+        if self.base.as_ref() != Some(saved) && (!dirty || self.draft() == *saved) {
             self.ssh_path = saved
                 .ssh_path
                 .as_ref()
@@ -333,7 +335,7 @@ fn files_section(ui: &mut egui::Ui, data: &AppData, ssh_config: Option<&Path>) {
 mod tests {
     use super::*;
     use egui_kittest::Harness;
-    use egui_kittest::kittest::Queryable;
+    use egui_kittest::kittest::{NodeT, Queryable};
 
     fn data() -> AppData {
         AppData::new(PathBuf::from("app"))
@@ -359,5 +361,26 @@ mod tests {
             ..Settings::default()
         };
         assert_eq!(harness.state().1, [Command::SaveSettings(expected)]);
+    }
+
+    #[test]
+    fn saved_settings_clear_the_unsaved_marker() {
+        let state = (SettingsView::default(), data());
+        let mut harness = Harness::builder().with_size([900.0, 700.0]).build_ui_state(
+            |ui, (view, data): &mut (SettingsView, AppData)| {
+                view.show(ui, Some(data), None, None);
+            },
+            state,
+        );
+        harness.step();
+        harness.state_mut().0.close_behavior = CloseBehavior::StopAndQuit;
+        harness.step();
+        harness.get_by_label("unsaved changes");
+        // The core saved it and sent the new data back.
+        harness.state_mut().1.settings.close_behavior = CloseBehavior::StopAndQuit;
+        harness.step();
+        harness.step();
+        assert!(harness.query_by_label("unsaved changes").is_none());
+        assert!(harness.get_by_label("Save").accesskit_node().is_disabled());
     }
 }
