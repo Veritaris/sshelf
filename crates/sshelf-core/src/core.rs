@@ -27,6 +27,7 @@ use crate::ssh::{AgentStatus, Resolved, SshTools};
 use crate::storage::{LoadStatus, Store, Versioned};
 use crate::supervisor::{self, Owner, Request, Snapshot, Supervisor, SupervisorEvent, TunnelState};
 use crate::terminal::{self, Terminal};
+use crate::tray_host;
 use crate::tunnels::{Group, Tunnel, TunnelsFile};
 use crate::watch::ConfigWatcher;
 
@@ -286,6 +287,8 @@ pub struct SshInfo {
     /// Windows only.
     pub service: Option<Result<AgentService, String>>,
     pub terminal: Option<Terminal>,
+    /// Whether the desktop shows tray icons ([`tray_host::available`]).
+    pub tray: Result<bool, String>,
 }
 
 /// Messages to the core thread: UI commands, relayed supervisor events and
@@ -1219,6 +1222,7 @@ impl Worker {
                 agent,
                 service: agent_service::query(),
                 terminal,
+                tray: tray_host::available(),
             })));
         });
     }

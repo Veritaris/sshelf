@@ -217,6 +217,17 @@ fn ssh_section(ui: &mut egui::Ui, ssh: Option<&SshInfo>, commands: &mut Vec<Comm
             };
             ui.end_row();
 
+            ui.label("Tray");
+            match &ssh.tray {
+                Ok(true) => ui.colored_label(p.green, "available"),
+                Ok(false) => ui.colored_label(
+                    p.yellow,
+                    "no tray host on this desktop (e.g. GNOME needs an AppIndicator extension)",
+                ),
+                Err(e) => ui.colored_label(p.yellow, format!("not available: {e}")),
+            };
+            ui.end_row();
+
             if let Some(service) = &ssh.service {
                 ui.label("Agent service");
                 match service {

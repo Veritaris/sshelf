@@ -29,3 +29,8 @@ windows-sys = { version = "0.61.2", features = [
 [target.'cfg(unix)'.dependencies]
 # Signals to a whole process group.
 libc = { version = "0.2.191" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Is a tray host (StatusNotifierWatcher) on the session bus? 5.x is what the
+# tray's KSNI backend uses, so it is compiled once.
+zbus = { version = "5.19.0", default-features = false, features = ["async-io", "blocking-api"] }

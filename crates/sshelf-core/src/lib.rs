@@ -22,5 +22,6 @@ pub mod ssh;
 pub mod storage;
 pub mod supervisor;
 pub mod terminal;
+pub mod tray_host;
 pub mod tunnels;
 pub mod watch;

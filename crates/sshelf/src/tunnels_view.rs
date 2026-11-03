@@ -599,6 +599,7 @@ mod tests {
             agent: Some(sshelf_core::ssh::AgentStatus::Keys(0)),
             service: None,
             terminal: None,
+            tray: Ok(true),
         });
         let view = TunnelsView {
             selected: Some("t-1".into()),
