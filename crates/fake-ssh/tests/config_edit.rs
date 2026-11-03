@@ -7,16 +7,23 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::Receiver;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use sshelf_core::config_edit::{Change, Edit, Problem, validate};
 use sshelf_core::core::{Command, ConfigSnapshot, Core, Event};
+use sshelf_core::history::History;
+use sshelf_core::metadata::{HostMeta, HostsFile};
 use sshelf_core::paths::Paths;
 use sshelf_core::settings::Settings;
 use sshelf_core::ssh::SshTools;
-use sshelf_core::storage::Store;
+use sshelf_core::storage::{Store, Versioned};
+use sshelf_core::supervisor::TunnelState;
+use sshelf_core::tunnels::{Tunnel, TunnelsFile};
 
 const WAIT: Duration = Duration::from_secs(10);
+/// The host key fake-ssh's servers present.
+const NEW_KEY: &str =
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIO/867Gn6gWVC9L/2TosddbUBIfUwN1FA755XCQA20kG";
 
 fn ssh() -> PathBuf {
     SshTools::locate(None)
@@ -160,20 +167,64 @@ fn outcome(events: &Receiver<Event>, id: u64) -> Result<bool, String> {
 
 /// A core over a temp home whose ssh is `fake-ssh`.
 fn session(config_text: Option<&str>) -> (tempfile::TempDir, Paths, Core, Receiver<Event>) {
+    session_with(config_text, |_, _| {})
+}
+
+/// Like [`session`]; `setup` prepares app data before the core starts.
+fn session_with(
+    config_text: Option<&str>,
+    setup: impl FnOnce(&Store, &Paths),
+) -> (tempfile::TempDir, Paths, Core, Receiver<Event>) {
     let tmp = tempfile::tempdir().unwrap();
     let paths = Paths::new(&tmp.path().join("home"), tmp.path().join("app"));
     fs::create_dir_all(&paths.ssh_dir).unwrap();
     if let Some(text) = config_text {
         fs::write(&paths.ssh_config, text).unwrap();
     }
-    Store::new(&paths.app_dir)
+    let store = Store::new(&paths.app_dir);
+    store
         .save(&Settings {
             ssh_path: Some(PathBuf::from(env!("CARGO_BIN_EXE_fake-ssh"))),
             ..Settings::default()
         })
         .unwrap();
+    setup(&store, &paths);
     let (core, events) = Core::start(paths.clone(), Arc::new(|| {}));
     (tmp, paths, core, events)
+}
+
+/// App data for the rename tests: metadata, a tunnel and history for `ok-web`.
+fn rename_data(store: &Store, paths: &Paths) {
+    let mut hosts = HostsFile::default();
+    hosts.hosts.insert(
+        "ok-web".into(),
+        HostMeta {
+            notes: "the web box".into(),
+            ..HostMeta::default()
+        },
+    );
+    store.save(&hosts).unwrap();
+    let mut tunnels = TunnelsFile::default();
+    tunnels.upsert_tunnel(Tunnel {
+        id: "t-web".into(),
+        name: "web".into(),
+        host: "ok-web".into(),
+        forwards: Vec::new(),
+    });
+    store.save(&tunnels).unwrap();
+    let mut history = History::default();
+    history.record("ok-web", SystemTime::now());
+    store.save(&history).unwrap();
+    // A known host key, so the tunnel starts without asking.
+    fs::write(
+        paths.ssh_dir.join("known_hosts"),
+        format!("ok-web.example.com {NEW_KEY}\n"),
+    )
+    .unwrap();
+}
+
+fn load<T: Versioned>(paths: &Paths) -> T {
+    Store::new(&paths.app_dir).load::<T>().data
 }
 
 fn backups(paths: &Paths) -> Vec<Vec<u8>> {
@@ -303,7 +354,10 @@ fn only_loaded_writable_files_are_edited() {
 fn a_new_host_creates_the_missing_config() {
     let (_tmp, paths, core, events) = session(None);
     let snapshot = config(&events);
-    assert_eq!(snapshot.writable_files(), std::slice::from_ref(&paths.ssh_config));
+    assert_eq!(
+        snapshot.writable_files(),
+        std::slice::from_ref(&paths.ssh_config)
+    );
     core.send(Command::SaveEdit {
         edit: Edit {
             id: 1,
@@ -323,6 +377,100 @@ fn a_new_host_creates_the_missing_config() {
     assert_eq!(
         fs::read(&paths.ssh_config).unwrap(),
         b"Host fresh\n    HostName fresh.example.com\n"
+    );
+    drop(core);
+}
+
+const RENAME_CONFIG: &str =
+    "Host  ok-web w1 # main\n    HostName web.example.com\nHost *\n    User me\n";
+
+fn rename(core: &Core, id: u64, alias: &str, to: &str) {
+    core.send(Command::RenameHost {
+        id,
+        alias: alias.into(),
+        to: to.into(),
+    });
+}
+
+#[test]
+fn rename_changes_the_header_and_all_app_data() {
+    let (_tmp, paths, core, events) = session_with(Some(RENAME_CONFIG), rename_data);
+    config(&events);
+    rename(&core, 1, "ok-web", "ok-www");
+    assert_eq!(outcome(&events, 1), Ok(true));
+    assert_eq!(
+        fs::read_to_string(&paths.ssh_config).unwrap(),
+        RENAME_CONFIG.replace("ok-web", "ok-www")
+    );
+    assert_eq!(
+        load::<HostsFile>(&paths).hosts["ok-www"].notes,
+        "the web box"
+    );
+    assert!(!load::<HostsFile>(&paths).hosts.contains_key("ok-web"));
+    assert_eq!(load::<TunnelsFile>(&paths).tunnels[0].host, "ok-www");
+    assert_eq!(load::<History>(&paths).entries[0].alias, "ok-www");
+    // Nothing is left behind as an orphan.
+    core.send(Command::Reload);
+    let orphans = wait_for(&events, "app data", |e| match e {
+        Event::Data(d) => Some(d.orphan_count()),
+        _ => None,
+    });
+    assert_eq!(orphans, 0);
+    drop(core);
+}
+
+#[test]
+fn rename_refuses_taken_names_and_running_tunnels() {
+    let (_tmp, paths, core, events) = session_with(Some(RENAME_CONFIG), rename_data);
+    config(&events);
+    rename(&core, 1, "ok-web", "w1");
+    assert!(outcome(&events, 1).unwrap_err().contains("already a host"));
+    rename(&core, 2, "nope", "x");
+    assert!(outcome(&events, 2).unwrap_err().contains("no host"));
+
+    core.send(Command::StartTunnel("t-web".into()));
+    wait_for(&events, "the tunnel running", |e| match e {
+        Event::Tunnels(s) if s.state("t-web") == TunnelState::Running => Some(()),
+        _ => None,
+    });
+    rename(&core, 3, "ok-web", "ok-www");
+    let error = outcome(&events, 3).unwrap_err();
+    assert!(error.contains("stop \"web\""), "{error}");
+    assert_eq!(
+        fs::read_to_string(&paths.ssh_config).unwrap(),
+        RENAME_CONFIG
+    );
+    drop(core);
+}
+
+#[test]
+fn rename_is_undone_when_app_data_cannot_be_saved() {
+    let (_tmp, paths, core, events) = session_with(Some(RENAME_CONFIG), |store, paths| {
+        rename_data(store, paths);
+        // A history.toml from a newer sshelf: shown, but never written.
+        fs::write(
+            paths.app_dir.join("history.toml"),
+            "version = 99\n[[entry]]\nalias = \"ok-web\"\nat = \"2026-01-01T00:00:00Z\"\n",
+        )
+        .unwrap();
+    });
+    config(&events);
+    let hosts_before = fs::read(paths.app_dir.join("hosts.toml")).unwrap();
+    let tunnels_before = fs::read(paths.app_dir.join("tunnels.toml")).unwrap();
+    rename(&core, 1, "ok-web", "ok-www");
+    let error = outcome(&events, 1).unwrap_err();
+    assert!(error.contains("the config was restored"), "{error}");
+    assert_eq!(
+        fs::read_to_string(&paths.ssh_config).unwrap(),
+        RENAME_CONFIG
+    );
+    assert_eq!(
+        fs::read(paths.app_dir.join("hosts.toml")).unwrap(),
+        hosts_before
+    );
+    assert_eq!(
+        fs::read(paths.app_dir.join("tunnels.toml")).unwrap(),
+        tunnels_before
     );
     drop(core);
 }

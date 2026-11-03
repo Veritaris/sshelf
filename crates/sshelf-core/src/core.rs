@@ -15,12 +15,13 @@ use std::time::SystemTime;
 use sshconf::{ConfigSet, HostList, WatchDir};
 
 use crate::agent_service::{self, AgentService};
-use crate::config_edit::{self, ConfigWriter, Edit, Problem};
+use crate::config_edit::{self, Change, ConfigWriter, Edit, Problem};
 use crate::history::History;
 use crate::hostkeys::{self, ChangedKey, Keygen, KnownHostsWriter, UnknownKey};
 use crate::metadata::{HostMeta, HostsFile};
 use crate::orphans::{self, GroupOrphan, Orphan, TunnelOrphan};
 use crate::paths::Paths;
+use crate::rename;
 use crate::settings::Settings;
 use crate::ssh::{AgentStatus, Resolved, SshTools};
 use crate::storage::{LoadStatus, Store, Versioned};
@@ -98,6 +99,13 @@ pub enum Command {
     SaveEdit {
         edit: Edit,
         overwrite: bool,
+    },
+    /// Rename `alias` on its host's `Host` line and in all app data, as one
+    /// operation; answered like [`Command::SaveEdit`] under `id`.
+    RenameHost {
+        id: u64,
+        alias: String,
+        to: String,
     },
     Shutdown,
 }
@@ -302,10 +310,17 @@ enum Message {
 }
 
 /// What happens once an edit is valid.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum AfterCheck {
     Report,
-    Save { overwrite: bool },
+    Save {
+        overwrite: bool,
+    },
+    /// Save, then move the app data of `from` to `to`.
+    Rename {
+        from: String,
+        to: String,
+    },
 }
 
 /// Handle to the core thread; dropping it shuts the core down and stops
@@ -546,6 +561,7 @@ impl Worker {
                 Command::SaveEdit { edit, overwrite } => {
                     self.check_edit(edit, AfterCheck::Save { overwrite })
                 }
+                Command::RenameHost { id, alias, to } => self.rename_host(id, alias, to),
                 // Dropping the supervisor stops every tunnel.
                 Command::Shutdown => break,
             }
@@ -1029,11 +1045,21 @@ impl Worker {
         then: AfterCheck,
         result: Result<Vec<Problem>, String>,
     ) {
-        let overwrite = match (then, &result) {
-            (AfterCheck::Save { overwrite }, Ok(problems)) if problems.is_empty() => overwrite,
+        let (overwrite, rename) = match (then, &result) {
+            (AfterCheck::Save { overwrite }, Ok(problems)) if problems.is_empty() => {
+                (overwrite, None)
+            }
+            (AfterCheck::Rename { from, to }, Ok(problems)) if problems.is_empty() => {
+                (false, Some((from, to)))
+            }
             _ => return self.edit_checked(edit.id, result),
         };
         if let Err(e) = self.editable(&edit.file) {
+            return self.edit_checked(edit.id, Err(e));
+        }
+        if let Some((from, _)) = &rename
+            && let Err(e) = self.renamable(from)
+        {
             return self.edit_checked(edit.id, Err(e));
         }
         let disk = match fs::read(&edit.file) {
@@ -1058,8 +1084,114 @@ impl Worker {
         if let Err(e) = written {
             return self.edit_checked(edit.id, Err(e));
         }
+        if let Some((from, to)) = rename
+            && let Err(e) = self.rename_data(&from, &to)
+        {
+            // One operation: without its app data the rename is undone.
+            let restored = self.config_writer.write(&edit.file, &edit.base);
+            self.reload();
+            let outcome = match restored {
+                Ok(()) => "the config was restored".to_string(),
+                Err(r) => format!("restoring the config failed too: {r}"),
+            };
+            return self.edit_checked(edit.id, Err(format!("{e}; {outcome}")));
+        }
         self.reload();
         self.emitter.emit(Event::EditSaved { id: edit.id });
+    }
+
+    /// Why tunnels of `alias` keep it from being renamed now.
+    fn renamable(&self, alias: &str) -> Result<(), String> {
+        let running: Vec<&str> = self
+            .data
+            .tunnels
+            .tunnels
+            .iter()
+            .filter(|t| t.host == alias && self.is_active(&t.id))
+            .map(|t| t.name.as_str())
+            .collect();
+        if running.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "stop {} before renaming `{alias}`",
+                running
+                    .iter()
+                    .map(|n| format!("\"{n}\""))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))
+        }
+    }
+
+    /// Renames `from` on its host's `Host` line, validates and saves that,
+    /// then moves the app data along (SPEC.md §5).
+    fn rename_host(&mut self, id: u64, from: String, to: String) {
+        let prepared = (|| {
+            let set = self.config.set().ok_or("the ssh config is not loaded")?;
+            let hosts = self.config.hosts().ok_or("the ssh config is not loaded")?;
+            let host = hosts
+                .find(&from)
+                .ok_or_else(|| format!("no host `{from}`"))?;
+            rename::check_new_alias(&to, hosts)?;
+            self.renamable(&from)?;
+            let file = &set.files[host.at.file];
+            let block = file
+                .block_at(host.at.line)
+                .ok_or("the host's block was not found")?;
+            let text = sshconf::edit::rename_alias(&file.text(block.lines.clone()), &from, &to)
+                .ok_or_else(|| format!("`{from}` is not on the host's Host line"))?;
+            Ok::<_, String>(Edit {
+                id,
+                file: file.path.clone(),
+                base: file.to_bytes(),
+                change: Change::Replace {
+                    lines: block.lines,
+                    text,
+                },
+                alias: to.clone(),
+            })
+        })();
+        match prepared {
+            Ok(edit) => self.check_edit(edit, AfterCheck::Rename { from, to }),
+            Err(e) => self.edit_checked(id, Err(e)),
+        }
+    }
+
+    /// Moves metadata, tunnels and history from `from` to `to`; a file that
+    /// was already saved is put back if a later one fails.
+    fn rename_data(&mut self, from: &str, to: &str) -> Result<(), String> {
+        let (mut hosts, mut tunnels, mut history) = (
+            self.data.hosts.clone(),
+            self.data.tunnels.clone(),
+            self.data.history.clone(),
+        );
+        let renamed = rename::rename_in(&mut hosts, &mut tunnels, &mut history, from, to);
+        // 0: hosts.toml, 1: tunnels.toml, 2: history.toml
+        let needed = [renamed.metadata, renamed.tunnels > 0, renamed.history > 0];
+        let mut saved = Vec::new();
+        for file in (0..3).filter(|&f| needed[f]) {
+            let result = match file {
+                0 => self.store.save(&hosts),
+                1 => self.store.save(&tunnels),
+                _ => self.store.save(&history),
+            };
+            if let Err(e) = result {
+                for file in saved.into_iter().rev() {
+                    let _ = match file {
+                        0 => self.store.save(&self.data.hosts),
+                        1 => self.store.save(&self.data.tunnels),
+                        _ => self.store.save(&self.data.history),
+                    };
+                }
+                return Err(e.to_string());
+            }
+            saved.push(file);
+        }
+        self.data.hosts = hosts;
+        self.data.tunnels = tunnels;
+        self.data.history = history;
+        Ok(())
     }
 
     /// Locates the tools now; version, agent and service are checked in the

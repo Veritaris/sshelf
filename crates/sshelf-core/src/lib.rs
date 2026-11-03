@@ -16,6 +16,7 @@ pub mod metadata;
 pub mod orphans;
 pub mod paths;
 pub mod process;
+pub mod rename;
 pub mod settings;
 pub mod ssh;
 pub mod storage;

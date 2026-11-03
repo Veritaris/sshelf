@@ -149,6 +149,9 @@ The read-only "resolved" panel shows `ssh -G <alias>` output for the selected ho
   - The candidate is the edited file alone: an `Include`d file is validated as if it were the whole config. That catches its syntax and option errors, not effects of the files around it; the editor says so.
   - On save the file is read again: if it no longer matches the bytes the edit started from, nothing is written and the conflict is shown (§4 "External changes").
 - Renaming a host updates the alias in the config and all app data referencing it, as one operation.
+  - *Rename…* changes one alias on the host's own `Host` line (other aliases, patterns and the line's comment stay), validates it like any edit, then moves `hosts.toml`, the tunnels' `host` and `history.toml` entries from the old alias to the new one. If an app data file cannot be saved, the files already saved and the config are put back.
+  - The new name must be one plain word (no spaces, `* ? ! ,`, quotes, no leading `-`/`#`) that no host already has. Renaming is refused while a tunnel on that alias runs.
+  - Changing the `Host` line in the raw editor does not touch app data; entries for the old alias then show up as orphans (§6).
 
 ---
 
