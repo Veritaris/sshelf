@@ -13,6 +13,7 @@ use sshelf_core::keygen::{
 };
 use zeroize::Zeroize;
 
+use crate::icons;
 use crate::theme::Palette;
 
 /// What the host editor should do with a generated key.
@@ -298,9 +299,11 @@ fn options(ui: &mut egui::Ui, form: &mut Form, id: u64, commands: &mut Vec<Comma
              click Done.",
         );
     } else if form.passphrase.is_empty() {
-        ui.colored_label(
+        icons::label(
+            ui,
+            icons::TRIANGLE_ALERT,
             p.yellow,
-            "⚠ Without a passphrase, anyone who gets this file can use the key.",
+            "Without a passphrase, anyone who gets this file can use the key.",
         );
     }
     let problems = form.problems();
@@ -367,7 +370,12 @@ fn result(
 ) -> Option<KeyAction> {
     let p = &Palette::ONE_DARK;
     let mut action = None;
-    ui.colored_label(p.green, format!("✔ Key written to {}", key.path.display()));
+    icons::label(
+        ui,
+        icons::CIRCLE_CHECK,
+        p.green,
+        format!("Key written to {}", key.path.display()),
+    );
     egui::Grid::new("key_result")
         .num_columns(2)
         .spacing([16.0, 4.0])
@@ -472,6 +480,7 @@ mod tests {
     use sshelf_core::core::ConfigState;
 
     use super::*;
+    use crate::test_util;
 
     fn snapshot(text: &str) -> Arc<ConfigSnapshot> {
         let tmp = tempfile::tempdir().unwrap();
@@ -497,20 +506,22 @@ mod tests {
     fn harness(alias: &str, config: &str) -> Harness<'static, State> {
         let mut dialog = KeyDialog::default();
         dialog.open(alias, Path::new("/home/me/.ssh"));
-        Harness::builder().with_size([900.0, 800.0]).build_ui_state(
-            |ui, state: &mut State| {
-                let (commands, action) =
-                    state.dialog.show(ui.ctx(), 1, &state.snapshot, None, true);
-                state.commands.extend(commands);
-                state.actions.extend(action);
-            },
-            State {
-                dialog,
-                snapshot: snapshot(config),
-                commands: Vec::new(),
-                actions: Vec::new(),
-            },
-        )
+        test_util::harness()
+            .with_size([900.0, 800.0])
+            .build_ui_state(
+                |ui, state: &mut State| {
+                    let (commands, action) =
+                        state.dialog.show(ui.ctx(), 1, &state.snapshot, None, true);
+                    state.commands.extend(commands);
+                    state.actions.extend(action);
+                },
+                State {
+                    dialog,
+                    snapshot: snapshot(config),
+                    commands: Vec::new(),
+                    actions: Vec::new(),
+                },
+            )
     }
 
     fn form<'a>(harness: &'a mut Harness<'_, State>) -> &'a mut Form {

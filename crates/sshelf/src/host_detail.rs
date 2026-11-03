@@ -12,6 +12,7 @@ use sshelf_core::metadata::{Color, HostMeta};
 use sshelf_core::ssh::Resolved;
 use sshelf_core::storage::LoadStatus;
 
+use crate::icons;
 use crate::theme::Palette;
 use crate::util;
 
@@ -269,7 +270,10 @@ impl HostDetail {
                 None => Some("still detecting ssh".to_string()),
             };
             let button = ui
-                .add_enabled(tools_error.is_none(), egui::Button::new("▶ Connect"))
+                .add_enabled(
+                    tools_error.is_none(),
+                    egui::Button::new((icons::atom(icons::SQUARE_TERMINAL), "Connect")),
+                )
                 .on_hover_text("Open a terminal running ssh for this host")
                 .on_disabled_hover_text(tools_error.unwrap_or_default());
             if button.clicked() {
@@ -332,8 +336,9 @@ impl HostDetail {
                 .num_columns(2)
                 .spacing([12.0, 6.0])
                 .show(ui, |ui| {
-                    ui.label("Favorite");
-                    ui.checkbox(&mut self.draft.favorite, "⭐");
+                    let label = ui.label("Favorite");
+                    ui.add(egui::Checkbox::without_text(&mut self.draft.favorite))
+                        .labelled_by(label.id);
                     ui.end_row();
 
                     ui.label("Color");
@@ -401,7 +406,7 @@ impl HostDetail {
                             .hint_text("Filter")
                             .desired_width(200.0),
                     );
-                    if ui.button("↻").on_hover_text("Run ssh -G again").clicked() {
+                    if icons::button(ui, icons::REFRESH_CW, "Run ssh -G again").clicked() {
                         self.resolved.remove(alias);
                         self.requested.retain(|(a, _)| a != alias);
                         commands.push(Command::Resolve(alias.to_string()));
@@ -421,7 +426,7 @@ impl HostDetail {
     }
 }
 
-/// Between route hops; `→` is not in egui's bundled fonts.
+/// Between route hops.
 const ARROW: &str = "›";
 
 /// "Route: you › bastion › db-gw › this host" (SPEC.md §12, M8). Hops that

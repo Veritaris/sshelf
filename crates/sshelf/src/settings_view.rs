@@ -12,6 +12,7 @@ use sshelf_core::ssh::{AgentStatus, ToolSource};
 use sshelf_core::storage::LoadStatus;
 use sshelf_core::terminal;
 
+use crate::icons;
 use crate::theme::Palette;
 
 #[derive(Default)]
@@ -194,7 +195,10 @@ fn ssh_section(ui: &mut egui::Ui, ssh: Option<&SshInfo>, commands: &mut Vec<Comm
     let p = &Palette::ONE_DARK;
     ui.horizontal(|ui| {
         ui.label(RichText::new("ssh").strong());
-        if ui.small_button("↻ Refresh").clicked() {
+        if ui
+            .small_button((icons::atom(icons::REFRESH_CW), "Refresh"))
+            .clicked()
+        {
             commands.push(Command::RefreshSsh);
         }
     });
@@ -337,9 +341,10 @@ fn files_section(ui: &mut egui::Ui, data: &AppData, ssh_config: Option<&Path>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use egui_kittest::Harness;
     use egui_kittest::kittest::{NodeT, Queryable};
     use sshelf_core::settings::{HostListStyle, TrayMenu};
+
+    use crate::test_util;
 
     fn data() -> AppData {
         AppData::new(PathBuf::from("app"))
@@ -348,12 +353,14 @@ mod tests {
     #[test]
     fn editing_the_override_enables_save() {
         let data = data();
-        let mut harness = Harness::builder().with_size([900.0, 700.0]).build_ui_state(
-            move |ui, (view, commands): &mut (SettingsView, Vec<Command>)| {
-                commands.extend(view.show(ui, Some(&data), None, None));
-            },
-            (SettingsView::default(), Vec::new()),
-        );
+        let mut harness = test_util::harness()
+            .with_size([900.0, 700.0])
+            .build_ui_state(
+                move |ui, (view, commands): &mut (SettingsView, Vec<Command>)| {
+                    commands.extend(view.show(ui, Some(&data), None, None));
+                },
+                (SettingsView::default(), Vec::new()),
+            );
         harness.step();
         harness.state_mut().0.ssh_path = "/opt/ssh".into();
         harness.step();
@@ -374,12 +381,14 @@ mod tests {
         data.settings.reduce_motion = true;
         data.settings.tray_menu = TrayMenu::System;
         let saved = data.settings.clone();
-        let mut harness = Harness::builder().with_size([900.0, 700.0]).build_ui_state(
-            move |ui, (view, commands): &mut (SettingsView, Vec<Command>)| {
-                commands.extend(view.show(ui, Some(&data), None, None));
-            },
-            (SettingsView::default(), Vec::new()),
-        );
+        let mut harness = test_util::harness()
+            .with_size([900.0, 700.0])
+            .build_ui_state(
+                move |ui, (view, commands): &mut (SettingsView, Vec<Command>)| {
+                    commands.extend(view.show(ui, Some(&data), None, None));
+                },
+                (SettingsView::default(), Vec::new()),
+            );
         harness.step();
         harness.state_mut().0.terminal_command = "{ssh} {alias}".into();
         harness.step();
@@ -396,12 +405,14 @@ mod tests {
     #[test]
     fn saved_settings_clear_the_unsaved_marker() {
         let state = (SettingsView::default(), data());
-        let mut harness = Harness::builder().with_size([900.0, 700.0]).build_ui_state(
-            |ui, (view, data): &mut (SettingsView, AppData)| {
-                view.show(ui, Some(data), None, None);
-            },
-            state,
-        );
+        let mut harness = test_util::harness()
+            .with_size([900.0, 700.0])
+            .build_ui_state(
+                |ui, (view, data): &mut (SettingsView, AppData)| {
+                    view.show(ui, Some(data), None, None);
+                },
+                state,
+            );
         harness.step();
         harness.state_mut().0.close_behavior = CloseBehavior::StopAndQuit;
         harness.step();

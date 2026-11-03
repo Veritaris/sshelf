@@ -1,29 +1,28 @@
 //! One Dark theme: the palette and its mapping onto egui's [`egui::Visuals`].
 //!
-//! Colors follow Atom's One Dark (https://github.com/atom/one-dark-syntax),
-//! matching the claude-overlay look.
+//! Colors follow Atom's One Dark (https://github.com/atom/one-dark-syntax)
+//! with the values of SPEC.md §10 *Visual design*.
 
 use egui::{Color32, Stroke};
 
-/// Toned-down, low-saturation One Dark colors.
+/// One Dark, as SPEC.md §10 *Visual design* lists it.
 pub struct Palette {
-    /// Panel fill.
+    /// Background of the window and panels.
     pub bg: Color32,
-    /// Windows, text fields, code.
+    /// Rail, inputs, popups, code.
     pub bg_dark: Color32,
-    /// Inactive widget fill, stripes.
+    /// Raised: inactive widget fill, cards, stripes.
     pub surface: Color32,
-    /// Hovered widget fill.
-    pub surface_hover: Color32,
-    /// Selected text / pressed widget fill.
+    /// Selected; also hovered widget fill and separators.
     pub selection: Color32,
+    /// Outline; also pressed widget fill.
     pub border: Color32,
-    /// Header / brand / links.
+    /// Magenta: selection, primary actions, links.
     pub accent: Color32,
     pub text: Color32,
     /// Secondary text: other aliases, file names, hints.
     pub dim: Color32,
-    /// Text on hovered widgets.
+    /// Text on hovered and selected widgets.
     pub text_strong: Color32,
     pub green: Color32,
     pub yellow: Color32,
@@ -35,12 +34,11 @@ impl Palette {
         bg: Color32::from_rgb(40, 44, 52),             // #282c34
         bg_dark: Color32::from_rgb(33, 37, 43),        // #21252b
         surface: Color32::from_rgb(44, 49, 58),        // #2c313a
-        surface_hover: Color32::from_rgb(58, 64, 76),  // #3a404c
         selection: Color32::from_rgb(62, 68, 81),      // #3e4451
-        border: Color32::from_rgb(86, 92, 108),        // #565c6c
+        border: Color32::from_rgb(75, 82, 99),         // #4b5263
         accent: Color32::from_rgb(198, 120, 221),      // #c678dd
         text: Color32::from_rgb(171, 178, 191),        // #abb2bf
-        dim: Color32::from_rgb(130, 137, 151),         // softer gray
+        dim: Color32::from_rgb(154, 161, 173),         // #9aa1ad
         text_strong: Color32::from_rgb(215, 218, 224), // #d7dae0
         green: Color32::from_rgb(152, 195, 121),       // #98c379
         yellow: Color32::from_rgb(229, 192, 123),      // #e5c07b
@@ -68,7 +66,7 @@ pub fn apply(ctx: &egui::Context) {
     let w = &mut vis.widgets;
     w.noninteractive.bg_fill = p.bg;
     w.noninteractive.weak_bg_fill = p.bg;
-    w.noninteractive.bg_stroke = Stroke::new(1.0, p.surface_hover); // separators
+    w.noninteractive.bg_stroke = Stroke::new(1.0, p.selection); // separators
     w.noninteractive.fg_stroke = Stroke::new(1.0, p.text);
 
     w.inactive.bg_fill = p.surface;
@@ -76,14 +74,14 @@ pub fn apply(ctx: &egui::Context) {
     w.inactive.fg_stroke = Stroke::new(1.0, p.text);
 
     for state in [&mut w.hovered, &mut w.open] {
-        state.bg_fill = p.surface_hover;
-        state.weak_bg_fill = p.surface_hover;
+        state.bg_fill = p.selection;
+        state.weak_bg_fill = p.selection;
         state.bg_stroke = Stroke::new(1.0, p.border);
         state.fg_stroke = Stroke::new(1.5, p.text_strong);
     }
 
-    w.active.bg_fill = p.selection;
-    w.active.weak_bg_fill = p.selection;
+    w.active.bg_fill = p.border;
+    w.active.weak_bg_fill = p.border;
     w.active.bg_stroke = Stroke::new(1.0, p.accent);
     w.active.fg_stroke = Stroke::new(2.0, p.accent);
 

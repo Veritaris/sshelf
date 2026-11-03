@@ -9,6 +9,7 @@ use egui::RichText;
 use sshelf_core::core::{ChangedKeyPrompt, Command, HostKeyPrompt};
 use sshelf_core::hostkeys::KeyInfo;
 
+use crate::icons;
 use crate::theme::Palette;
 
 const COMPARE_HINT: &str = "ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub";
@@ -55,7 +56,10 @@ impl HostKeyModals {
         let mut commands = Vec::new();
         let response = egui::Modal::new(egui::Id::unique(("hostkey_changed", prompt.id))).show(ctx, |ui| {
             ui.set_max_width(620.0);
-            ui.heading(RichText::new("⚠ Host key changed").color(p.red).strong());
+            ui.horizontal(|ui| {
+                icons::show(ui, icons::SHIELD_ALERT, 20.0, p.red);
+                ui.heading(RichText::new("Host key changed").color(p.red).strong());
+            });
             ui.label(format!(
                 "{} presents a different key than the one stored for it (tunnel \"{}\").",
                 changed.target.display(),
@@ -192,6 +196,7 @@ mod tests {
     use sshelf_core::hostkeys::{ChangedKey, KeyTarget, UnknownKey};
 
     use super::*;
+    use crate::test_util;
 
     fn target() -> KeyTarget {
         KeyTarget {
@@ -214,12 +219,14 @@ mod tests {
     }
 
     fn harness(modals: HostKeyModals) -> Harness<'static, (HostKeyModals, Vec<Command>)> {
-        Harness::builder().with_size([900.0, 700.0]).build_ui_state(
-            |ui, (modals, commands): &mut (HostKeyModals, Vec<Command>)| {
-                commands.extend(modals.show(ui.ctx()));
-            },
-            (modals, Vec::new()),
-        )
+        test_util::harness()
+            .with_size([900.0, 700.0])
+            .build_ui_state(
+                |ui, (modals, commands): &mut (HostKeyModals, Vec<Command>)| {
+                    commands.extend(modals.show(ui.ctx()));
+                },
+                (modals, Vec::new()),
+            )
     }
 
     #[test]

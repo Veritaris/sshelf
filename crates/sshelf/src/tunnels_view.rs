@@ -8,6 +8,7 @@ use sshelf_core::hints;
 use sshelf_core::supervisor::{FailureKind, Owner, Snapshot, TunnelState, TunnelStatus};
 use sshelf_core::tunnels::{DEFAULT_BIND, Forward, ForwardKind, Tunnel, TunnelsFile};
 
+use crate::icons;
 use crate::theme::Palette;
 
 #[derive(Default)]
@@ -253,7 +254,7 @@ impl TunnelsView {
             .iter()
             .find(|o| o.tunnel_id == tunnel.id)
         {
-            ui.colored_label(p.yellow, format!("⚠ {}", orphan.describe()));
+            icons::label(ui, icons::TRIANGLE_ALERT, p.yellow, orphan.describe());
         }
 
         ui.add_space(6.0);
@@ -261,7 +262,7 @@ impl TunnelsView {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(forward.summary()).monospace());
                 if forward.is_exposed() {
-                    ui.colored_label(p.yellow, "⚠ not loopback")
+                    icons::label(ui, icons::TRIANGLE_ALERT, p.yellow, "not loopback")
                         .on_hover_text(exposed_hint(forward.kind));
                 }
             });
@@ -408,11 +409,7 @@ impl TunnelsView {
                         )
                         .labelled_by(target_h.id);
                     }
-                    if ui
-                        .small_button("✖")
-                        .on_hover_text("Remove this forward")
-                        .clicked()
-                    {
+                    if icons::button(ui, icons::X, "Remove this forward").clicked() {
                         remove = Some(i);
                     }
                     ui.end_row();
@@ -425,9 +422,11 @@ impl TunnelsView {
             draft.forwards.push(new_forward());
         }
         for forward in draft.forwards.iter().filter(|f| f.is_exposed()) {
-            ui.colored_label(
+            icons::label(
+                ui,
+                icons::TRIANGLE_ALERT,
                 p.yellow,
-                format!("⚠ {}: {}", forward.bind, exposed_hint(forward.kind)),
+                format!("{}: {}", forward.bind, exposed_hint(forward.kind)),
             );
         }
 
@@ -459,7 +458,7 @@ impl TunnelsView {
     }
 }
 
-/// A small filled circle (the bundled fonts have no `●`).
+/// A small filled circle (status marks are painted shapes, SPEC.md §10).
 pub fn status_dot(ui: &mut egui::Ui, color: egui::Color32) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
     ui.painter().circle_filled(rect.center(), 4.0, color);
@@ -481,24 +480,27 @@ fn start_stop(ui: &mut egui::Ui, tunnel: &Tunnel, states: &Snapshot, commands: &
     let state = states.state(&tunnel.id);
     if manual {
         // Laid out right to left: Stop ends up rightmost.
-        if ui.small_button("⏹ Stop").clicked() {
+        if ui
+            .small_button((icons::atom(icons::SQUARE), "Stop"))
+            .clicked()
+        {
             commands.push(Command::StopTunnel(tunnel.id.clone()));
         }
         if matches!(state, TunnelState::Failed(_))
             && ui
-                .small_button("↻ Retry")
+                .small_button((icons::atom(icons::ROTATE_CW), "Retry"))
                 .on_hover_text("Start this tunnel again")
                 .clicked()
         {
             commands.push(Command::StartTunnel(tunnel.id.clone()));
         }
     } else {
-        let label = if matches!(state, TunnelState::Failed(_)) {
-            "↻ Retry"
+        let (icon, label) = if matches!(state, TunnelState::Failed(_)) {
+            (icons::ROTATE_CW, "Retry")
         } else {
-            "▶ Start"
+            (icons::PLAY, "Start")
         };
-        let button = ui.small_button(label);
+        let button = ui.small_button((icons::atom(icon), label));
         let button = if matches!(state, TunnelState::Running | TunnelState::Starting) {
             button.on_hover_text("Already running for a group; this also keeps it up on its own")
         } else {
@@ -546,6 +548,7 @@ mod tests {
     use sshelf_core::supervisor::{LogLine, Reconnect};
 
     use super::*;
+    use crate::test_util;
 
     struct Fixture {
         config: Arc<ConfigSnapshot>,
@@ -653,7 +656,7 @@ mod tests {
     }
 
     fn harness(f: Fixture, view: TunnelsView) -> Harness<'static, (TunnelsView, Vec<Command>)> {
-        Harness::builder()
+        test_util::harness()
             .with_size([1200.0, 800.0])
             .build_ui_state(
                 move |ui, (view, commands): &mut (TunnelsView, Vec<Command>)| {
@@ -704,7 +707,7 @@ mod tests {
         harness.step();
         harness.get_by_label(reason);
         harness.get_by_label_contains("already in use there");
-        harness.get_all_by_label("↻ Retry").next().unwrap().click();
+        harness.get_all_by_label("Retry").next().unwrap().click();
         harness.step();
         assert_eq!(harness.state().1, [Command::StartTunnel("t-1".into())]);
     }
@@ -717,7 +720,7 @@ mod tests {
         };
         let mut harness = harness(fixture(TunnelState::Running), view);
         harness.step();
-        harness.get_all_by_label("⏹ Stop").next().unwrap().click();
+        harness.get_all_by_label("Stop").next().unwrap().click();
         harness.step();
         assert_eq!(harness.state().1, [Command::StopTunnel("t-1".into())]);
     }
@@ -773,7 +776,7 @@ mod tests {
         harness.step();
         harness.step();
         assert!(harness.query_by_label("the name is empty").is_none());
-        harness.get_by_label_contains("⚠ 0.0.0.0");
+        harness.get_by_label_contains("0.0.0.0: listens on a non-loopback address");
 
         harness.get_by_label("Save").click();
         harness.step();

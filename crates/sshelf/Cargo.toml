@@ -8,8 +8,9 @@ description = "Visual layer over your ~/.ssh/config: hosts, effective config, tu
 [dependencies]
 sshconf = { path = "../sshconf" }
 sshelf-core = { path = "../sshelf-core" }
-# Since 0.37 the emoji/icon glyphs (⭐ ⚠ ✖ ▶ …) are an opt-in font feature.
-egui = { version = "0.37.0", features = ["monochrome_emoji_fonts"] }
+# Icons come from the bundled Lucide font (src/fonts.rs), so egui's opt-in
+# emoji fonts (`monochrome_emoji_fonts`) stay off.
+egui = { version = "0.37.0" }
 # Linux needs at least one windowing backend once default features are off.
 eframe = { version = "0.37.0", default-features = false, features = [
     "accesskit",

@@ -8,6 +8,7 @@ use sshelf_core::hints;
 use sshelf_core::supervisor::{GroupState, Owner, Snapshot, TunnelState};
 use sshelf_core::tunnels::Group;
 
+use crate::icons;
 use crate::theme::Palette;
 use crate::tunnels_view::{owner_names, reconnect_text, state_label, status_dot};
 
@@ -111,7 +112,9 @@ impl GroupsView {
                 ui.label(RichText::new("starts with sshelf").small().color(p.dim));
             }
             if matches!(state, GroupState::Degraded { .. })
-                && ui.small_button("↻ Retry failed").clicked()
+                && ui
+                    .small_button((icons::atom(icons::ROTATE_CW), "Retry failed"))
+                    .clicked()
             {
                 commands.push(Command::StartGroup(group.id.clone()));
             }
@@ -152,7 +155,12 @@ impl GroupsView {
             .show(ui, |ui| {
                 for id in &group.tunnels {
                     let Some(tunnel) = data.tunnels.tunnel(id) else {
-                        ui.colored_label(p.yellow, format!("⚠ missing tunnel `{id}`"));
+                        icons::label(
+                            ui,
+                            icons::TRIANGLE_ALERT,
+                            p.yellow,
+                            format!("missing tunnel `{id}`"),
+                        );
                         continue;
                     };
                     let tunnel_state = states.state(id);
@@ -285,6 +293,7 @@ mod tests {
     use sshelf_core::tunnels::Tunnel;
 
     use super::*;
+    use crate::test_util;
 
     fn data() -> Arc<AppData> {
         let mut data = AppData::new(PathBuf::from("app"));
@@ -329,7 +338,7 @@ mod tests {
     fn harness(states: Snapshot) -> Harness<'static, (GroupsView, Vec<Command>)> {
         let data = data();
         let states = Arc::new(states);
-        Harness::builder()
+        test_util::harness()
             .with_size([1000.0, 800.0])
             .build_ui_state(
                 move |ui, (view, commands): &mut (GroupsView, Vec<Command>)| {
@@ -372,7 +381,7 @@ mod tests {
         harness.get_by_label("Permission denied");
         harness.get_by_label("also used by \"Other\"");
 
-        harness.get_by_label("↻ Retry failed").click();
+        harness.get_by_label("Retry failed").click();
         harness.step();
         assert_eq!(harness.state().1, [Command::StartGroup("g-1".into())]);
     }

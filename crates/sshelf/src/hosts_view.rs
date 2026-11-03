@@ -11,6 +11,7 @@ use sshelf_core::metadata::HostMeta;
 
 use crate::host_detail::{DetailAction, HostDetail};
 use crate::host_editor::HostEditor;
+use crate::icons;
 use crate::theme::Palette;
 use crate::util;
 
@@ -182,7 +183,10 @@ impl HostsView {
         );
         let tags = data.hosts.all_tags();
         ui.horizontal_wrapped(|ui| {
-            ui.toggle_value(&mut self.favorites_only, "⭐ Favorites");
+            ui.toggle_value(
+                &mut self.favorites_only,
+                (icons::atom(icons::STAR), "Favorites"),
+            );
             for tag in &tags {
                 let on = self.tag.as_ref() == Some(tag);
                 if ui.selectable_label(on, format!("#{tag}")).clicked() {
@@ -269,7 +273,7 @@ impl HostsView {
                 self.selected = Some(host.primary().to_string());
             }
             if meta.is_some_and(|m| m.favorite) {
-                ui.label(RichText::new("⭐").color(p.yellow));
+                icons::show(ui, icons::STAR, icons::INLINE, p.yellow).on_hover_text("Favorite");
             }
             if host.aliases.len() > 1 {
                 ui.label(RichText::new(host.aliases[1..].join(" ")).color(p.dim));
@@ -306,22 +310,22 @@ fn diagnostics(ui: &mut egui::Ui, set: &ConfigSet) {
         .filter(|d| d.severity > Severity::Info)
         .count();
     let title = if problems > 0 {
-        RichText::new(format!("⚠ {problems} config problem(s)")).color(p.yellow)
+        RichText::new(format!("{problems} config problem(s)")).color(p.yellow)
     } else {
-        RichText::new(format!("ℹ {} note(s)", set.diagnostics.len())).color(p.dim)
+        RichText::new(format!("{} note(s)", set.diagnostics.len())).color(p.dim)
     };
     egui::CollapsingHeader::new(title)
         .id_salt("diagnostics")
         .show(ui, |ui| {
             for d in &set.diagnostics {
                 let (icon, color) = match d.severity {
-                    Severity::Error => ("✖", p.red),
-                    Severity::Warning => ("⚠", p.yellow),
-                    Severity::Info => ("ℹ", p.dim),
+                    Severity::Error => (icons::CIRCLE_X, p.red),
+                    Severity::Warning => (icons::TRIANGLE_ALERT, p.yellow),
+                    Severity::Info => (icons::INFO, p.dim),
                 };
                 let (short, full) = util::location(set, d.at);
                 ui.horizontal_wrapped(|ui| {
-                    ui.label(RichText::new(icon).color(color));
+                    icons::show(ui, icon, icons::INLINE, color);
                     ui.label(RichText::new(short).color(p.dim))
                         .on_hover_text(full);
                     ui.label(&d.message);
@@ -383,6 +387,7 @@ mod tests {
     use sshelf_core::storage::LoadStatus;
 
     use super::*;
+    use crate::test_util;
 
     fn fixture() -> (Arc<ConfigSnapshot>, Arc<AppData>) {
         let tmp = tempfile::tempdir().unwrap();
@@ -418,7 +423,7 @@ mod tests {
         config: Arc<ConfigSnapshot>,
         data: Arc<AppData>,
     ) -> Harness<'static, (HostsView, Vec<Command>)> {
-        Harness::builder()
+        test_util::harness()
             .with_size([1200.0, 800.0])
             .build_ui_state(
                 move |ui, (view, commands): &mut (HostsView, Vec<Command>)| {

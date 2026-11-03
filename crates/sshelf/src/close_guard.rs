@@ -188,6 +188,7 @@ mod tests {
     use egui_kittest::kittest::Queryable;
 
     use super::*;
+    use crate::test_util;
 
     #[test]
     fn decisions() {
@@ -217,12 +218,14 @@ mod tests {
             offer_tray,
             ..CloseGuard::default()
         };
-        Harness::builder().with_size([800.0, 600.0]).build_ui_state(
-            move |ui, (guard, commands): &mut (CloseGuard, Vec<Command>)| {
-                commands.extend(guard.modal(ui.ctx(), 2, Some(&settings)));
-            },
-            (guard, Vec::new()),
-        )
+        test_util::harness()
+            .with_size([800.0, 600.0])
+            .build_ui_state(
+                move |ui, (guard, commands): &mut (CloseGuard, Vec<Command>)| {
+                    commands.extend(guard.modal(ui.ctx(), 2, Some(&settings)));
+                },
+                (guard, Vec::new()),
+            )
     }
 
     #[test]

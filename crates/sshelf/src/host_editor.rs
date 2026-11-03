@@ -15,6 +15,7 @@ use sshelf_core::core::{AppData, Command, ConfigSnapshot, SshInfo};
 use sshelf_core::keygen::GeneratedKey;
 use sshelf_core::rename;
 
+use crate::icons;
 use crate::key_dialog::{KeyAction, KeyDialog};
 use crate::theme::Palette;
 
@@ -811,7 +812,7 @@ fn list(
                     all[row] = value;
                     new_rows = Some(all);
                 }
-                if ui.small_button("✖").on_hover_text("Remove").clicked() {
+                if icons::button(ui, icons::X, "Remove").clicked() {
                     let mut all = rows.clone();
                     all.remove(row);
                     new_rows = Some(all);
@@ -955,9 +956,11 @@ fn conflict(
     let p = &Palette::ONE_DARK;
     let mut commands = Vec::new();
     let mut outcome = Resolution::None;
-    ui.colored_label(
+    icons::label(
+        ui,
+        icons::TRIANGLE_ALERT,
         p.yellow,
-        RichText::new("⚠ The file changed on disk since you started editing.").strong(),
+        RichText::new("The file changed on disk since you started editing.").strong(),
     );
     let base = String::from_utf8_lossy(&session.base).into_owned();
     let now = String::from_utf8_lossy(disk).into_owned();
@@ -1105,6 +1108,7 @@ mod tests {
     use sshelf_core::metadata::{HostMeta, HostsFile};
 
     use super::*;
+    use crate::test_util;
 
     const CONFIG: &str = "Host web\n    HostName old.example\n\nHost *\n    User me\n";
 
@@ -1134,24 +1138,26 @@ mod tests {
         let mut editor = HostEditor::default();
         editor.open(&snapshot, "web");
         assert!(editor.is_open());
-        Harness::builder().with_size([900.0, 900.0]).build_ui_state(
-            |ui, state: &mut State| {
-                let commands = state.editor.show(ui, &state.snapshot);
-                state.commands.extend(commands);
-                let commands = state
-                    .editor
-                    .show_rename(ui.ctx(), &state.snapshot, &state.data);
-                state.commands.extend(commands);
-                let commands = state.editor.show_keys(ui.ctx(), &state.snapshot, None);
-                state.commands.extend(commands);
-            },
-            State {
-                editor,
-                snapshot,
-                data: AppData::new(PathBuf::from("app")),
-                commands: Vec::new(),
-            },
-        )
+        test_util::harness()
+            .with_size([900.0, 900.0])
+            .build_ui_state(
+                |ui, state: &mut State| {
+                    let commands = state.editor.show(ui, &state.snapshot);
+                    state.commands.extend(commands);
+                    let commands = state
+                        .editor
+                        .show_rename(ui.ctx(), &state.snapshot, &state.data);
+                    state.commands.extend(commands);
+                    let commands = state.editor.show_keys(ui.ctx(), &state.snapshot, None);
+                    state.commands.extend(commands);
+                },
+                State {
+                    editor,
+                    snapshot,
+                    data: AppData::new(PathBuf::from("app")),
+                    commands: Vec::new(),
+                },
+            )
     }
 
     fn text(harness: &Harness<'_, State>) -> String {
@@ -1301,18 +1307,20 @@ mod tests {
         let mut editor = HostEditor::default();
         editor.open_new(&snapshot);
         assert!(editor.is_new());
-        Harness::builder().with_size([900.0, 900.0]).build_ui_state(
-            |ui, state: &mut State| {
-                let commands = state.editor.show(ui, &state.snapshot);
-                state.commands.extend(commands);
-            },
-            State {
-                editor,
-                snapshot,
-                data: AppData::new(PathBuf::from("app")),
-                commands: Vec::new(),
-            },
-        )
+        test_util::harness()
+            .with_size([900.0, 900.0])
+            .build_ui_state(
+                |ui, state: &mut State| {
+                    let commands = state.editor.show(ui, &state.snapshot);
+                    state.commands.extend(commands);
+                },
+                State {
+                    editor,
+                    snapshot,
+                    data: AppData::new(PathBuf::from("app")),
+                    commands: Vec::new(),
+                },
+            )
     }
 
     #[test]

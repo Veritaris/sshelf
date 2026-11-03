@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use egui::RichText;
 
+use crate::icons;
 use crate::theme::Palette;
 
 /// How long a toast stays fully visible, then how long it fades.
@@ -76,7 +77,10 @@ impl Toasts {
                             .corner_radius(6.0)
                             .inner_margin(egui::Margin::symmetric(12, 8))
                             .show(ui, |ui| {
-                                ui.label(RichText::new(format!("✔ {}", toast.text)).color(p.text));
+                                ui.horizontal(|ui| {
+                                    icons::show(ui, icons::CIRCLE_CHECK, icons::INLINE, p.green);
+                                    ui.label(RichText::new(&toast.text).color(p.text));
+                                });
                             });
                     });
                     ui.add_space(6.0);
@@ -106,10 +110,10 @@ impl Toasts {
 
 #[cfg(test)]
 mod tests {
-    use egui_kittest::Harness;
     use egui_kittest::kittest::Queryable;
 
     use super::*;
+    use crate::test_util;
 
     #[test]
     fn opacity_holds_then_fades_then_ends() {
@@ -133,13 +137,13 @@ mod tests {
     fn a_toast_is_shown_and_then_goes_away() {
         let mut toasts = Toasts::default();
         toasts.push("Settings saved");
-        let mut harness = Harness::builder()
+        let mut harness = test_util::harness()
             .build_ui_state(|ui, toasts: &mut Toasts| toasts.show(ui.ctx()), toasts);
         harness.step();
-        harness.get_by_label("✔ Settings saved");
+        harness.get_by_label("Settings saved");
         harness.state_mut().items[0].since = Some(-100.0);
         harness.step();
-        assert!(harness.query_by_label("✔ Settings saved").is_none());
+        assert!(harness.query_by_label("Settings saved").is_none());
         assert!(harness.state().items.is_empty());
     }
 }

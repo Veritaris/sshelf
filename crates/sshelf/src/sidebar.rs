@@ -2,6 +2,7 @@
 
 use egui::RichText;
 
+use crate::icons;
 use crate::theme::Palette;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,9 +29,9 @@ pub fn show(ui: &mut egui::Ui, view: &mut View, orphans: &[String]) -> bool {
     if !orphans.is_empty() {
         ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
             ui.add_space(8.0);
-            let label = RichText::new(format!("⚠ {} orphaned", orphans.len())).color(p.yellow);
+            let label = RichText::new(format!("{} orphaned", orphans.len())).color(p.yellow);
             clicked = ui
-                .button(label)
+                .button((icons::tinted(icons::TRIANGLE_ALERT, p.yellow), label))
                 .on_hover_ui(|ui| {
                     ui.label("App data that no longer links to a host:");
                     for orphan in orphans {

@@ -11,9 +11,11 @@ use sshelf_core::paths::Paths;
 use sshelf_core::supervisor::Snapshot;
 
 use crate::close_guard::{self, CloseGuard};
+use crate::fonts;
 use crate::groups_view::GroupsView;
 use crate::hostkey_modal::HostKeyModals;
 use crate::hosts_view::HostsView;
+use crate::icons;
 use crate::orphans_window::{self, OrphansWindow};
 use crate::settings_view::SettingsView;
 use crate::sidebar::{self, View};
@@ -47,6 +49,7 @@ pub struct SshelfApp {
 
 impl SshelfApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        fonts::install(&cc.egui_ctx);
         theme::apply(&cc.egui_ctx);
         let ctx = cc.egui_ctx.clone();
         // The event loop runs by now, as macOS requires for tray icons.
@@ -182,7 +185,7 @@ impl SshelfApp {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(text).color(p.red));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    dismiss = ui.small_button("✖").clicked();
+                    dismiss = icons::button(ui, icons::X, "Dismiss").clicked();
                 });
             });
         });

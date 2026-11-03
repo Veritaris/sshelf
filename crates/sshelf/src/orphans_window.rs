@@ -196,6 +196,7 @@ mod tests {
     use sshelf_core::tunnels::{Group, Tunnel};
 
     use super::*;
+    use crate::test_util;
 
     fn data() -> AppData {
         let mut hosts = HostsFile::default();
@@ -243,12 +244,14 @@ mod tests {
             open: true,
             ..OrphansWindow::default()
         };
-        Harness::builder().with_size([800.0, 800.0]).build_ui_state(
-            move |ui, (window, commands): &mut (OrphansWindow, Vec<Command>)| {
-                commands.extend(window.show(ui.ctx(), &data, &hosts));
-            },
-            (window, Vec::new()),
-        )
+        test_util::harness()
+            .with_size([800.0, 800.0])
+            .build_ui_state(
+                move |ui, (window, commands): &mut (OrphansWindow, Vec<Command>)| {
+                    commands.extend(window.show(ui.ctx(), &data, &hosts));
+                },
+                (window, Vec::new()),
+            )
     }
 
     #[test]
