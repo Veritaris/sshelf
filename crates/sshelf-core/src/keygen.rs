@@ -197,6 +197,17 @@ pub fn install_args(alias: &str, public_line: &str) -> Result<Vec<String>, Strin
     ])
 }
 
+/// `ssh-add` arguments for a key file; on macOS the passphrase also goes to
+/// the Keychain, so later logins do not ask again (SPEC.md §11).
+pub fn ssh_add_args(path: &Path) -> Vec<String> {
+    let mut args = Vec::new();
+    if cfg!(target_os = "macos") {
+        args.push("--apple-use-keychain".to_string());
+    }
+    args.push(path.display().to_string());
+    args
+}
+
 /// Generates the key and writes both files. Nothing is left behind on
 /// failure.
 pub fn generate(request: &KeyRequest) -> Result<GeneratedKey, String> {

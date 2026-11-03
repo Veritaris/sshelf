@@ -344,6 +344,7 @@ Available when adding/editing a host.
 - Follow-up actions (checkboxes):
   - Add `IdentityFile` + `IdentitiesOnly yes` to the host block.
   - Add to agent (`ssh-add`; on macOS `--apple-use-keychain`).
+    - Without a passphrase, `ssh-add <key>` runs directly (from the ssh binary's directory, §8) and the agent status refreshes. With one, it runs in the user's terminal, so the passphrase is typed into `ssh-add` itself and never passes through sshelf.
   - Install public key on the server: pipe the public key into `ssh <alias> 'mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat >> ~/.ssh/authorized_keys'`. Runs in a terminal (the first login usually needs a password). No dependency on `ssh-copy-id` (absent on Windows).
     - As built: terminals are launched without a shell (§10), so nothing can pipe. The key line travels inside the remote command instead, in single quotes (it never contains quotes: base64 plus a checked comment): `ssh -t -- <alias> "umask 077 && mkdir -p ~/.ssh && touch ~/.ssh/authorized_keys && (grep -qxF '<key>' ~/.ssh/authorized_keys || echo '<key>' >> ~/.ssh/authorized_keys) && echo '…installed. Press Enter to close.' && read -r _"`.
     - It never adds a duplicate line, creates `~/.ssh` and `authorized_keys` private (`umask 077`), has no `;` (Windows Terminal splits its command line there), and waits for Enter so the result stays visible (`-t` gives the password prompt and `read` a terminal). It needs a POSIX shell on the server; Windows servers are not supported.

@@ -22,9 +22,10 @@ use crate::keygen::{self, GeneratedKey, KeyRequest};
 use crate::metadata::{HostMeta, HostsFile};
 use crate::orphans::{self, GroupOrphan, Orphan, TunnelOrphan};
 use crate::paths::Paths;
+use crate::process;
 use crate::rename;
 use crate::settings::Settings;
-use crate::ssh::{AgentStatus, Resolved, SshTools};
+use crate::ssh::{self, AgentStatus, Resolved, SshTools};
 use crate::storage::{LoadStatus, Store, Versioned};
 use crate::supervisor::{self, Owner, Request, Snapshot, Supervisor, SupervisorEvent, TunnelState};
 use crate::terminal::{self, Terminal};
@@ -119,6 +120,12 @@ pub enum Command {
     InstallKey {
         alias: String,
         public_line: String,
+    },
+    /// Load a key into the agent: `ssh-add` directly, or in a terminal when
+    /// the key is `encrypted` (the passphrase is typed into ssh-add itself).
+    AddKeyToAgent {
+        path: PathBuf,
+        encrypted: bool,
     },
     Shutdown,
 }
@@ -594,6 +601,7 @@ impl Worker {
                         Err(e) => self.error(format!("cannot install the key: {e}")),
                     }
                 }
+                Command::AddKeyToAgent { path, encrypted } => self.add_to_agent(&path, encrypted),
                 Command::GenerateKey { id, request } => {
                     // RSA can take seconds: off the core thread.
                     let emitter = self.emitter.clone();
@@ -1265,6 +1273,48 @@ impl Worker {
                 terminal,
                 tray: tray_host::available(),
             })));
+        });
+    }
+
+    fn add_to_agent(&mut self, path: &Path, encrypted: bool) {
+        let args = keygen::ssh_add_args(path);
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if encrypted {
+            match self.run_in_terminal("ssh-add", "ssh-add", &args) {
+                Ok(()) => self.emitter.emit(Event::Notice(format!(
+                    "Opened a terminal for ssh-add: type the passphrase of {name} there"
+                ))),
+                Err(e) => self.error(format!("cannot run ssh-add: {e}")),
+            }
+            return;
+        }
+        let ssh_add = match &self.tools {
+            Ok(tools) => tools.companion("ssh-add"),
+            Err(e) => return self.error(format!("cannot run ssh-add: {e}")),
+        };
+        let emitter = self.emitter.clone();
+        let tx = self.self_tx.clone();
+        thread::spawn(move || {
+            let mut cmd = process::command(&ssh_add);
+            cmd.args(&args);
+            match process::run(cmd, ssh::QUICK_TIMEOUT) {
+                Ok(out) if out.code == Some(0) => {
+                    emitter.emit(Event::Notice(format!("Added {name} to the ssh agent")));
+                    // The agent's key count changed.
+                    let _ = tx.send(Message::Command(Command::RefreshSsh));
+                }
+                Ok(out) => {
+                    let why = out.stderr.lines().map(str::trim).find(|l| !l.is_empty());
+                    emitter.emit(Event::Error(format!(
+                        "ssh-add failed: {}",
+                        why.unwrap_or("no reason given")
+                    )));
+                }
+                Err(e) => emitter.emit(Event::Error(format!("ssh-add failed: {e}"))),
+            }
         });
     }
 

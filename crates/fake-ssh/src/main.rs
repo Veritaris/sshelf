@@ -15,6 +15,8 @@
 //!   each `Bogus …` line of the file is reported as a bad option (exit 255).
 //! - `--record <file>`: append all arguments (one line, `\x1f`-separated) to
 //!   `file`, so tests can see how it was launched.
+//! - `FAKE_SSH_RECORD=<file>`: the same, prefixed with the name it runs
+//!   under. Copied as `ssh-add`, it acts like `ssh-add <key>` succeeding.
 //! - `-N … <alias>`: a tunnel. Binds every `-L`/`-D` port (exits like
 //!   `ExitOnForwardFailure` if one is taken), logs like `ssh -v`, then:
 //!   - `ok*`: stays up after `Entering interactive session.`
@@ -84,6 +86,27 @@ fn main() -> ExitCode {
             .open(path)
             .expect("opening the record file");
         writeln!(file, "{}", args.join("\x1f")).expect("writing the record file");
+    }
+    // Run under another name (copied as `ssh-add`): record name and arguments.
+    let name = env::current_exe()
+        .ok()
+        .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
+        .unwrap_or_default();
+    if let Ok(path) = env::var("FAKE_SSH_RECORD") {
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .expect("opening FAKE_SSH_RECORD");
+        let line: Vec<&str> = std::iter::once(name.as_str())
+            .chain(args.iter().map(String::as_str))
+            .collect();
+        writeln!(file, "{}", line.join("\x1f")).expect("writing FAKE_SSH_RECORD");
+    }
+    if name == "ssh-add" {
+        let key = args.last().map(String::as_str).unwrap_or_default();
+        eprintln!("Identity added: {key} (fake)");
+        return ExitCode::SUCCESS;
     }
 
     if args.iter().any(|a| a == "-V") {
