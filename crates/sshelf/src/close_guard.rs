@@ -47,13 +47,13 @@ pub enum Decision {
 }
 
 /// What a close request does. `tray` is whether minimizing is possible.
+/// A remembered *Minimize to tray* keeps sshelf in the tray whether or not
+/// tunnels run; otherwise closing without running tunnels quits.
 pub fn decide(running: usize, behavior: CloseBehavior, tray: bool) -> Decision {
-    if running == 0 {
-        return Decision::Quit;
-    }
     match behavior {
-        CloseBehavior::StopAndQuit => Decision::Quit,
         CloseBehavior::MinimizeToTray if tray => Decision::Hide,
+        _ if running == 0 => Decision::Quit,
+        CloseBehavior::StopAndQuit => Decision::Quit,
         CloseBehavior::MinimizeToTray | CloseBehavior::Ask => Decision::Ask,
     }
 }
@@ -193,14 +193,18 @@ mod tests {
     fn decisions() {
         use CloseBehavior::{MinimizeToTray, StopAndQuit};
         for tray in [false, true] {
-            for behavior in [CloseBehavior::Ask, StopAndQuit, MinimizeToTray] {
+            for behavior in [CloseBehavior::Ask, StopAndQuit] {
                 assert_eq!(decide(0, behavior, tray), Decision::Quit, "nothing running");
             }
             assert_eq!(decide(2, CloseBehavior::Ask, tray), Decision::Ask);
             assert_eq!(decide(2, StopAndQuit, tray), Decision::Quit);
         }
+        // Minimize to tray hides, tunnels or not.
+        assert_eq!(decide(0, MinimizeToTray, true), Decision::Hide);
         assert_eq!(decide(2, MinimizeToTray, true), Decision::Hide);
-        // Remembered, but no tray (now, or for a Quit from the tray): ask.
+        // Remembered, but no tray (now, or for a Quit from the tray): quit
+        // when nothing runs, else ask.
+        assert_eq!(decide(0, MinimizeToTray, false), Decision::Quit);
         assert_eq!(decide(2, MinimizeToTray, false), Decision::Ask);
     }
 

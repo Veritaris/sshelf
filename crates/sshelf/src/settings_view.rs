@@ -123,11 +123,11 @@ impl SettingsView {
         let p = &Palette::ONE_DARK;
         ui.label(RichText::new("Closing").strong());
         ui.horizontal(|ui| {
-            let label = ui.label("With tunnels running");
+            let label = ui.label("Closing the window");
             let text = |b: CloseBehavior| match b {
-                CloseBehavior::Ask => "Ask every time",
+                CloseBehavior::Ask => "Ask while tunnels run",
                 CloseBehavior::StopAndQuit => "Stop the tunnels and quit",
-                CloseBehavior::MinimizeToTray => "Minimize to tray",
+                CloseBehavior::MinimizeToTray => "Minimize to tray (always)",
             };
             egui::ComboBox::from_id_salt("close_behavior")
                 .selected_text(text(self.close_behavior))
@@ -153,6 +153,14 @@ impl SettingsView {
                 "This desktop shows no tray right now, so closing asks instead.",
             );
         }
+        ui.label(
+            RichText::new(
+                "Without running tunnels, closing quits — unless Minimize to tray is chosen. \
+                 Quit in the tray menu always quits.",
+            )
+            .small()
+            .color(p.dim),
+        );
     }
 
     fn save_buttons(&mut self, ui: &mut egui::Ui, data: &AppData, commands: &mut Vec<Command>) {

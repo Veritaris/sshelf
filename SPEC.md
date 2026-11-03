@@ -301,12 +301,12 @@ Before starting a tunnel, determine the host key state using values from `ssh -G
 
 ### Close behavior
 
-- If no tunnels are running: close immediately.
+- If no tunnels are running: close immediately — unless *Minimize to tray* is the remembered choice and a tray is available (then the window hides, as below).
 - If tunnels are running: modal "N tunnels are running and will be stopped".
   - Buttons: **Minimize to tray** (only when a tray is available — milestone 6) · **Stop N tunnels and quit** · **Cancel**.
   - Checkbox: *Remember my choice*; resettable in Settings. Only a quitting choice can be remembered (*Cancel* is not): once remembered, closing with running tunnels stops them and quits without asking, until reset in Settings (`close_behavior` in `settings.toml`).
-  - *Minimize to tray* can be remembered too (`close_behavior = "minimize-to-tray"`): closing then hides the window and the tunnels keep running. When the desktop has no tray at that moment, closing asks instead (without that button); Settings says so.
-- Cmd+Q on macOS and Quit from the tray go through the same logic. Quit from the tray never minimizes: with a remembered *Minimize to tray* it asks, with the window shown, offering *Stop and quit* and *Cancel*.
+  - *Minimize to tray* can be remembered too (`close_behavior = "minimize-to-tray"`, also selectable in Settings): closing then always hides the window, with or without running tunnels, and the tunnels keep running. When the desktop has no tray at that moment, closing behaves as *Ask* (quit if nothing runs, else the modal without that button); Settings says so.
+- Cmd+Q on macOS and Quit from the tray go through the same logic. Quit from the tray never minimizes: with nothing running it quits; with a remembered *Minimize to tray* and running tunnels it asks, with the window shown, offering *Stop and quit* and *Cancel*.
 - The close decision runs in `App::logic`, so it works while the window is hidden; asking shows the window first.
 - A host key prompt (§9) brings the window back, since a start from the tray may wait for it. Other errors while hidden show in the status bar when the window is shown again.
 
