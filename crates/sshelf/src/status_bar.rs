@@ -93,7 +93,7 @@ pub fn show(ui: &mut Ui, status: &Status, error: &mut Option<String>) {
                     *error = None;
                 }
                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                    ui.add(Label::new(small(text, p.red)).truncate());
+                    ui.add(Label::new(small(text, p.text_strong)).truncate());
                 });
             });
             return;

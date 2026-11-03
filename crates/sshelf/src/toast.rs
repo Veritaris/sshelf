@@ -7,7 +7,8 @@
 
 use std::time::Duration;
 
-use egui::{Align2, Area, Frame, Id, Margin, Order, RichText, Stroke, vec2};
+use egui::text::{LayoutJob, TextFormat};
+use egui::{Align2, Area, FontId, Frame, Id, Margin, Order, Stroke, vec2};
 
 use crate::theme::{Palette, radius, timing};
 use crate::{icons, motion, status_bar};
@@ -28,6 +29,8 @@ const MAX_STEP: f64 = 0.1;
 struct Toast {
     id: u64,
     text: String,
+    /// A value after the text, in mono (an alias, a path).
+    value: Option<String>,
     /// Seconds it has been shown (not counting hovered time).
     age: f64,
     /// `egui` time of the last frame that drew it.
@@ -70,11 +73,35 @@ fn look(age: f64, fade: f32) -> Option<Look> {
     }
 }
 
+/// The toast's text, with its value (if any) in mono after it.
+fn message(text: &str, value: Option<&str>) -> LayoutJob {
+    let p = &Palette::ONE_DARK;
+    let mut job = LayoutJob::default();
+    let format = |font: FontId| TextFormat::simple(font, p.text);
+    job.append(text, 0.0, format(FontId::proportional(13.0)));
+    if let Some(value) = value {
+        job.append(" ", 0.0, format(FontId::proportional(13.0)));
+        job.append(value, 0.0, format(FontId::monospace(13.0)));
+    }
+    job
+}
+
 impl Toasts {
     pub fn push(&mut self, text: impl Into<String>) {
+        self.add(text.into(), None);
+    }
+
+    /// `text` followed by `value` in mono, e.g. "Opened a terminal for"
+    /// and an alias.
+    pub fn push_value(&mut self, text: impl Into<String>, value: impl Into<String>) {
+        self.add(text.into(), Some(value.into()));
+    }
+
+    fn add(&mut self, text: String, value: Option<String>) {
         self.items.push(Toast {
             id: self.next_id,
-            text: text.into(),
+            text,
+            value,
             age: 0.0,
             last: None,
         });
@@ -111,9 +138,9 @@ impl Toasts {
                         .show(ui, |ui| {
                             ui.set_width(WIDTH - 24.0);
                             ui.horizontal(|ui| {
-                                ui.spacing_mut().item_spacing.x = 8.0;
-                                icons::show(ui, icons::CIRCLE_CHECK, icons::INLINE, p.green);
-                                ui.label(RichText::new(&toast.text).size(13.0).color(p.text));
+                                ui.spacing_mut().item_spacing.x = 10.0;
+                                icons::show(ui, icons::CIRCLE_CHECK, 16.0, p.green);
+                                ui.label(message(&toast.text, toast.value.as_deref()));
                             });
                         });
                 });
@@ -189,6 +216,16 @@ mod tests {
             toasts.push(format!("t{i}"));
         }
         assert_eq!(toasts.texts(), ["t2", "t3", "t4"]);
+    }
+
+    #[test]
+    fn a_value_reads_as_part_of_the_message() {
+        let mut toasts = Toasts::default();
+        toasts.push_value("Opened a terminal for", "vps-north");
+        let mut harness = test_util::harness()
+            .build_ui_state(|ui, toasts: &mut Toasts| toasts.show(ui.ctx()), toasts);
+        harness.step();
+        harness.get_by_label("Opened a terminal for vps-north");
     }
 
     #[test]

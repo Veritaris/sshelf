@@ -136,7 +136,7 @@ impl SshelfApp {
                 } => self.hosts.detail.on_resolved(alias, generation, result),
                 Event::Ssh(info) => self.ssh = Some(info),
                 Event::Launched { alias } => {
-                    self.toasts.push(format!("Opened a terminal for {alias}"));
+                    self.toasts.push_value("Opened a terminal for", alias);
                 }
                 Event::Notice(text) => self.toasts.push(text),
                 Event::Health(health) => self.hosts.on_health(health),
