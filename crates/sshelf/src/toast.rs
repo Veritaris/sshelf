@@ -1,105 +1,144 @@
 //! Toasts: short success messages ("Settings saved") in the bottom-right
-//! corner that fade out on their own. Errors stay in the status bar until
-//! dismissed. A toast's time starts when it is first drawn, so one raised
-//! while the window is hidden is still seen. Expiry is one scheduled repaint,
-//! not a polling timer.
+//! corner, above the status bar (SPEC.md §10 *Interaction and motion*). Each
+//! fades in with a 6 px rise, stays 3 s, then fades out; hovering one pauses
+//! it. Errors stay in the status bar until dismissed. A toast's clock only
+//! runs while it is drawn, so one raised while the window is hidden is still
+//! seen. Waiting is one scheduled repaint, not a polling timer.
 
 use std::time::Duration;
 
-use egui::RichText;
+use egui::{Align2, Area, Frame, Id, Margin, Order, RichText, Stroke, vec2};
 
-use crate::icons;
-use crate::theme::Palette;
+use crate::theme::{Palette, radius, timing};
+use crate::{icons, motion, status_bar};
 
-/// How long a toast stays fully visible, then how long it fades.
-const SHOW_SECS: f64 = 3.0;
-const FADE_SECS: f64 = 0.5;
 /// Older toasts give way beyond this many.
 const MAX: usize = 3;
+/// Distance from the window's right edge and from the status bar.
+const MARGIN: f32 = 20.0;
+const WIDTH: f32 = 340.0;
+/// Space between stacked toasts.
+const GAP: f32 = 8.0;
+/// How far a toast rises while it fades in.
+const RISE: f32 = 6.0;
+/// The longest step a toast's clock takes in one frame, so frames missed
+/// while the window was hidden don't make it vanish at once.
+const MAX_STEP: f64 = 0.1;
 
 struct Toast {
+    id: u64,
     text: String,
-    /// `egui` time when first drawn.
-    since: Option<f64>,
+    /// Seconds it has been shown (not counting hovered time).
+    age: f64,
+    /// `egui` time of the last frame that drew it.
+    last: Option<f64>,
 }
 
 #[derive(Default)]
 pub struct Toasts {
     items: Vec<Toast>,
+    next_id: u64,
+}
+
+/// Where a toast is in its life: opacity and how far below its place it is.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Look {
+    opacity: f32,
+    offset: f32,
+}
+
+/// The look of a toast `age` seconds old with fades of `fade` seconds;
+/// `None` once it is gone.
+fn look(age: f64, fade: f32) -> Option<Look> {
+    let (fade, hold) = (f64::from(fade), f64::from(timing::TOAST_HOLD));
+    let shown = |opacity: f32| Look {
+        opacity,
+        offset: RISE * (1.0 - opacity),
+    };
+    if age < fade {
+        Some(shown(motion::ease_out((age / fade) as f32)))
+    } else if age < fade + hold {
+        Some(shown(1.0))
+    } else if age < fade + hold + fade {
+        let t = ((age - fade - hold) / fade) as f32;
+        Some(Look {
+            opacity: 1.0 - motion::ease_out(t),
+            offset: 0.0,
+        })
+    } else {
+        None
+    }
 }
 
 impl Toasts {
     pub fn push(&mut self, text: impl Into<String>) {
         self.items.push(Toast {
+            id: self.next_id,
             text: text.into(),
-            since: None,
+            age: 0.0,
+            last: None,
         });
+        self.next_id += 1;
         if self.items.len() > MAX {
             self.items.remove(0);
-        }
-    }
-
-    /// Opacity of a toast shown for `age` seconds; `None` once it is gone.
-    fn opacity(age: f64) -> Option<f32> {
-        if age < SHOW_SECS {
-            Some(1.0)
-        } else if age < SHOW_SECS + FADE_SECS {
-            Some((1.0 - (age - SHOW_SECS) / FADE_SECS) as f32)
-        } else {
-            None
         }
     }
 
     /// Call once per frame from `App::ui`.
     pub fn show(&mut self, ctx: &egui::Context) {
         let now = ctx.input(|i| i.time);
-        for toast in &mut self.items {
-            toast.since.get_or_insert(now);
-        }
-        self.items
-            .retain(|t| Self::opacity(now - t.since.unwrap_or(now)).is_some());
-        if self.items.is_empty() {
-            return;
-        }
+        let fade = motion::duration(ctx, timing::TOAST_FADE);
+        let hold_end = f64::from(fade) + f64::from(timing::TOAST_HOLD);
         let p = &Palette::ONE_DARK;
-        egui::Area::new(egui::Id::unique("toasts"))
-            .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-16.0, -40.0))
-            .order(egui::Order::Foreground)
-            .interactable(false)
-            .show(ctx, |ui| {
-                for toast in &self.items {
-                    let age = now - toast.since.unwrap_or(now);
-                    ui.scope(|ui| {
-                        ui.set_opacity(Self::opacity(age).unwrap_or(0.0));
-                        egui::Frame::new()
-                            .fill(p.bg_dark)
-                            .stroke(egui::Stroke::new(1.0, p.green))
-                            .corner_radius(6.0)
-                            .inner_margin(egui::Margin::symmetric(12, 8))
-                            .show(ui, |ui| {
-                                ui.horizontal(|ui| {
-                                    icons::show(ui, icons::CIRCLE_CHECK, icons::INLINE, p.green);
-                                    ui.label(RichText::new(&toast.text).color(p.text));
-                                });
+        // Newest at the bottom, stacked upwards.
+        let mut bottom = status_bar::HEIGHT + MARGIN;
+        let mut next_wake = f64::INFINITY;
+        for toast in self.items.iter_mut().rev() {
+            let Some(look) = look(toast.age, fade) else {
+                continue;
+            };
+            let area = Area::new(Id::unique(("toast", toast.id)))
+                .order(Order::Foreground)
+                .anchor(Align2::RIGHT_BOTTOM, vec2(-MARGIN, -(bottom - look.offset)))
+                .fade_in(false)
+                .show(ctx, |ui| {
+                    ui.multiply_opacity(look.opacity);
+                    Frame::new()
+                        .fill(p.bg_dark)
+                        .stroke(Stroke::new(1.0, p.selection))
+                        .corner_radius(radius::CONTROL)
+                        .inner_margin(Margin::symmetric(12, 10))
+                        .show(ui, |ui| {
+                            ui.set_width(WIDTH - 24.0);
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 8.0;
+                                icons::show(ui, icons::CIRCLE_CHECK, icons::INLINE, p.green);
+                                ui.label(RichText::new(&toast.text).size(13.0).color(p.text));
                             });
-                    });
-                    ui.add_space(6.0);
-                }
-            });
-        // Wake up for the next fade step or expiry.
-        let next = self
-            .items
-            .iter()
-            .map(|t| {
-                let age = now - t.since.unwrap_or(now);
-                if age < SHOW_SECS {
-                    SHOW_SECS - age
+                        });
+                });
+            bottom += area.response.rect.height() + GAP;
+            // The clock stops while hovered; hovering a fading toast brings
+            // it back.
+            let step = toast
+                .last
+                .map_or(0.0, |last| (now - last).clamp(0.0, MAX_STEP));
+            toast.last = Some(now);
+            if area.response.contains_pointer() {
+                toast.age = toast.age.min(hold_end);
+            } else {
+                toast.age += step;
+                next_wake = next_wake.min(if (f64::from(fade)..hold_end).contains(&toast.age) {
+                    hold_end - toast.age
                 } else {
-                    1.0 / 30.0
-                }
-            })
-            .fold(f64::INFINITY, f64::min);
-        ctx.request_repaint_after(Duration::from_secs_f64(next.max(0.0)));
+                    0.0
+                });
+            }
+        }
+        self.items.retain(|t| look(t.age, fade).is_some());
+        if next_wake.is_finite() {
+            ctx.request_repaint_after(Duration::from_secs_f64(next_wake));
+        }
     }
 
     #[cfg(test)]
@@ -116,12 +155,31 @@ mod tests {
     use crate::test_util;
 
     #[test]
-    fn opacity_holds_then_fades_then_ends() {
-        assert_eq!(Toasts::opacity(0.0), Some(1.0));
-        assert_eq!(Toasts::opacity(SHOW_SECS - 0.01), Some(1.0));
-        let half = Toasts::opacity(SHOW_SECS + FADE_SECS / 2.0).unwrap();
-        assert!((half - 0.5).abs() < 0.01, "{half}");
-        assert_eq!(Toasts::opacity(SHOW_SECS + FADE_SECS), None);
+    fn toasts_rise_in_hold_then_fade_out() {
+        let fade = timing::TOAST_FADE;
+        let start = look(0.0, fade).unwrap();
+        assert_eq!(start.opacity, 0.0);
+        assert_eq!(start.offset, RISE);
+        let rising = look(0.06, fade).unwrap();
+        assert!(
+            rising.opacity > 0.5 && rising.offset < RISE / 2.0,
+            "{rising:?}"
+        );
+        let held = f64::from(fade) + 1.0;
+        assert_eq!(
+            look(held, fade),
+            Some(Look {
+                opacity: 1.0,
+                offset: 0.0
+            })
+        );
+        let end = f64::from(fade) * 2.0 + f64::from(timing::TOAST_HOLD);
+        let fading = look(end - 0.01, fade).unwrap();
+        assert!(fading.opacity < 0.2, "{fading:?}");
+        assert_eq!(look(end, fade), None);
+        // Reduce motion: no fades, just the hold.
+        assert_eq!(look(0.0, 0.0).unwrap().opacity, 1.0);
+        assert_eq!(look(f64::from(timing::TOAST_HOLD), 0.0), None);
     }
 
     #[test]
@@ -141,7 +199,7 @@ mod tests {
             .build_ui_state(|ui, toasts: &mut Toasts| toasts.show(ui.ctx()), toasts);
         harness.step();
         harness.get_by_label("Settings saved");
-        harness.state_mut().items[0].since = Some(-100.0);
+        harness.state_mut().items[0].age = 100.0;
         harness.step();
         assert!(harness.query_by_label("Settings saved").is_none());
         assert!(harness.state().items.is_empty());

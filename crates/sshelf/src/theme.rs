@@ -78,6 +78,10 @@ pub mod timing {
     pub const TOOLTIP_FADE: f32 = 0.120;
     /// The next tooltip within this long after one closes shows at once.
     pub const TOOLTIP_GRACE: f32 = 0.300;
+    /// Toast fade (with a 6 px rise) in, and fade out.
+    pub const TOAST_FADE: f32 = 0.120;
+    /// How long a toast stays before it fades out (paused while hovered).
+    pub const TOAST_HOLD: f32 = 3.0;
 }
 
 /// Forces the dark theme and installs the One Dark visuals on `ctx`.

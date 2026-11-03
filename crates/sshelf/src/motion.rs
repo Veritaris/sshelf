@@ -98,6 +98,11 @@ pub fn set_reduce_motion(ctx: &Context, on: bool) {
     ctx.data_mut(|d| d.insert_temp(reduce_motion_id(), on));
 }
 
+/// `seconds`, or 0 with *Reduce motion*: for animations timed by hand.
+pub fn duration(ctx: &Context, seconds: f32) -> f32 {
+    if reduce_motion(ctx) { 0.0 } else { seconds }
+}
+
 fn reduce_motion(ctx: &Context) -> bool {
     ctx.data(|d| d.get_temp(reduce_motion_id()).unwrap_or(false))
 }
