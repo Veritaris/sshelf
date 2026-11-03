@@ -206,6 +206,9 @@ pub struct Group {
     pub name: String,
     /// Tunnel ids.
     pub tunnels: Vec<String>,
+    /// Started when sshelf starts (SPEC.md §7).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub start_on_launch: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -448,6 +451,7 @@ mod tests {
             id: "g-1".into(),
             name: "Work".into(),
             tunnels: vec!["t-1".into(), "t-2".into()],
+            start_on_launch: false,
         });
         assert_eq!(file.groups_using("t-1").len(), 1);
         assert!(file.remove_tunnel("t-1"));
@@ -483,6 +487,7 @@ mod tests {
             id: "g-1".into(),
             name: "Work on prod".into(),
             tunnels: vec!["t-1".into()],
+            start_on_launch: true,
         });
         store.save(&file).unwrap();
         let text = std::fs::read_to_string(store.path::<TunnelsFile>()).unwrap();

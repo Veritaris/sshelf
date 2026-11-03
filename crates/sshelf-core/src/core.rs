@@ -513,6 +513,19 @@ impl Worker {
             },
         ));
         self.reload();
+        // Groups marked "Start on app launch" (SPEC.md §7), through the
+        // normal start: host keys are checked and may ask first.
+        let launch: Vec<String> = self
+            .data
+            .tunnels
+            .groups
+            .iter()
+            .filter(|g| g.start_on_launch)
+            .map(|g| g.id.clone())
+            .collect();
+        for id in launch {
+            self.start(StartRequest::Group(id));
+        }
 
         while let Ok(message) = messages.recv() {
             let command = match message {

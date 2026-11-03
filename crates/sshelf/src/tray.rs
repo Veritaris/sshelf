@@ -416,6 +416,7 @@ mod tests {
             id: "g-1".into(),
             name: "Work".into(),
             tunnels: vec!["t-b".into(), "t-c".into()],
+            start_on_launch: false,
         });
         data
     }

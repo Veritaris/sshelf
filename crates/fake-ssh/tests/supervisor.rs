@@ -103,6 +103,7 @@ fn group(id: &str, tunnels: &[&Tunnel]) -> Group {
         id: id.into(),
         name: format!("group {id}"),
         tunnels: tunnels.iter().map(|t| t.id.clone()).collect(),
+        start_on_launch: false,
     }
 }
 

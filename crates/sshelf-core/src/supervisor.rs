@@ -842,6 +842,7 @@ mod tests {
             id: "g".into(),
             name: "G".into(),
             tunnels: vec!["a".into(), "b".into()],
+            start_on_launch: false,
         };
         let snapshot = |a: TunnelStatus, b: TunnelStatus| Snapshot {
             tunnels: [("a".into(), a), ("b".into(), b)].into(),

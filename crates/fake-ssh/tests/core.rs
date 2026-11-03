@@ -269,6 +269,7 @@ fn tunnels_and_groups_through_the_core() {
         id: "g-1".into(),
         name: "Work".into(),
         tunnels: vec!["t-1".into()],
+        start_on_launch: false,
     }));
     wait_for(&events, "the saved group", |e| match e {
         Event::Data(d) if d.tunnels.group("g-1").is_some() => Some(()),
@@ -494,6 +495,68 @@ fn changed_host_key_is_reviewed_and_replaced() {
         2,
         "sshelf's backup and ssh-keygen's .old: {backups:?}"
     );
+    drop(core);
+}
+
+#[test]
+fn groups_marked_for_launch_start_with_sshelf() {
+    let tmp = tempfile::tempdir().unwrap();
+    let paths = Paths::new(&tmp.path().join("home"), tmp.path().join("app"));
+    fs::create_dir_all(&paths.ssh_dir).unwrap();
+    fs::write(&paths.ssh_config, "Host ok-a\nHost ok-b\n").unwrap();
+    fs::write(
+        paths.ssh_dir.join("known_hosts"),
+        format!("ok-a.example.com {NEW}\nok-b.example.com {NEW}\n"),
+    )
+    .unwrap();
+    let store = Store::new(&paths.app_dir);
+    store
+        .save(&Settings {
+            ssh_path: Some(fake_ssh()),
+            ..Settings::default()
+        })
+        .unwrap();
+    let mut file = sshelf_core::tunnels::TunnelsFile::default();
+    for (id, host) in [("t-a", "ok-a"), ("t-b", "ok-b")] {
+        file.upsert_tunnel(Tunnel {
+            id: id.into(),
+            name: id.into(),
+            host: host.into(),
+            forwards: vec![Forward {
+                kind: ForwardKind::L,
+                bind: DEFAULT_BIND.into(),
+                listen: std::net::TcpListener::bind(("127.0.0.1", 0))
+                    .unwrap()
+                    .local_addr()
+                    .unwrap()
+                    .port(),
+                target: Some("localhost:80".into()),
+            }],
+            auto_reconnect: false,
+        });
+    }
+    file.upsert_group(Group {
+        id: "g-launch".into(),
+        name: "At launch".into(),
+        tunnels: vec!["t-a".into()],
+        start_on_launch: true,
+    });
+    file.upsert_group(Group {
+        id: "g-manual".into(),
+        name: "By hand".into(),
+        tunnels: vec!["t-b".into()],
+        start_on_launch: false,
+    });
+    store.save(&file).unwrap();
+
+    let (core, events) = Core::start(paths, Arc::new(|| {}));
+    let states = tunnel_state(&events, "t-a", TunnelState::Running);
+    assert!(
+        states.tunnels["t-a"]
+            .owners
+            .contains(&sshelf_core::supervisor::Owner::Group("g-launch".into()))
+    );
+    assert_eq!(states.state("t-b"), TunnelState::Stopped);
     drop(core);
 }
 

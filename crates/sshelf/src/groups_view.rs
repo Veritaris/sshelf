@@ -57,6 +57,7 @@ impl GroupsView {
                         id: data.tunnels.new_group_id(),
                         name: String::new(),
                         tunnels: Vec::new(),
+                        start_on_launch: false,
                     });
                 }
                 ui.separator();
@@ -106,6 +107,9 @@ impl GroupsView {
                 });
             }
             ui.label(RichText::new(label).color(color));
+            if group.start_on_launch {
+                ui.label(RichText::new("starts with sshelf").small().color(p.dim));
+            }
             if matches!(state, GroupState::Degraded { .. })
                 && ui.small_button("↻ Retry failed").clicked()
             {
@@ -220,6 +224,10 @@ impl GroupsView {
             )
             .labelled_by(label.id);
         });
+        ui.checkbox(&mut draft.start_on_launch, "Start when sshelf starts")
+            .on_hover_text(
+                "Host keys are still checked first; an unknown key asks before starting",
+            );
         ui.label(RichText::new("Tunnels").strong());
         if data.tunnels.tunnels.is_empty() {
             ui.label(RichText::new("Create tunnels first.").color(p.dim));
@@ -293,11 +301,13 @@ mod tests {
             id: "g-1".into(),
             name: "Work".into(),
             tunnels: vec!["t-a".into(), "t-b".into()],
+            start_on_launch: false,
         });
         data.tunnels.upsert_group(Group {
             id: "g-2".into(),
             name: "Other".into(),
             tunnels: vec!["t-b".into()],
+            start_on_launch: false,
         });
         Arc::new(data)
     }
@@ -390,6 +400,8 @@ mod tests {
         harness.state_mut().0.editor.as_mut().unwrap().name = "New".into();
         harness.get_by_label("DB (h)").click();
         harness.step();
+        harness.get_by_label("Start when sshelf starts").click();
+        harness.step();
         harness.step();
         harness.get_by_label("Save").click();
         harness.step();
@@ -400,5 +412,6 @@ mod tests {
         assert_eq!(group.name, "New");
         assert_eq!(group.tunnels, ["t-b"]);
         assert!(group.id.starts_with("g-"));
+        assert!(group.start_on_launch);
     }
 }

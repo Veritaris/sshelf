@@ -406,6 +406,7 @@ Each milestone ends with its acceptance criteria met, tests green on all three O
   - As built: per tunnel, `auto_reconnect = true` in `tunnels.toml` (missing means off; the file stays version 1), set in the tunnel editor. When such a tunnel exits on its own while it still has owners and the failure is not authentication or a host key (those need the user, §8–§9), the supervisor restarts it after 2 s, then 4, 8, 16, 32, 60 s; a run that lasted 60 s starts the waits over. The port pre-check runs before each restart; a taken port waits for the next attempt.
   - While waiting the tunnel stays *Failed* (groups count it as down) with "Reconnecting in N s (attempt k)" in the tunnel, group and tray views and the log. A manual start, Stop, or the last owner leaving cancels the wait. The supervisor sleeps until the next restart with a channel timeout, not a poll.
 - "Start on app launch" per group.
+  - As built: `start_on_launch = true` on a group in `tunnels.toml` (missing means off), set in the group editor ("Start when sshelf starts"; the list says "starts with sshelf"). After the first config load, core starts those groups once, through the normal start: host keys are checked first, and an unknown key brings the window up to ask (§9). A config or ssh problem is reported instead.
 - `ProxyJump` chain visualization (breadcrumb first, graph later).
 - Optional hardware-key generation via terminal `ssh-keygen`.
 
