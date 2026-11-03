@@ -24,12 +24,15 @@ pub struct SettingsView {
 }
 
 impl SettingsView {
+    /// The edited fields over the saved settings (fields this view doesn't
+    /// edit keep their saved values).
     fn draft(&self) -> Settings {
         let path = self.ssh_path.trim();
         Settings {
             ssh_path: (!path.is_empty()).then(|| PathBuf::from(path)),
             terminal_command: self.terminal_command.clone(),
             close_behavior: self.close_behavior,
+            ..self.base.clone().unwrap_or_default()
         }
     }
 
@@ -336,6 +339,7 @@ mod tests {
     use super::*;
     use egui_kittest::Harness;
     use egui_kittest::kittest::{NodeT, Queryable};
+    use sshelf_core::settings::{HostListStyle, TrayMenu};
 
     fn data() -> AppData {
         AppData::new(PathBuf::from("app"))
@@ -359,6 +363,32 @@ mod tests {
         let expected = Settings {
             ssh_path: Some(PathBuf::from("/opt/ssh")),
             ..Settings::default()
+        };
+        assert_eq!(harness.state().1, [Command::SaveSettings(expected)]);
+    }
+
+    #[test]
+    fn saving_keeps_the_settings_this_view_does_not_edit() {
+        let mut data = data();
+        data.settings.host_list_style = HostListStyle::Cards;
+        data.settings.reduce_motion = true;
+        data.settings.tray_menu = TrayMenu::System;
+        let saved = data.settings.clone();
+        let mut harness = Harness::builder().with_size([900.0, 700.0]).build_ui_state(
+            move |ui, (view, commands): &mut (SettingsView, Vec<Command>)| {
+                commands.extend(view.show(ui, Some(&data), None, None));
+            },
+            (SettingsView::default(), Vec::new()),
+        );
+        harness.step();
+        harness.state_mut().0.terminal_command = "{ssh} {alias}".into();
+        harness.step();
+        harness.get_by_label("Save").click();
+        harness.step();
+        harness.step();
+        let expected = Settings {
+            terminal_command: "{ssh} {alias}".into(),
+            ..saved
         };
         assert_eq!(harness.state().1, [Command::SaveSettings(expected)]);
     }

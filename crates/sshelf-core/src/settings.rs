@@ -1,4 +1,5 @@
-//! `settings.toml`: ssh binary override and terminal command template.
+//! `settings.toml`: ssh binary override, terminal command template, close
+//! behavior, appearance (host list style, reduced motion) and the tray menu.
 
 use std::path::PathBuf;
 
@@ -19,6 +20,14 @@ pub struct Settings {
     pub terminal_command: String,
     /// What closing the window does while tunnels run (SPEC.md §10).
     pub close_behavior: CloseBehavior,
+    /// Hosts as a list or as cards (SPEC.md §10 *Visual design*).
+    pub host_list_style: HostListStyle,
+    /// How the cards view groups hosts.
+    pub cards_group_by: CardsGroupBy,
+    /// Every animation takes no time; the pulse of busy marks is static.
+    pub reduce_motion: bool,
+    /// What a right click on the tray icon opens (SPEC.md §10 *Tray*).
+    pub tray_menu: TrayMenu,
 }
 
 /// What closing the window does while tunnels run.
@@ -35,12 +44,45 @@ pub enum CloseBehavior {
     MinimizeToTray,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum HostListStyle {
+    #[default]
+    List,
+    Cards,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CardsGroupBy {
+    #[default]
+    Tag,
+    /// The config file that defines the host.
+    File,
+    None,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TrayMenu {
+    /// sshelf's own menu, docked to the icon; the system menu when the icon's
+    /// position is unknown.
+    #[default]
+    Sshelf,
+    /// Always the native menu of the `tray-icon` crate.
+    System,
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
             ssh_path: None,
             terminal_command: DEFAULT_TERMINAL_COMMAND.to_string(),
             close_behavior: CloseBehavior::Ask,
+            host_list_style: HostListStyle::List,
+            cards_group_by: CardsGroupBy::Tag,
+            reduce_motion: false,
+            tray_menu: TrayMenu::Sshelf,
         }
     }
 }
@@ -63,13 +105,22 @@ mod tests {
             ssh_path: Some(PathBuf::from("/opt/ssh/bin/ssh")),
             terminal_command: "alacritty -e {ssh} {alias}".into(),
             close_behavior: CloseBehavior::StopAndQuit,
+            host_list_style: HostListStyle::Cards,
+            cards_group_by: CardsGroupBy::None,
+            reduce_motion: true,
+            tray_menu: TrayMenu::System,
         };
         store.save(&settings).unwrap();
         let text = std::fs::read_to_string(store.path::<Settings>()).unwrap();
-        assert!(
-            text.contains("close_behavior = \"stop-and-quit\""),
-            "{text}"
-        );
+        for line in [
+            "close_behavior = \"stop-and-quit\"",
+            "host_list_style = \"cards\"",
+            "cards_group_by = \"none\"",
+            "reduce_motion = true",
+            "tray_menu = \"system\"",
+        ] {
+            assert!(text.contains(line), "{line}: {text}");
+        }
         assert_eq!(store.load::<Settings>().data, settings);
 
         std::fs::write(store.path::<Settings>(), "version = 1\n").unwrap();
@@ -86,5 +137,25 @@ mod tests {
             store.load::<Settings>().data.close_behavior,
             CloseBehavior::MinimizeToTray
         );
+    }
+
+    /// A file written before M9 has none of the appearance or tray keys: it
+    /// still loads as version 1, with the defaults the spec names.
+    #[test]
+    fn files_without_the_m9_keys_load_with_defaults() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut store = Store::new(tmp.path());
+        std::fs::write(
+            store.path::<Settings>(),
+            "version = 1\nterminal_command = \"{ssh} {alias}\"\nclose_behavior = \"ask\"\n",
+        )
+        .unwrap();
+        let loaded = store.load::<Settings>();
+        assert_eq!(loaded.status, LoadStatus::Loaded);
+        assert_eq!(loaded.data.terminal_command, "{ssh} {alias}");
+        assert_eq!(loaded.data.host_list_style, HostListStyle::List);
+        assert_eq!(loaded.data.cards_group_by, CardsGroupBy::Tag);
+        assert!(!loaded.data.reduce_motion);
+        assert_eq!(loaded.data.tray_menu, TrayMenu::Sshelf);
     }
 }
