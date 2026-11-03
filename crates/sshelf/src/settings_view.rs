@@ -78,7 +78,7 @@ impl SettingsView {
                 ui.separator();
                 self.terminal_section(ui, ssh);
                 ui.separator();
-                self.close_section(ui);
+                self.close_section(ui, ssh);
                 ui.separator();
                 self.save_buttons(ui, data, &mut commands);
                 ui.separator();
@@ -119,18 +119,24 @@ impl SettingsView {
         ui.label(RichText::new(format!("Detected terminal: {terminal}")).color(p.dim));
     }
 
-    fn close_section(&mut self, ui: &mut egui::Ui) {
+    fn close_section(&mut self, ui: &mut egui::Ui, ssh: Option<&SshInfo>) {
+        let p = &Palette::ONE_DARK;
         ui.label(RichText::new("Closing").strong());
         ui.horizontal(|ui| {
             let label = ui.label("With tunnels running");
             let text = |b: CloseBehavior| match b {
                 CloseBehavior::Ask => "Ask every time",
                 CloseBehavior::StopAndQuit => "Stop the tunnels and quit",
+                CloseBehavior::MinimizeToTray => "Minimize to tray",
             };
             egui::ComboBox::from_id_salt("close_behavior")
                 .selected_text(text(self.close_behavior))
                 .show_ui(ui, |ui| {
-                    for behavior in [CloseBehavior::Ask, CloseBehavior::StopAndQuit] {
+                    for behavior in [
+                        CloseBehavior::Ask,
+                        CloseBehavior::StopAndQuit,
+                        CloseBehavior::MinimizeToTray,
+                    ] {
                         ui.selectable_value(&mut self.close_behavior, behavior, text(behavior));
                     }
                 })
@@ -140,6 +146,13 @@ impl SettingsView {
                 self.close_behavior = CloseBehavior::Ask;
             }
         });
+        let tray = ssh.is_some_and(|s| s.tray == Ok(true));
+        if self.close_behavior == CloseBehavior::MinimizeToTray && !tray {
+            ui.colored_label(
+                p.yellow,
+                "This desktop shows no tray right now, so closing asks instead.",
+            );
+        }
     }
 
     fn save_buttons(&mut self, ui: &mut egui::Ui, data: &AppData, commands: &mut Vec<Command>) {

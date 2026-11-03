@@ -30,6 +30,9 @@ pub enum CloseBehavior {
     Ask,
     /// Remembered choice: stop the tunnels and quit without asking.
     StopAndQuit,
+    /// Remembered choice: hide the window, tunnels keep running in the tray.
+    /// Asks instead when the desktop has no tray.
+    MinimizeToTray,
 }
 
 impl Default for Settings {
@@ -73,5 +76,15 @@ mod tests {
         let loaded = store.load::<Settings>();
         assert_eq!(loaded.status, LoadStatus::Loaded);
         assert_eq!(loaded.data, Settings::default());
+
+        std::fs::write(
+            store.path::<Settings>(),
+            "version = 1\nclose_behavior = \"minimize-to-tray\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            store.load::<Settings>().data.close_behavior,
+            CloseBehavior::MinimizeToTray
+        );
     }
 }

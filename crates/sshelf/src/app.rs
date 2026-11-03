@@ -4,7 +4,7 @@
 use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 
-use egui::{RichText, ViewportCommand};
+use egui::RichText;
 use sshelf_core::core::{AppData, Command, ConfigSnapshot, Core, Event, SshInfo};
 use sshelf_core::paths::Paths;
 use sshelf_core::supervisor::Snapshot;
@@ -92,13 +92,9 @@ impl SshelfApp {
         for action in tray.actions() {
             match action.command() {
                 Some(command) => self.send(vec![command]),
-                None if action == TrayAction::Show => {
-                    ctx.send_viewport_cmd(ViewportCommand::Visible(true));
-                    ctx.send_viewport_cmd(ViewportCommand::Minimized(false));
-                    ctx.send_viewport_cmd(ViewportCommand::Focus);
-                }
+                None if action == TrayAction::Show => close_guard::show(ctx),
                 // The same close request as the window's (SPEC.md §10).
-                None => ctx.send_viewport_cmd(ViewportCommand::Close),
+                None => self.close.quit_from_tray(ctx),
             }
         }
         let Some(tray) = &mut self.tray else {
@@ -111,7 +107,7 @@ impl SshelfApp {
         ));
     }
 
-    fn apply_events(&mut self) {
+    fn apply_events(&mut self, ctx: &egui::Context) {
         let Some((_, events)) = &self.core else {
             return;
         };
@@ -133,8 +129,15 @@ impl SshelfApp {
                 }
                 Event::Error(message) => self.status = Some(Status::Error(message)),
                 Event::Tunnels(states) => self.tunnel_states = Some(states),
-                Event::HostKeyPrompt(prompt) => self.hostkeys.on_unknown(prompt),
-                Event::HostKeyChanged(prompt) => self.hostkeys.on_changed(prompt),
+                // A start from the tray may need an answer: show the window.
+                Event::HostKeyPrompt(prompt) => {
+                    self.hostkeys.on_unknown(prompt);
+                    close_guard::show(ctx);
+                }
+                Event::HostKeyChanged(prompt) => {
+                    self.hostkeys.on_changed(prompt);
+                    close_guard::show(ctx);
+                }
                 Event::HostKeyClosed(id) => self.hostkeys.on_closed(id),
                 Event::EditChecked { id, result } => self.hosts.editor.on_checked(id, result),
                 Event::EditSaved { id } => self.hosts.editor.on_saved(id),
@@ -186,8 +189,16 @@ impl eframe::App for SshelfApp {
     /// Runs every frame, and also while the window is hidden: core events and
     /// the tray are handled here, the drawing in [`Self::ui`].
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.apply_events();
+        self.apply_events(ctx);
         self.run_tray(ctx);
+        // A tray exists only if one was created and the desktop shows it.
+        let tray = self.tray.is_some() && self.ssh.as_ref().is_some_and(|s| s.tray == Ok(true));
+        self.close.on_close_request(
+            ctx,
+            close_guard::running_count(self.tunnel_states.as_deref()),
+            self.data.as_deref().map(|d| &d.settings),
+            tray,
+        );
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -259,7 +270,7 @@ impl eframe::App for SshelfApp {
             commands.extend(self.orphans.show(ui.ctx(), data, &hosts));
         }
         commands.extend(self.hostkeys.show(ui.ctx()));
-        commands.extend(self.close.update(
+        commands.extend(self.close.modal(
             ui.ctx(),
             close_guard::running_count(self.tunnel_states.as_deref()),
             self.data.as_deref().map(|d| &d.settings),
