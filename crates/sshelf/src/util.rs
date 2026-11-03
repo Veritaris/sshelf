@@ -3,6 +3,9 @@
 use std::time::{Duration, SystemTime};
 
 use sshconf::{ConfigSet, LineRef};
+use sshelf_core::health::{Health, HealthSnapshot};
+
+use crate::theme::Palette;
 
 /// `"3 h ago"`-style age of `time`.
 pub fn ago(time: SystemTime) -> String {
@@ -28,6 +31,33 @@ pub fn location(set: &ConfigSet, at: LineRef) -> (String, String) {
         .unwrap_or_else(|| file.path.display().to_string());
     let line = set.line(at).number;
     (format!("{name}:{line}"), set.location(at))
+}
+
+/// A painted health mark (SPEC.md §12, M8): a yellow ring while checking,
+/// then green (auth OK), yellow (reachable, but key or host key trouble) or
+/// red (unreachable). Nothing before the first check; hover tells more.
+pub fn health_mark(ui: &mut egui::Ui, health: Option<&HealthSnapshot>, alias: &str) {
+    let p = &Palette::ONE_DARK;
+    let checking = health.is_some_and(|h| h.checking.contains(alias));
+    let report = health.and_then(|h| h.reports.get(alias));
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+    let center = rect.center();
+    let text = if checking {
+        ui.painter()
+            .circle_stroke(center, 4.0, egui::Stroke::new(1.5, p.yellow));
+        "Checking…".to_string()
+    } else if let Some(report) = report {
+        let color = match report.health {
+            Health::Ok { .. } => p.green,
+            Health::AuthFailed | Health::HostKeyUnknown | Health::HostKeyChanged => p.yellow,
+            Health::Unreachable(_) => p.red,
+        };
+        ui.painter().circle_filled(center, 4.0, color);
+        format!("{} ({})", report.health.describe(), ago(report.checked_at))
+    } else {
+        return;
+    };
+    response.on_hover_text(text);
 }
 
 #[cfg(test)]

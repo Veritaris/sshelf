@@ -129,6 +129,7 @@ impl SshelfApp {
                     self.toasts.push(format!("Opened a terminal for {alias}"));
                 }
                 Event::Notice(text) => self.toasts.push(text),
+                Event::Health(health) => self.hosts.on_health(health),
                 Event::KeyGenerated { id, result } => {
                     self.hosts.editor.on_key_generated(id, result);
                 }

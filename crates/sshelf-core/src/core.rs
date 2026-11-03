@@ -4,7 +4,7 @@
 //! edits, through [`ConfigWriter`]. Tunnels run in the [`Supervisor`], whose
 //! events are relayed as [`Event::Tunnels`].
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -16,6 +16,7 @@ use sshconf::{ConfigSet, HostList, WatchDir};
 
 use crate::agent_service::{self, AgentService};
 use crate::config_edit::{self, Change, ConfigWriter, Edit, Problem};
+use crate::health::{self, Health, HealthReport, HealthSnapshot};
 use crate::history::History;
 use crate::hostkeys::{self, ChangedKey, Keygen, KnownHostsWriter, UnknownKey};
 use crate::keygen::{self, GeneratedKey, KeyRequest};
@@ -127,6 +128,8 @@ pub enum Command {
         path: PathBuf,
         encrypted: bool,
     },
+    /// Check these hosts' health (SPEC.md §12, M8); a few at a time.
+    CheckHealth(Vec<String>),
     Shutdown,
 }
 
@@ -199,6 +202,8 @@ pub enum Event {
     },
     /// Something the user asked for succeeded (e.g. "Settings saved").
     Notice(String),
+    /// Health results so far and the checks under way.
+    Health(Arc<HealthSnapshot>),
     Error(String),
 }
 
@@ -331,6 +336,10 @@ enum Message {
         result: Result<ChangedKey, String>,
     },
     /// An edit was validated in the background.
+    HealthChecked {
+        alias: String,
+        report: HealthReport,
+    },
     EditValidated {
         edit: Edit,
         then: AfterCheck,
@@ -429,6 +438,10 @@ struct Worker {
     next_prompt: u64,
     unknown_keys: BTreeMap<u64, (StartRequest, UnknownKey)>,
     changed_keys: BTreeMap<u64, (String, ChangedKey)>,
+    health: HealthSnapshot,
+    /// Aliases waiting for a free check slot, in order.
+    health_queue: VecDeque<String>,
+    health_running: usize,
 }
 
 impl Worker {
@@ -477,6 +490,9 @@ impl Worker {
             next_prompt: 0,
             unknown_keys: BTreeMap::new(),
             changed_keys: BTreeMap::new(),
+            health: HealthSnapshot::default(),
+            health_queue: VecDeque::new(),
+            health_running: 0,
         }
     }
 
@@ -515,6 +531,13 @@ impl Worker {
                 }
                 Message::KeyReview { tunnel_id, result } => {
                     self.key_reviewed(tunnel_id, result);
+                    continue;
+                }
+                Message::HealthChecked { alias, report } => {
+                    self.health_running -= 1;
+                    self.health.checking.remove(&alias);
+                    self.health.reports.insert(alias, report);
+                    self.run_health_checks();
                     continue;
                 }
                 Message::EditValidated { edit, then, result } => {
@@ -602,6 +625,14 @@ impl Worker {
                     }
                 }
                 Command::AddKeyToAgent { path, encrypted } => self.add_to_agent(&path, encrypted),
+                Command::CheckHealth(aliases) => {
+                    for alias in aliases {
+                        if self.health.checking.insert(alias.clone()) {
+                            self.health_queue.push_back(alias);
+                        }
+                    }
+                    self.run_health_checks();
+                }
                 Command::GenerateKey { id, request } => {
                     // RSA can take seconds: off the core thread.
                     let emitter = self.emitter.clone();
@@ -1274,6 +1305,33 @@ impl Worker {
                 tray: tray_host::available(),
             })));
         });
+    }
+
+    /// Starts queued health checks while slots are free, then publishes.
+    fn run_health_checks(&mut self) {
+        while self.health_running < health::MAX_PARALLEL
+            && let Some(alias) = self.health_queue.pop_front()
+        {
+            let report = match &self.tools {
+                Ok(tools) => {
+                    let (ssh, tx) = (tools.ssh.clone(), self.self_tx.clone());
+                    self.health_running += 1;
+                    thread::spawn(move || {
+                        let report = health::check(&ssh, &alias);
+                        let _ = tx.send(Message::HealthChecked { alias, report });
+                    });
+                    continue;
+                }
+                Err(e) => HealthReport {
+                    health: Health::Unreachable(format!("no ssh: {e}")),
+                    checked_at: SystemTime::now(),
+                },
+            };
+            self.health.checking.remove(&alias);
+            self.health.reports.insert(alias, report);
+        }
+        self.emitter
+            .emit(Event::Health(Arc::new(self.health.clone())));
     }
 
     fn add_to_agent(&mut self, path: &Path, encrypted: bool) {

@@ -6,6 +6,8 @@ use std::collections::{HashMap, HashSet};
 use egui::RichText;
 use sshconf::{ConfigSet, HostEntry};
 use sshelf_core::core::{AppData, Command, ConfigSnapshot, SshInfo};
+use sshelf_core::health::{Health, HealthSnapshot};
+use sshelf_core::hints;
 use sshelf_core::metadata::{Color, HostMeta};
 use sshelf_core::ssh::Resolved;
 use sshelf_core::storage::LoadStatus;
@@ -124,6 +126,7 @@ impl HostDetail {
         config: &ConfigSnapshot,
         data: &AppData,
         ssh: Option<&SshInfo>,
+        health: Option<&HealthSnapshot>,
     ) -> Vec<Command> {
         let mut commands = Vec::new();
         let Some(set) = config.set() else {
@@ -146,6 +149,7 @@ impl HostDetail {
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 self.header(ui, host, (set, read_only), data, ssh, &mut commands);
+                health_line(ui, &alias, health, ssh, &mut commands);
                 ui.separator();
                 self.metadata(ui, &alias, data, &mut commands);
                 ui.separator();
@@ -368,6 +372,71 @@ impl HostDetail {
                     Some((_, Ok(resolved))) => grid(ui, resolved, &self.filter),
                 }
             });
+    }
+}
+
+/// "Health: Auth OK, login took 240 ms · 2 min ago [Check]" and a hint for
+/// what to do about a problem (SPEC.md §12, M8).
+fn health_line(
+    ui: &mut egui::Ui,
+    alias: &str,
+    health: Option<&HealthSnapshot>,
+    ssh: Option<&SshInfo>,
+    commands: &mut Vec<Command>,
+) {
+    let p = &Palette::ONE_DARK;
+    let checking = health.is_some_and(|h| h.checking.contains(alias));
+    let report = health.and_then(|h| h.reports.get(alias));
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Health").color(p.dim));
+        util::health_mark(ui, health, alias);
+        match (checking, report) {
+            (true, _) => {
+                ui.spinner();
+                ui.label("checking…");
+            }
+            (false, Some(report)) => {
+                ui.label(report.health.describe());
+                ui.label(
+                    RichText::new(util::ago(report.checked_at))
+                        .small()
+                        .color(p.dim),
+                );
+            }
+            (false, None) => {
+                ui.label(RichText::new("not checked").color(p.dim));
+            }
+        }
+        if ui
+            .add_enabled(!checking, egui::Button::new("Check"))
+            .on_hover_text(
+                "Log in once without a password (ssh BatchMode, 3 s connect timeout) \
+                 and run `true`",
+            )
+            .clicked()
+        {
+            commands.push(Command::CheckHealth(vec![alias.to_string()]));
+        }
+    });
+    let hint = match report.map(|r| &r.health) {
+        Some(Health::AuthFailed) if !checking => Some(hints::auth_hint(
+            ssh.and_then(|s| s.agent.as_ref()),
+            ssh.and_then(|s| s.service.as_ref())
+                .and_then(|s| s.as_ref().ok()),
+        )),
+        Some(Health::HostKeyUnknown) if !checking => Some(
+            "Connect once to see and accept the host key in the terminal, or start a tunnel \
+             through this host."
+                .to_string(),
+        ),
+        Some(Health::HostKeyChanged) if !checking => {
+            Some("Start a tunnel through this host to review the changed key.".to_string())
+        }
+        Some(Health::Unreachable(why)) if !checking => hints::failure_hint(why).map(str::to_string),
+        _ => None,
+    };
+    if let Some(hint) = hint {
+        ui.label(RichText::new(hint).small().color(p.yellow));
     }
 }
 

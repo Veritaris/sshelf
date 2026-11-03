@@ -15,6 +15,8 @@
 //!   each `Bogus …` line of the file is reported as a bad option (exit 255).
 //! - `--record <file>`: append all arguments (one line, `\x1f`-separated) to
 //!   `file`, so tests can see how it was launched.
+//! - `… <alias> true` (health check): succeeds, except `fail-auth*` (key not
+//!   accepted), `changed*`, `unknownkey*` (host key) and `unreachable*`.
 //! - `FAKE_SSH_RECORD=<file>`: the same, prefixed with the name it runs
 //!   under. Copied as `ssh-add`, it acts like `ssh-add <key>` succeeding.
 //! - `-N … <alias>`: a tunnel. Binds every `-L`/`-D` port (exits like
@@ -137,6 +139,9 @@ fn main() -> ExitCode {
     if args.iter().any(|a| a == "-N") {
         return tunnel(&args);
     }
+    if args.last().map(String::as_str) == Some("true") {
+        return health(&args);
+    }
 
     let code = env::var("FAKE_SSH_EXIT")
         .ok()
@@ -170,6 +175,30 @@ fn check_config(args: &[String]) -> Option<ExitCode> {
         bad.len()
     );
     Some(ExitCode::from(255))
+}
+
+/// A health check, `… -- <alias> true` (SPEC.md §12, M8), answered by alias.
+fn health(args: &[String]) -> ExitCode {
+    let alias = args
+        .len()
+        .checked_sub(2)
+        .and_then(|i| args.get(i))
+        .map(String::as_str)
+        .unwrap_or_default();
+    if alias.starts_with("fail-auth") {
+        eprintln!("{alias}.example.com: Permission denied (publickey).");
+    } else if alias.starts_with("changed") {
+        eprintln!("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@");
+        eprintln!("@    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @");
+        eprintln!("Host key verification failed.");
+    } else if alias.starts_with("unknownkey") {
+        eprintln!("Host key verification failed.");
+    } else if alias.starts_with("unreachable") {
+        eprintln!("ssh: connect to host {alias}.example.com port 22: Connection timed out");
+    } else {
+        return ExitCode::SUCCESS;
+    }
+    ExitCode::from(255)
 }
 
 /// Value of `-o Name=value` (quotes removed).

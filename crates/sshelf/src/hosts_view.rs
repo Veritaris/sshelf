@@ -1,9 +1,12 @@
 //! Hosts view (SPEC.md §10): searchable host list with tags and favorites,
 //! a collapsible patterns section, config diagnostics, and the detail pane.
 
+use std::sync::Arc;
+
 use egui::{RichText, Sense};
 use sshconf::{ConfigSet, HostEntry, HostList, PatternKind, Severity};
 use sshelf_core::core::{AppData, Command, ConfigSnapshot, ConfigState, SshInfo};
+use sshelf_core::health::HealthSnapshot;
 use sshelf_core::metadata::HostMeta;
 
 use crate::host_detail::{DetailAction, HostDetail};
@@ -20,9 +23,15 @@ pub struct HostsView {
     selected: Option<String>,
     pub detail: HostDetail,
     pub editor: HostEditor,
+    /// Latest health results (SPEC.md §12, M8).
+    health: Option<Arc<HealthSnapshot>>,
 }
 
 impl HostsView {
+    pub fn on_health(&mut self, health: Arc<HealthSnapshot>) {
+        self.health = Some(health);
+    }
+
     /// Drops the selection when its host disappeared from the config (or
     /// follows it when it was renamed).
     pub fn on_config(&mut self, snapshot: &ConfigSnapshot) {
@@ -84,7 +93,7 @@ impl HostsView {
         if let Some(alias) = self.editor.take_created() {
             self.selected = Some(alias);
         }
-        let new_host = egui::Panel::left("host_list")
+        let (new_host, check) = egui::Panel::left("host_list")
             .resizable(true)
             .default_size(340.0)
             .min_size(240.0)
@@ -94,6 +103,7 @@ impl HostsView {
             self.editor.open_new(config);
             self.selected = None;
         }
+        let mut commands: Vec<Command> = check.map(Command::CheckHealth).into_iter().collect();
 
         // Another host was picked: an editor without changes gives way.
         if self.editor.is_open()
@@ -104,15 +114,21 @@ impl HostsView {
             self.editor.close();
         }
 
-        let mut commands = Vec::new();
         egui::CentralPanel::default().show(ui, |ui| {
             if self.editor.is_open() {
-                commands = self.editor.show(ui, config);
+                commands.extend(self.editor.show(ui, config));
                 return;
             }
             let host = self.selected.as_deref().and_then(|a| hosts.find(a));
             match host {
-                Some(host) => commands = self.detail.show(ui, host, config, data, ssh),
+                Some(host) => commands.extend(self.detail.show(
+                    ui,
+                    host,
+                    config,
+                    data,
+                    ssh,
+                    self.health.as_deref(),
+                )),
                 None => {
                     ui.add_space(24.0);
                     ui.vertical_centered(|ui| {
@@ -131,20 +147,33 @@ impl HostsView {
         commands
     }
 
-    /// The host list; returns whether "New host" was clicked.
+    /// The host list; returns whether "New host" was clicked, and the hosts
+    /// to check when "Check all" was.
     fn list(
         &mut self,
         ui: &mut egui::Ui,
         set: &ConfigSet,
         hosts: &HostList,
         data: &AppData,
-    ) -> bool {
+    ) -> (bool, Option<Vec<String>>) {
         let p = &Palette::ONE_DARK;
         ui.add_space(6.0);
-        let new_host = ui
-            .button("+ New host")
-            .on_hover_text("Add a host to your ssh config")
-            .clicked();
+        let (new_host, check_all) = ui
+            .horizontal(|ui| {
+                let new_host = ui
+                    .button("+ New host")
+                    .on_hover_text("Add a host to your ssh config")
+                    .clicked();
+                let check = ui
+                    .button("Check all")
+                    .on_hover_text(
+                        "Log in to every host shown below without a password \
+                         (ssh BatchMode) to see which are reachable",
+                    )
+                    .clicked();
+                (new_host, check)
+            })
+            .inner;
         ui.add(
             egui::TextEdit::singleline(&mut self.search)
                 .hint_text("Search aliases, tags, notes")
@@ -172,6 +201,11 @@ impl HostsView {
             .collect();
         // Favorites first, then config order (stable sort).
         rows.sort_by_key(|(_, meta)| !meta.is_some_and(|m| m.favorite));
+        let check = check_all.then(|| {
+            rows.iter()
+                .map(|(h, _)| h.primary().to_string())
+                .collect::<Vec<_>>()
+        });
 
         egui::ScrollArea::vertical()
             .id_salt("hosts")
@@ -186,7 +220,7 @@ impl HostsView {
                 ui.add_space(8.0);
                 patterns(ui, set, hosts);
             });
-        new_host
+        (new_host, check)
     }
 
     fn matches(&self, host: &HostEntry, meta: Option<&HostMeta>, needle: &str) -> bool {
@@ -243,6 +277,7 @@ impl HostsView {
                 ui.label(RichText::new(format!("#{tag}")).small().color(p.accent));
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                util::health_mark(ui, self.health.as_deref(), host.primary());
                 let (short, full) = util::location(set, host.at);
                 ui.label(RichText::new(short).small().color(p.dim))
                     .on_hover_text(full);
@@ -457,6 +492,48 @@ mod tests {
         }
         assert!(!harness.state().0.editor.is_open());
         harness.get_by_label("Defined at");
+    }
+
+    #[test]
+    fn health_checks_run_on_request_and_show_their_result() {
+        use std::time::SystemTime;
+
+        use sshelf_core::health::{Health, HealthReport, HealthSnapshot};
+
+        let (config, data) = fixture();
+        let mut harness = harness(config, data);
+        harness.step();
+        // Only the shown hosts: favorites first (db), then config order.
+        harness.get_by_label("Check all").click();
+        harness.step();
+        assert_eq!(
+            harness.state().1,
+            [Command::CheckHealth(vec!["db".into(), "web".into()])]
+        );
+
+        harness.get_by_label("web").click();
+        harness.step();
+        harness.step();
+        harness.get_by_label("not checked");
+        harness.get_by_label("Check").click();
+        harness.step();
+        assert_eq!(
+            harness.state().1.last(),
+            Some(&Command::CheckHealth(vec!["web".into()]))
+        );
+
+        let mut health = HealthSnapshot::default();
+        health.reports.insert(
+            "web".into(),
+            HealthReport {
+                health: Health::HostKeyUnknown,
+                checked_at: SystemTime::now(),
+            },
+        );
+        harness.state_mut().0.on_health(Arc::new(health));
+        harness.step();
+        harness.get_by_label("Reachable, host key not known yet");
+        harness.get_by_label_contains("Connect once to see and accept the host key");
     }
 
     #[test]

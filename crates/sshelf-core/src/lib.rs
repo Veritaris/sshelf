@@ -11,6 +11,7 @@ pub mod agent_service;
 pub mod child;
 pub mod config_edit;
 pub mod core;
+pub mod health;
 pub mod hints;
 pub mod history;
 pub mod hostkeys;

@@ -80,7 +80,12 @@ pub fn classify_failure(log: &VecDeque<LogLine>) -> FailureKind {
         .iter()
         .rposition(|l| l.text.starts_with("starting ssh"))
         .map_or(0, |i| i + 1);
-    let run: Vec<&str> = log.iter().skip(start).map(|l| l.text.as_str()).collect();
+    classify_lines(log.iter().skip(start).map(|l| l.text.as_str()))
+}
+
+/// What ssh's messages say went wrong (also used by health checks).
+pub fn classify_lines<'a>(lines: impl IntoIterator<Item = &'a str>) -> FailureKind {
+    let run: Vec<&str> = lines.into_iter().collect();
     let any = |needles: &[&str]| run.iter().any(|l| needles.iter().any(|n| l.contains(n)));
     if any(&[
         "REMOTE HOST IDENTIFICATION HAS CHANGED",

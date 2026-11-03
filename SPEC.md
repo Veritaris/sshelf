@@ -400,6 +400,8 @@ Each milestone ends with its acceptance criteria met, tests green on all three O
 
 ### M8 — Final polish
 - Connection health indicator per host: `ssh -o BatchMode=yes -o ConnectTimeout=3 <alias> true` → reachable / auth OK / latency.
+  - As built: only on request — *Check* in the host detail, *Check all* in the list (the hosts the list shows, after search and filters). Never automatically: that would log in to every server (fail2ban and the like). At most 4 run at once; each is limited to 15 s overall (jump chains). Results live in memory for the session.
+  - Outcomes, classified like tunnel failures (§7): *Auth OK* with the login time; *reachable, no key accepted* (with the §8 agent hint); *host key not known yet* / *host key changed* (hints point to Connect or a tunnel, where §9 handles them; the check itself never prompts); *unreachable* with ssh's reason. A painted mark per host in the list (yellow ring while checking, then green / yellow / red), the details on hover and in the detail pane.
 - Optional auto-reconnect for dropped tunnels (with backoff).
 - "Start on app launch" per group.
 - `ProxyJump` chain visualization (breadcrumb first, graph later).
