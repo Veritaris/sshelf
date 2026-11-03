@@ -65,3 +65,32 @@ pub fn truncated(ui: &mut Ui, mut job: LayoutJob, full: &str) -> Response {
         response
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_util;
+
+    #[test]
+    fn text_loses_its_end_and_paths_their_middle() {
+        let mut cut = Vec::new();
+        let mut harness = test_util::harness().build_ui(|ui| {
+            let font = FontId::monospace(13.0);
+            let painter = ui.painter();
+            let width = painter
+                .layout_no_wrap("x".repeat(20), font.clone(), Color32::WHITE)
+                .size()
+                .x;
+            cut = vec![
+                elide(painter, "nohostauthenticationforlocalhost", &font, width),
+                elide(painter, r"C:\users\me\.ssh\id_ed25519_dev", &font, width),
+                elide(painter, "short", &font, width),
+            ];
+        });
+        harness.run();
+        drop(harness);
+        assert_eq!(cut[0], ("nohostauthenticatio…".to_string(), true));
+        assert_eq!(cut[1], (r"C:\users\…d25519_dev".to_string(), true));
+        assert_eq!(cut[2], ("short".to_string(), false));
+    }
+}

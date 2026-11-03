@@ -1,7 +1,8 @@
 //! Copyable value rows (SPEC.md §10 *Copy on hover*): hovering a row fades
 //! in its background and a copy icon 8 px after the value; a long value is
-//! cut earlier so the icon always shows; a click anywhere on the row copies
-//! the full value.
+//! cut earlier so the icon always shows, a long key before the value column
+//! (the tooltip has both in full); a click anywhere on the row copies the
+//! full value.
 
 use egui::{
     Align2, Color32, CornerRadius, CursorIcon, FontId, Rect, Response, Role, Sense, Stroke,
@@ -15,6 +16,8 @@ use crate::{icons, motion};
 /// The icon's size and the space before it.
 const ICON: f32 = 14.0;
 const ICON_GAP: f32 = 8.0;
+/// Least space between a key and its value.
+const KEY_GAP: f32 = 12.0;
 
 /// How a row looks.
 pub struct Row<'a> {
@@ -65,7 +68,9 @@ pub fn row(ui: &mut Ui, row: Row) -> bool {
     }
     let (key, key_width, key_color) = row.key;
     let left = rect.left() + 8.0;
-    let key_galley = painter.layout_no_wrap(key.to_string(), row.key_font, key_color);
+    // Keys are cut too, leaving a gap before the value column.
+    let (key_shown, key_cut) = text::elide(painter, key, &row.key_font, key_width - KEY_GAP);
+    let key_galley = painter.layout_no_wrap(key_shown, row.key_font, key_color);
     painter.galley(
         pos2(left, rect.center().y - key_galley.size().y / 2.0),
         key_galley,
@@ -95,10 +100,13 @@ pub fn row(ui: &mut Ui, row: Row) -> bool {
         ui.ctx().copy_text(row.value.to_string());
     }
     let response: Response = response.on_hover_cursor(CursorIcon::Copy);
-    if cut {
-        let full = row.value.to_string();
+    if cut || key_cut {
+        let (key, value) = (key.to_string(), row.value.to_string());
         popup::tip_below(response, |ui| {
-            ui.label(egui::RichText::new(full).monospace());
+            if key_cut {
+                ui.label(egui::RichText::new(key).color(key_color));
+            }
+            ui.label(egui::RichText::new(value).monospace());
         });
     }
     clicked
