@@ -94,6 +94,7 @@ fn tunnel(id: &str, host: &str, port: u16) -> Tunnel {
             listen: port,
             target: Some("localhost:80".into()),
         }],
+        auto_reconnect: false,
     }
 }
 
@@ -379,4 +380,76 @@ fn removing_a_running_tunnel_stops_it() {
         assert!(Instant::now() < deadline, "the process survived removal");
         std::thread::sleep(Duration::from_millis(25));
     }
+}
+
+fn reconnecting(id: &str, attempt: u32) -> impl Fn(&Snapshot) -> bool + '_ {
+    move |s| {
+        s.tunnels
+            .get(id)
+            .and_then(|t| t.reconnect)
+            .is_some_and(|r| r.attempt == attempt)
+    }
+}
+
+#[test]
+fn dropped_tunnels_reconnect_with_backoff() {
+    let mut h = Harness::new();
+    let drops = Tunnel {
+        auto_reconnect: true,
+        ..tunnel("drops", "die-later-host", free_port())
+    };
+    h.send(Request::Start {
+        tunnel: drops,
+        owner: Owner::Manual,
+    });
+    h.until("running", running("drops"));
+    let s = h.until("first reconnect planned", reconnecting("drops", 1));
+    assert!(matches!(s.state("drops"), TunnelState::Failed(_)));
+    // After the 2 s wait it starts again by itself, then drops again: the
+    // next wait is longer.
+    h.until("running again", running("drops"));
+    let s = h.until("second reconnect planned", reconnecting("drops", 2));
+    let log: Vec<&str> = s.tunnels["drops"]
+        .log
+        .iter()
+        .map(|l| l.text.as_str())
+        .collect();
+    assert!(log.contains(&"reconnecting in 2 s (attempt 1)"), "{log:?}");
+    assert!(log.contains(&"reconnecting in 4 s (attempt 2)"), "{log:?}");
+
+    // Stopping cancels the pending restart.
+    h.send(Request::Stop {
+        tunnel_id: "drops".into(),
+        owner: Owner::Manual,
+    });
+    let s = h.until("stopped", stopped("drops"));
+    assert_eq!(s.tunnels["drops"].reconnect, None);
+    std::thread::sleep(Duration::from_secs(5));
+    while let Ok(event) = h.events.try_recv() {
+        if let SupervisorEvent::Snapshot(s) = event {
+            assert_eq!(
+                s.state("drops"),
+                TunnelState::Stopped,
+                "restarted after Stop"
+            );
+        }
+    }
+}
+
+#[test]
+fn auth_failures_are_not_retried() {
+    let mut h = Harness::new();
+    let denied = Tunnel {
+        auto_reconnect: true,
+        ..tunnel("denied", "fail-auth-host", free_port())
+    };
+    h.send(Request::Start {
+        tunnel: denied,
+        owner: Owner::Manual,
+    });
+    let s = h.until("failed", |s| {
+        matches!(s.state("denied"), TunnelState::Failed(_))
+    });
+    assert_eq!(s.tunnels["denied"].failure, Some(FailureKind::Auth));
+    assert_eq!(s.tunnels["denied"].reconnect, None);
 }

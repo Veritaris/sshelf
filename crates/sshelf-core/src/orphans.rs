@@ -337,6 +337,7 @@ mod tests {
             name: format!("tunnel {id}"),
             host: host.into(),
             forwards: Vec::new(),
+            auto_reconnect: false,
         };
         TunnelsFile {
             tunnels: vec![tunnel("t1", "db1"), tunnel("t2", "gone-host")],

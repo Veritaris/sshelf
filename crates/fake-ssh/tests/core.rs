@@ -243,6 +243,7 @@ fn tunnels_and_groups_through_the_core() {
             listen: port,
             target: Some("localhost:6443".into()),
         }],
+        auto_reconnect: false,
     };
 
     let (core, events) = Core::start(paths.clone(), Arc::new(|| {}));
@@ -367,6 +368,7 @@ fn host_key_session(
                     .port(),
                 target: Some("localhost:80".into()),
             }],
+            auto_reconnect: false,
         });
     }
     store.save(&tunnels).unwrap();

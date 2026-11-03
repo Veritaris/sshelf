@@ -187,6 +187,7 @@ pub fn model(
                 state if status.owners.contains(&Owner::Manual) => {
                     let suffix = match state {
                         TunnelState::Starting => " (starting)",
+                        TunnelState::Failed(_) if status.reconnect.is_some() => " (reconnecting)",
                         TunnelState::Failed(_) => " (failed)",
                         _ => "",
                     };
@@ -386,6 +387,7 @@ mod tests {
             log: VecDeque::new(),
             pid: None,
             failure: None,
+            reconnect: None,
         }
     }
 
@@ -407,6 +409,7 @@ mod tests {
                 name: name.into(),
                 host: host.into(),
                 forwards: Vec::new(),
+                auto_reconnect: false,
             });
         }
         data.tunnels.groups.push(Group {

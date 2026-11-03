@@ -215,6 +215,7 @@ mod tests {
             name: "Old".into(),
             host: "old-host".into(),
             forwards: Vec::new(),
+            auto_reconnect: false,
         });
         data.tunnels.upsert_group(Group {
             id: "g-1".into(),

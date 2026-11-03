@@ -9,7 +9,7 @@ use sshelf_core::supervisor::{GroupState, Owner, Snapshot, TunnelState};
 use sshelf_core::tunnels::Group;
 
 use crate::theme::Palette;
-use crate::tunnels_view::{owner_names, state_label, status_dot};
+use crate::tunnels_view::{owner_names, reconnect_text, state_label, status_dot};
 
 #[derive(Default)]
 pub struct GroupsView {
@@ -170,6 +170,9 @@ impl GroupsView {
                     });
                     if let TunnelState::Failed(reason) = &tunnel_state {
                         ui.label(RichText::new(reason).small().color(p.red));
+                        if let Some(text) = reconnect_text(ui.ctx(), states.tunnels.get(id)) {
+                            ui.label(RichText::new(text).small().color(p.yellow));
+                        }
                         if let Some(hint) = hints::failure_hint(reason) {
                             ui.label(RichText::new(hint).small().color(p.dim));
                         }
@@ -283,6 +286,7 @@ mod tests {
                 name: name.into(),
                 host: "h".into(),
                 forwards: Vec::new(),
+                auto_reconnect: false,
             });
         }
         data.tunnels.upsert_group(Group {
@@ -308,6 +312,7 @@ mod tests {
             log: VecDeque::new(),
             pid: None,
             failure: None,
+            reconnect: None,
         }
     }
 

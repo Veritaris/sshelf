@@ -17,7 +17,7 @@ use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use crate::child::{self, KILL_GRACE, TreeKiller};
 use crate::tunnels::{Group, Tunnel};
@@ -60,6 +60,16 @@ pub struct TunnelStatus {
     pub pid: Option<u32>,
     /// Why the last run failed, while the state is `Failed`.
     pub failure: Option<FailureKind>,
+    /// A pending automatic restart (`auto_reconnect`, SPEC.md §7); the state
+    /// stays `Failed` until it happens.
+    pub reconnect: Option<Reconnect>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Reconnect {
+    /// 1 for the first retry after a drop.
+    pub attempt: u32,
+    pub at: SystemTime,
 }
 
 /// What a failed run ran into, from ssh's messages (SPEC.md §8, §9).
@@ -293,6 +303,24 @@ struct Entry {
     process: Option<Process>,
     /// Start again once the current (stopping) process has exited.
     restart: bool,
+    /// Automatic restarts since the tunnel last ran stably.
+    attempt: u32,
+    /// When the current run reached `Running`.
+    running_since: Option<Instant>,
+    /// When the pending automatic restart is due.
+    due: Option<Instant>,
+}
+
+/// First wait before an automatic restart; it doubles up to the maximum.
+pub const RECONNECT_FIRST: Duration = Duration::from_secs(2);
+pub const RECONNECT_MAX: Duration = Duration::from_secs(60);
+/// A run this long counts as stable: the next drop starts at the first wait.
+pub const RECONNECT_STABLE: Duration = Duration::from_secs(60);
+
+/// The wait before automatic restart `attempt` (1-based): 2, 4, 8 … 60 s.
+pub fn reconnect_delay(attempt: u32) -> Duration {
+    let doubled = RECONNECT_FIRST.saturating_mul(1 << attempt.saturating_sub(1).min(16));
+    doubled.min(RECONNECT_MAX)
 }
 
 struct Worker {
@@ -306,18 +334,87 @@ struct Worker {
 
 impl Worker {
     fn run(mut self, rx: Receiver<Message>) {
-        while let Ok(message) = rx.recv() {
-            if !self.handle(message) {
-                return self.shutdown(&rx);
-            }
-            // Coalesce bursts (e.g. many log lines) into one snapshot.
-            while let Ok(message) = rx.try_recv() {
+        loop {
+            // Sleep until a message arrives or the next restart is due.
+            let message = match self.entries.values().filter_map(|e| e.due).min() {
+                Some(due) => match rx.recv_timeout(due.saturating_duration_since(Instant::now())) {
+                    Ok(message) => Some(message),
+                    Err(RecvTimeoutError::Timeout) => None,
+                    Err(RecvTimeoutError::Disconnected) => return,
+                },
+                None => match rx.recv() {
+                    Ok(message) => Some(message),
+                    Err(_) => return,
+                },
+            };
+            if let Some(message) = message {
                 if !self.handle(message) {
                     return self.shutdown(&rx);
                 }
+                // Coalesce bursts (e.g. many log lines) into one snapshot.
+                while let Ok(message) = rx.try_recv() {
+                    if !self.handle(message) {
+                        return self.shutdown(&rx);
+                    }
+                }
             }
+            self.reconnect_due();
             self.publish();
         }
+    }
+
+    /// Restarts tunnels whose reconnect wait is over and that are still
+    /// wanted; a taken port waits for the next attempt.
+    fn reconnect_due(&mut self) {
+        let now = Instant::now();
+        let due: Vec<String> = self
+            .entries
+            .iter()
+            .filter(|(_, e)| e.due.is_some_and(|d| d <= now))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in due {
+            let entry = self.entries.get_mut(&id).expect("a due entry");
+            entry.due = None;
+            entry.status.reconnect = None;
+            self.changed = true;
+            let wanted = !entry.status.owners.is_empty()
+                && matches!(entry.status.state, TunnelState::Failed(_));
+            if !wanted {
+                continue;
+            }
+            let problems = check_ports(&[&entry.tunnel]);
+            if problems.is_empty() {
+                self.spawn(&id);
+            } else {
+                let entry = self.entries.get_mut(&id).expect("a due entry");
+                push_log(&mut entry.status.log, problems.join("; "));
+                self.schedule_reconnect(&id);
+            }
+        }
+    }
+
+    /// Plans the next automatic restart of `id`, with backoff.
+    fn schedule_reconnect(&mut self, id: &str) {
+        let Some(entry) = self.entries.get_mut(id) else {
+            return;
+        };
+        entry.attempt += 1;
+        let delay = reconnect_delay(entry.attempt);
+        entry.due = Some(Instant::now() + delay);
+        entry.status.reconnect = Some(Reconnect {
+            attempt: entry.attempt,
+            at: SystemTime::now() + delay,
+        });
+        push_log(
+            &mut entry.status.log,
+            format!(
+                "reconnecting in {} s (attempt {})",
+                delay.as_secs(),
+                entry.attempt
+            ),
+        );
+        self.changed = true;
     }
 
     /// `false` on shutdown.
@@ -426,9 +523,13 @@ impl Worker {
                     log: VecDeque::new(),
                     pid: None,
                     failure: None,
+                    reconnect: None,
                 },
                 process: None,
                 restart: false,
+                attempt: 0,
+                running_since: None,
+                due: None,
             });
             entry.status.owners.insert(owner.clone());
             self.changed = true;
@@ -436,7 +537,10 @@ impl Worker {
                 entry.tunnel = tunnel;
                 entry.restart = true;
             } else if to_spawn.contains(&id) {
+                // Started by hand: a pending automatic restart is moot.
                 entry.tunnel = tunnel;
+                entry.due = None;
+                entry.attempt = 0;
                 self.spawn(&id);
             }
         }
@@ -454,6 +558,9 @@ impl Worker {
             return;
         }
         entry.restart = false;
+        entry.due = None;
+        entry.attempt = 0;
+        entry.status.reconnect = None;
         match &entry.process {
             Some(process) => {
                 process.killer.kill();
@@ -517,6 +624,7 @@ impl Worker {
         });
         entry.status.state = TunnelState::Starting;
         entry.status.failure = None;
+        entry.status.reconnect = None;
         entry.status.pid = Some(pid);
         push_log(&mut entry.status.log, format!("starting ssh (pid {pid})"));
         self.changed = true;
@@ -546,6 +654,7 @@ impl Worker {
         };
         if entry.status.state == TunnelState::Starting && text.contains(READY_MARKER) {
             entry.status.state = TunnelState::Running;
+            entry.running_since = Some(Instant::now());
         }
         push_log(&mut entry.status.log, text);
         self.changed = true;
@@ -582,9 +691,25 @@ impl Worker {
             .find(|l| !l.debug && !l.text.starts_with("starting ssh"))
             .map(|l| l.text.clone())
             .unwrap_or_else(|| format!("ssh exited with code {code:?}"));
+        let failure = classify_failure(&entry.status.log);
         entry.status.state = TunnelState::Failed(reason);
-        entry.status.failure = Some(classify_failure(&entry.status.log));
+        entry.status.failure = Some(failure);
+        // A drop after a stable run starts the backoff over.
+        if entry
+            .running_since
+            .take()
+            .is_some_and(|since| since.elapsed() >= RECONNECT_STABLE)
+        {
+            entry.attempt = 0;
+        }
+        // Auth and host key failures need the user; retrying cannot help.
+        let retry = entry.tunnel.auto_reconnect
+            && !entry.status.owners.is_empty()
+            && failure == FailureKind::Other;
         self.changed = true;
+        if retry {
+            self.schedule_reconnect(id);
+        }
     }
 
     /// Stops every tunnel and waits (bounded) for the processes to exit.
@@ -638,6 +763,7 @@ mod tests {
                 listen: port,
                 target: Some("localhost:1".into()),
             }],
+            auto_reconnect: false,
         }
     }
 
@@ -648,6 +774,7 @@ mod tests {
             log: VecDeque::new(),
             pid: None,
             failure: None,
+            reconnect: None,
         }
     }
 
@@ -657,6 +784,13 @@ mod tests {
             push_log(&mut log, line.to_string());
         }
         log
+    }
+
+    #[test]
+    fn reconnect_waits_double_up_to_a_minute() {
+        let secs: Vec<u64> = (1..=8).map(|a| reconnect_delay(a).as_secs()).collect();
+        assert_eq!(secs, [2, 4, 8, 16, 32, 60, 60, 60]);
+        assert_eq!(reconnect_delay(u32::MAX), RECONNECT_MAX);
     }
 
     #[test]

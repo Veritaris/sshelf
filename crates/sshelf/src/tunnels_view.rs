@@ -31,6 +31,22 @@ pub fn state_label(state: &TunnelState) -> (String, egui::Color32) {
 }
 
 /// "manual, Work on prod" for a tunnel's owners.
+/// "Reconnecting in 8 s (attempt 3)" while an automatic restart is pending
+/// (SPEC.md §7); asks for a repaint each second so the countdown moves.
+pub fn reconnect_text(ctx: &egui::Context, status: Option<&TunnelStatus>) -> Option<String> {
+    let reconnect = status?.reconnect?;
+    let left = reconnect
+        .at
+        .duration_since(std::time::SystemTime::now())
+        .unwrap_or_default();
+    ctx.request_repaint_after(std::time::Duration::from_secs(1));
+    Some(format!(
+        "Reconnecting in {} s (attempt {})",
+        left.as_secs() + u64::from(left.subsec_millis() > 0),
+        reconnect.attempt
+    ))
+}
+
 pub fn owner_names(owners: &[&Owner], file: &TunnelsFile) -> String {
     owners
         .iter()
@@ -63,6 +79,7 @@ impl TunnelsView {
             name: String::new(),
             host: host.to_string(),
             forwards: vec![new_forward()],
+            auto_reconnect: false,
         });
     }
 
@@ -182,8 +199,18 @@ impl TunnelsView {
             });
         });
         ui.label(RichText::new(format!("via {}", tunnel.host)).color(p.dim));
+        if tunnel.auto_reconnect {
+            ui.label(
+                RichText::new("Reconnects automatically after a dropped connection")
+                    .small()
+                    .color(p.dim),
+            );
+        }
         if let TunnelState::Failed(reason) = &state {
             ui.colored_label(p.red, reason);
+            if let Some(text) = reconnect_text(ui.ctx(), status) {
+                ui.colored_label(p.yellow, text);
+            }
             let hint = match status.and_then(|s| s.failure) {
                 Some(FailureKind::Auth) => Some(hints::auth_hint(
                     ssh.and_then(|s| s.agent.as_ref()),
@@ -326,6 +353,18 @@ impl TunnelsView {
                     })
                     .response
                     .labelled_by(label.id);
+                ui.end_row();
+
+                let label = ui.label("Reconnect");
+                ui.checkbox(
+                    &mut draft.auto_reconnect,
+                    "automatically after a dropped connection",
+                )
+                .labelled_by(label.id)
+                .on_hover_text(
+                    "Waits 2 s, then 4, 8 … up to 60 s between attempts. Not for login or \
+                     host key failures: those need you.",
+                );
                 ui.end_row();
             });
 
@@ -504,7 +543,7 @@ mod tests {
     use egui_kittest::kittest::Queryable;
     use sshconf::{ConfigSet, ResolveOptions};
     use sshelf_core::core::ConfigState;
-    use sshelf_core::supervisor::LogLine;
+    use sshelf_core::supervisor::{LogLine, Reconnect};
 
     use super::*;
 
@@ -526,6 +565,7 @@ mod tests {
                 listen: 5432,
                 target: Some("db:5432".into()),
             }],
+            auto_reconnect: false,
         }
     }
 
@@ -552,6 +592,7 @@ mod tests {
             ]),
             pid: Some(1),
             failure: None,
+            reconnect: None,
         };
         Fixture {
             config: Arc::new(ConfigSnapshot {
@@ -679,6 +720,39 @@ mod tests {
         harness.get_all_by_label("⏹ Stop").next().unwrap().click();
         harness.step();
         assert_eq!(harness.state().1, [Command::StopTunnel("t-1".into())]);
+    }
+
+    #[test]
+    fn a_pending_reconnect_is_shown_and_the_option_is_saved() {
+        let mut f = fixture(TunnelState::Failed(
+            "Connection to bastion closed by remote host.".into(),
+        ));
+        let mut states = (*f.states).clone();
+        states.tunnels.get_mut("t-1").unwrap().reconnect = Some(Reconnect {
+            attempt: 2,
+            at: std::time::SystemTime::now() + std::time::Duration::from_secs(4),
+        });
+        f.states = Arc::new(states);
+        let view = TunnelsView {
+            selected: Some("t-1".into()),
+            ..TunnelsView::default()
+        };
+        let mut harness = harness(f, view);
+        harness.step();
+        harness.get_by_label_contains("(attempt 2)");
+
+        let mut draft = tunnel();
+        draft.name = "API".into();
+        harness.state_mut().0.editor = Some(draft);
+        harness.step();
+        harness.get_by_label("Reconnect").click();
+        harness.step();
+        harness.get_by_label("Save").click();
+        harness.step();
+        let Some(Command::SaveTunnel(saved)) = harness.state().1.last() else {
+            panic!("{:?}", harness.state().1);
+        };
+        assert!(saved.auto_reconnect);
     }
 
     #[test]

@@ -210,6 +210,7 @@ fn rename_data(store: &Store, paths: &Paths) {
         name: "web".into(),
         host: "ok-web".into(),
         forwards: Vec::new(),
+        auto_reconnect: false,
     });
     store.save(&tunnels).unwrap();
     let mut history = History::default();

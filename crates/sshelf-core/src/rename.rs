@@ -134,6 +134,7 @@ mod tests {
                 name: id.into(),
                 host: host.into(),
                 forwards: Vec::new(),
+                auto_reconnect: false,
             });
         }
         let mut history = History::default();

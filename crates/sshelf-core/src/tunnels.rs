@@ -115,6 +115,9 @@ pub struct Tunnel {
     /// ssh_config alias.
     pub host: String,
     pub forwards: Vec<Forward>,
+    /// Restart after an unexpected drop, with backoff (SPEC.md §7).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub auto_reconnect: bool,
 }
 
 impl Tunnel {
@@ -310,6 +313,7 @@ mod tests {
             name: "k3s API".into(),
             host: "k3s-master".into(),
             forwards,
+            auto_reconnect: false,
         }
     }
 
