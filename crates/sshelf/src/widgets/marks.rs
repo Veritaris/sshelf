@@ -118,6 +118,22 @@ pub fn note(ui: &mut Ui, text: &str) -> Response {
     )
 }
 
+/// A tinted banner (SPEC.md §10: the status tint behind full-colour text),
+/// 8 px corners, as wide as the space left.
+pub fn banner<R>(ui: &mut Ui, tint: Color32, add: impl FnOnce(&mut Ui) -> R) -> R {
+    egui::Frame::new()
+        .fill(tint)
+        .corner_radius(radius::CONTROL)
+        .inner_margin(egui::Margin::symmetric(12, 10))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing.y = 8.0;
+            ui.style_mut().override_font_id = Some(egui::FontId::proportional(12.0));
+            add(ui)
+        })
+        .inner
+}
+
 /// An outline around `rect` inside it, e.g. a row whose menu is open.
 pub fn outline(painter: &Painter, rect: egui::Rect, color: Color32) {
     painter.rect_stroke(

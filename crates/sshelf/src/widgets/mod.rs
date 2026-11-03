@@ -2,6 +2,7 @@
 //! first screen that uses it.
 
 pub mod button;
+pub mod copy;
 pub mod dropdown;
 pub mod empty;
 pub mod marks;

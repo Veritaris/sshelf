@@ -1430,6 +1430,8 @@ impl Worker {
     }
 
     fn add_to_agent(&mut self, path: &Path, encrypted: bool) {
+        // A path from `ssh -G` may start with `~`, and no shell expands it.
+        let path = &hostkeys::expand_path(&path.to_string_lossy(), &self.paths.home);
         let args = keygen::ssh_add_args(path);
         let name = path
             .file_name()

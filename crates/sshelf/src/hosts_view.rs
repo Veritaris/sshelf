@@ -17,7 +17,7 @@ use sshelf_core::settings::{CardsGroupBy, HostListStyle, Settings};
 use sshelf_core::storage::LoadStatus;
 use sshelf_core::supervisor::{Snapshot, TunnelState};
 
-use crate::host_detail::{DetailAction, HostDetail};
+use crate::host_detail::{DetailAction, HostDetail, Shown};
 use crate::host_editor::HostEditor;
 use crate::theme::{Palette, radius, timing};
 use crate::widgets::button::Button;
@@ -78,9 +78,23 @@ pub struct HostsView {
     check_run: Vec<String>,
     /// Success messages for toasts ("Copied alias").
     notices: Vec<String>,
+    navigate: Option<Navigate>,
+}
+
+/// Another view the hosts view asked the app to show.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Navigate {
+    Settings,
+    /// A tunnel, by id.
+    Tunnel(String),
 }
 
 impl HostsView {
+    /// The view to switch to, once.
+    pub fn take_navigation(&mut self) -> Option<Navigate> {
+        self.navigate.take()
+    }
+
     pub fn on_health(&mut self, health: Arc<HealthSnapshot>) {
         if self.check_run.iter().all(|a| !health.checking.contains(a)) {
             self.check_run.clear();
@@ -90,7 +104,9 @@ impl HostsView {
 
     /// Toast texts raised since the last call.
     pub fn take_notices(&mut self) -> Vec<String> {
-        std::mem::take(&mut self.notices)
+        let mut notices = std::mem::take(&mut self.notices);
+        notices.extend(self.detail.take_notices());
+        notices
     }
 
     /// Drops the selection when its host disappeared from the config (or
@@ -160,7 +176,19 @@ impl HostsView {
             self.selected = Some(alias);
         }
         let mut commands = Vec::new();
-        let action = if data.settings.host_list_style == HostListStyle::Cards {
+        let health = self.health.clone();
+        let cards = data.settings.host_list_style == HostListStyle::Cards;
+        let shown = Shown {
+            config,
+            data,
+            ssh,
+            health: health.as_deref(),
+            states,
+            // Insets are darker than the list view's pane, lighter than
+            // the cards' (which is already the dark colour).
+            inset: if cards { p.bg } else { p.bg_dark },
+        };
+        let action = if cards {
             // Cards: the detail is a right-hand pane, the cards fill the rest.
             egui::Panel::right("host_detail_pane")
                 .resizable(false)
@@ -185,7 +213,7 @@ impl HostsView {
                     let rect = ui.max_rect();
                     let mut inner = ui.new_child(egui::UiBuilder::new().max_rect(rect));
                     inner.shrink_clip_rect(rect);
-                    self.detail_pane(&mut inner, hosts, config, data, ssh, &mut commands);
+                    self.detail_pane(&mut inner, hosts, &shown, &mut commands);
                 });
             egui::CentralPanel::default()
                 .frame(Frame::NONE.inner_margin(Margin {
@@ -219,9 +247,16 @@ impl HostsView {
                     self.list(ui, set, hosts, data, states, ssh)
                 })
                 .inner;
-            egui::CentralPanel::default().show(ui, |ui| {
-                self.detail_pane(ui, hosts, config, data, ssh, &mut commands);
-            });
+            egui::CentralPanel::default()
+                .frame(Frame::NONE.inner_margin(Margin {
+                    left: 32,
+                    right: 32,
+                    top: 0,
+                    bottom: 24,
+                }))
+                .show(ui, |ui| {
+                    self.detail_pane(ui, hosts, &shown, &mut commands);
+                });
             action
         };
         if action.new_host {
@@ -265,6 +300,9 @@ impl HostsView {
             Some(DetailAction::Edit(alias)) => self.editor.open(config, &alias),
             Some(DetailAction::Rename(alias)) => self.editor.open_rename(&alias),
             Some(DetailAction::Select(alias)) => self.selected = Some(alias),
+            Some(DetailAction::GenerateKey(alias)) => self.editor.open_keys(config, &alias),
+            Some(DetailAction::OpenSettings) => self.navigate = Some(Navigate::Settings),
+            Some(DetailAction::OpenTunnel(id)) => self.navigate = Some(Navigate::Tunnel(id)),
             None => {}
         }
         commands.extend(self.editor.show_rename(ui.ctx(), config, data));
@@ -277,25 +315,16 @@ impl HostsView {
         &mut self,
         ui: &mut Ui,
         hosts: &HostList,
-        config: &ConfigSnapshot,
-        data: &AppData,
-        ssh: Option<&SshInfo>,
+        shown: &Shown,
         commands: &mut Vec<Command>,
     ) {
         let p = &Palette::ONE_DARK;
         if self.editor.is_open() {
-            commands.extend(self.editor.show(ui, config));
+            commands.extend(self.editor.show(ui, shown.config));
             return;
         }
         match self.selected.as_deref().and_then(|a| hosts.find(a)) {
-            Some(host) => commands.extend(self.detail.show(
-                ui,
-                host,
-                config,
-                data,
-                ssh,
-                self.health.as_deref(),
-            )),
+            Some(host) => commands.extend(self.detail.show(ui, host, shown)),
             None => {
                 ui.add_space(48.0);
                 ui.vertical_centered(|ui| {
@@ -1226,8 +1255,10 @@ mod tests {
     use egui_kittest::Harness;
     use egui_kittest::kittest::{NodeT, Queryable};
     use sshconf::{ConfigSet, HostList, ResolveOptions};
+    use sshelf_core::agent_service::{AgentService, StartType};
     use sshelf_core::core::{AppData, Command, ConfigSnapshot, ConfigState};
     use sshelf_core::metadata::{HostMeta, HostsFile};
+    use sshelf_core::ssh::{AgentStatus, SshTools, ToolSource};
     use sshelf_core::storage::LoadStatus;
 
     use super::*;
@@ -1273,14 +1304,42 @@ mod tests {
         config: Arc<ConfigSnapshot>,
         data: Arc<AppData>,
     ) -> Harness<'static, (HostsView, Vec<Command>)> {
+        harness_with(config, data, None)
+    }
+
+    fn harness_with(
+        config: Arc<ConfigSnapshot>,
+        data: Arc<AppData>,
+        ssh: Option<SshInfo>,
+    ) -> Harness<'static, (HostsView, Vec<Command>)> {
         test_util::harness()
             .with_size([1200.0, 800.0])
             .build_ui_state(
                 move |ui, (view, commands): &mut (HostsView, Vec<Command>)| {
-                    commands.extend(view.show(ui, Some(&config), Some(&data), None, None));
+                    commands.extend(view.show(ui, Some(&config), Some(&data), None, ssh.as_ref()));
                 },
                 (HostsView::default(), Vec::new()),
             )
+    }
+
+    /// ssh found; the agent and its service as given.
+    fn ssh_info(agent: Option<AgentStatus>, service_running: Option<bool>) -> SshInfo {
+        SshInfo {
+            tools: Ok(SshTools {
+                ssh: PathBuf::from("ssh"),
+                source: ToolSource::Path,
+            }),
+            version: None,
+            agent,
+            service: service_running.map(|running| {
+                Ok(AgentService::Installed {
+                    running,
+                    start_type: StartType::Manual,
+                })
+            }),
+            terminal: None,
+            tray: Ok(true),
+        }
     }
 
     #[test]
@@ -1303,8 +1362,10 @@ mod tests {
         for _ in 0..3 {
             harness.step();
         }
-        harness.get_by_label("Defined at");
-        harness.get_by_label("Effective config (ssh -G)");
+        harness.get_by_label("Defined at config:1");
+        harness.get_by_label("Overview");
+        harness.get_by_label("Effective config");
+        harness.get_by_label("Tunnels · 0");
         assert!(harness.query_by_label("Select a host").is_none());
         let commands = &harness.state().1;
         assert_eq!(commands, &[Command::Resolve("web".into())]);
@@ -1318,7 +1379,7 @@ mod tests {
         harness.get_by_label("web").click();
         harness.step();
         harness.step();
-        harness.get_by_label("+ New tunnel").click();
+        harness.get_by_label("New tunnel").click();
         harness.step();
         assert_eq!(
             harness.state_mut().0.detail.take_new_tunnel().as_deref(),
@@ -1340,14 +1401,14 @@ mod tests {
             harness.step();
         }
         harness.get_by_label("Editing web");
-        assert!(harness.query_by_label("Defined at").is_none());
+        assert!(harness.query_by_label("Overview").is_none());
         // Picking another host closes an editor without changes.
         harness.get_by_label("db").click();
         for _ in 0..3 {
             harness.step();
         }
         assert!(!harness.state().0.editor.is_open());
-        harness.get_by_label("Defined at");
+        harness.get_by_label("Overview");
     }
 
     #[test]
@@ -1357,7 +1418,7 @@ mod tests {
         use sshelf_core::health::{Health, HealthReport, HealthSnapshot};
 
         let (config, data) = fixture();
-        let mut harness = harness(config, data);
+        let mut harness = harness_with(config, data, Some(ssh_info(None, None)));
         harness.step();
         // Only the shown hosts: favorites first (db), then config order.
         harness.get_by_label("Check all hosts").click();
@@ -1370,7 +1431,7 @@ mod tests {
         harness.get_by_label("web").click();
         harness.step();
         harness.step();
-        harness.get_by_label("not checked");
+        harness.get_by_label("Not checked yet");
         harness.get_by_label("Check").click();
         harness.step();
         assert_eq!(
@@ -1389,7 +1450,204 @@ mod tests {
         harness.state_mut().0.on_health(Arc::new(health));
         harness.step();
         harness.get_by_label("Reachable, host key not known yet");
-        harness.get_by_label_contains("Connect once to see and accept the host key");
+        harness.get_by_label_contains("Connect once in a terminal");
+        // The fix: ssh asks about the key in a terminal.
+        harness.get_by_label("Connect in terminal").click();
+        harness.step();
+        assert_eq!(
+            harness.state().1.last(),
+            Some(&Command::Connect("web".into()))
+        );
+    }
+
+    /// Selects `alias` and lets the detail settle.
+    fn select(harness: &mut Harness<'static, (HostsView, Vec<Command>)>, alias: &str) {
+        harness.get_by_label(alias).click();
+        for _ in 0..3 {
+            harness.step();
+        }
+    }
+
+    fn last_meta(harness: &Harness<'static, (HostsView, Vec<Command>)>) -> HostMeta {
+        match harness.state().1.last() {
+            Some(Command::SetMetadata { alias, meta }) if alias == "web" => meta.clone(),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_star_saves_the_favorite_at_once() {
+        let (config, data) = fixture();
+        let mut harness = harness(config, data);
+        harness.step();
+        select(&mut harness, "web");
+        harness.get_by_label("Add to favorites").click();
+        harness.step();
+        assert!(last_meta(&harness).favorite);
+        harness.step();
+        // Shown at once, before the saved data comes back.
+        harness.get_by_label("Remove from favorites");
+    }
+
+    #[test]
+    fn colours_and_tags_save_at_once() {
+        let (config, data) = fixture();
+        let mut harness = harness(config, data);
+        harness.step();
+        select(&mut harness, "web");
+        harness.get_by_label("Cyan").click();
+        harness.step();
+        assert_eq!(
+            last_meta(&harness).color,
+            Some(sshelf_core::metadata::Color([0x56, 0xb6, 0xc2]))
+        );
+
+        harness.get_by_label("Add tag").click();
+        harness.step();
+        harness.step();
+        harness.event(egui::Event::Text("prod, k3s".into()));
+        harness.step();
+        harness.key_press(egui::Key::Enter);
+        harness.step();
+        harness.step();
+        assert_eq!(last_meta(&harness).tags, ["prod", "k3s"]);
+
+        harness.get_by_label("Remove tag prod").click();
+        harness.step();
+        let meta = last_meta(&harness);
+        assert_eq!(meta.tags, ["k3s"]);
+        // The colour picked before stays.
+        assert!(meta.color.is_some());
+    }
+
+    #[test]
+    fn notes_save_only_when_asked() {
+        let (config, data) = fixture();
+        let mut harness = harness(config, data);
+        harness.step();
+        select(&mut harness, "web");
+        assert!(harness.query_by_label("Save notes").is_none());
+        harness
+            .state_mut()
+            .0
+            .detail
+            .type_notes("kubeconfig on 6443\n");
+        harness.step();
+        harness.get_by_label("Save notes").click();
+        harness.step();
+        assert_eq!(last_meta(&harness).notes, "kubeconfig on 6443");
+    }
+
+    #[test]
+    fn a_rejected_key_offers_the_agent_and_a_new_key() {
+        use std::time::SystemTime;
+
+        use sshelf_core::health::{Health, HealthReport, HealthSnapshot};
+        use sshelf_core::ssh::Resolved;
+
+        let (config, data) = fixture();
+        let ssh = ssh_info(Some(AgentStatus::Keys(0)), Some(true));
+        let mut harness = harness_with(config, data, Some(ssh));
+        harness.step();
+        select(&mut harness, "web");
+        harness.state_mut().0.detail.on_resolved(
+            "web".into(),
+            1,
+            Ok(Resolved::parse(
+                "hostname web.example.com\nidentityfile ~/.ssh/id_web\n",
+            )),
+        );
+        let mut health = HealthSnapshot::default();
+        health.reports.insert(
+            "web".into(),
+            HealthReport {
+                health: Health::AuthFailed,
+                checked_at: SystemTime::now(),
+            },
+        );
+        harness.state_mut().0.on_health(Arc::new(health));
+        harness.step();
+        harness.get_by_label_contains("no keys loaded");
+        harness.get_by_label("Load key into agent").click();
+        harness.step();
+        assert_eq!(
+            harness.state().1.last(),
+            Some(&Command::AddKeyToAgent {
+                path: PathBuf::from("~/.ssh/id_web"),
+                encrypted: true,
+            })
+        );
+        harness.get_by_label("Generate key…").click();
+        harness.step();
+        harness.step();
+        harness.get_by_label_contains("Generate key for web");
+    }
+
+    #[test]
+    fn a_stopped_agent_service_disables_loading_and_links_to_settings() {
+        use std::time::SystemTime;
+
+        use sshelf_core::health::{Health, HealthReport, HealthSnapshot};
+
+        let (config, data) = fixture();
+        let ssh = ssh_info(None, Some(false));
+        let mut harness = harness_with(config, data, Some(ssh));
+        harness.step();
+        select(&mut harness, "web");
+        let mut health = HealthSnapshot::default();
+        health.reports.insert(
+            "web".into(),
+            HealthReport {
+                health: Health::AuthFailed,
+                checked_at: SystemTime::now(),
+            },
+        );
+        harness.state_mut().0.on_health(Arc::new(health));
+        harness.step();
+        assert!(
+            harness
+                .get_by_label("Load key into agent")
+                .accesskit_node()
+                .is_disabled()
+        );
+        harness.get_by_label("How to start it").click();
+        harness.step();
+        assert_eq!(
+            harness.state_mut().0.take_navigation(),
+            Some(Navigate::Settings)
+        );
+    }
+
+    #[test]
+    fn effective_config_values_copy_on_click() {
+        use sshelf_core::ssh::Resolved;
+
+        let (config, data) = fixture();
+        let mut harness = harness(config, data);
+        harness.step();
+        select(&mut harness, "web");
+        harness.state_mut().0.detail.on_resolved(
+            "web".into(),
+            1,
+            Ok(Resolved::parse(
+                "hostname web.example.com\nuser deploy\nport 22\n",
+            )),
+        );
+        // The address line appears and moves the tabs down.
+        harness.step();
+        harness.get_by_label("Effective config").click();
+        harness.step();
+        harness.step();
+        harness.get_by_label_contains("ssh -G ·");
+        harness.get_by_label("Copy user").click();
+        harness.step();
+        assert_eq!(harness.state_mut().0.take_notices(), ["Copied user"]);
+        harness.get_by_label("Run ssh -G again").click();
+        harness.step();
+        assert_eq!(
+            harness.state().1.last(),
+            Some(&Command::Resolve("web".into()))
+        );
     }
 
     #[test]
@@ -1583,7 +1841,7 @@ mod tests {
         for _ in 0..3 {
             harness.step();
         }
-        harness.get_by_label("Defined at");
+        harness.get_by_label("Overview");
     }
 
     #[test]
@@ -1600,7 +1858,7 @@ mod tests {
             harness.step();
         }
         let card = harness.get_by_label("db").rect();
-        let pane = harness.get_by_label("Defined at").rect();
+        let pane = harness.get_by_label("Overview").rect();
         assert!(card.right() < pane.left(), "{card:?} beside {pane:?}");
     }
 

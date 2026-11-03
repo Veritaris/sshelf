@@ -111,5 +111,23 @@ fn keys_go_to_the_agent_directly_or_through_the_terminal() {
         );
         std::thread::sleep(Duration::from_millis(50));
     }
+
+    // A path from `ssh -G` (the host detail's *Load key into agent*) may
+    // start with `~`; no shell expands it, so core does.
+    core.send(Command::AddKeyToAgent {
+        path: PathBuf::from("~/.ssh/id_web"),
+        encrypted: false,
+    });
+    assert_eq!(
+        notice_or_error(&events),
+        Ok("Added id_web to the ssh agent".to_string())
+    );
+    let expanded = tmp.path().join("home").join(".ssh/id_web");
+    let runs = recorded(&record, 1);
+    assert!(
+        runs.iter()
+            .any(|r| r.last() == Some(&expanded.display().to_string())),
+        "{runs:?}"
+    );
     drop(core);
 }

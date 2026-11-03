@@ -55,13 +55,16 @@ fn tooltip(response: Response, side: Side, add_contents: impl FnOnce(&mut Ui)) -
     // "next tooltip shows at once" rule is for other widgets).
     let suppressed_id = id.with("suppressed");
     let pressed = ctx.input(|i| i.pointer.any_down());
-    if response.hovered() && pressed {
+    // A disabled widget is never "hovered", but its tooltip says why it is
+    // disabled (SPEC.md §10 *Interaction and motion*).
+    let over = response.hovered() || (!response.enabled() && response.contains_pointer());
+    if over && pressed {
         ctx.data_mut(|d| d.insert_temp(suppressed_id, true));
-    } else if !response.hovered() {
+    } else if !over {
         ctx.data_mut(|d| d.remove::<bool>(suppressed_id));
     }
     let suppressed = ctx.data(|d| d.get_temp::<bool>(suppressed_id).unwrap_or(false));
-    let hovered = response.hovered() && !pressed && !suppressed;
+    let hovered = over && !pressed && !suppressed;
     let since_id = id.with("hover_since");
     let since = if hovered {
         Some(ctx.data_mut(|d| *d.get_temp_mut_or_insert_with(since_id, || now)))

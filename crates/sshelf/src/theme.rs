@@ -42,7 +42,25 @@ pub struct Palette {
     pub green_tint: Color32,
     /// Disabled menu items.
     pub disabled_text: Color32,
+    /// Info, links, keyboard focus.
+    pub blue: Color32,
+    /// A hovered link.
+    pub link_hover: Color32,
+    /// Every other row of a table.
+    pub zebra: Color32,
+    /// Separators inside cards; a hovered copyable row.
+    pub separator: Color32,
 }
+
+/// Host colours (*Notes & tags*), named for their swatches' tooltips; none
+/// of them is a status colour (SPEC.md §10 *Visual design*).
+pub const SWATCHES: [(&str, Color32); 5] = [
+    ("Blue", Color32::from_rgb(97, 175, 239)),     // #61afef
+    ("Cyan", Color32::from_rgb(86, 182, 194)),     // #56b6c2
+    ("Magenta", Color32::from_rgb(198, 120, 221)), // #c678dd
+    ("Dark Yellow", Color32::from_rgb(209, 154, 102)), // #d19a66
+    ("Comment Grey", Color32::from_rgb(92, 99, 112)), // #5c6370
+];
 
 impl Palette {
     pub const ONE_DARK: Self = Self {
@@ -66,11 +84,17 @@ impl Palette {
         red_tint: Color32::from_rgb(58, 42, 46),         // #3a2a2e
         green_tint: Color32::from_rgb(43, 53, 40),       // #2b3528
         disabled_text: Color32::from_rgb(127, 132, 142), // #7f848e
+        blue: Color32::from_rgb(97, 175, 239),           // #61afef
+        link_hover: Color32::from_rgb(140, 196, 245),    // #8cc4f5
+        zebra: Color32::from_rgb(42, 46, 54),            // #2a2e36
+        separator: Color32::from_rgb(53, 59, 69),        // #353b45
     };
 }
 
 /// Corner radii (SPEC.md §10: 1, 4, 8 and 16 px).
 pub mod radius {
+    /// Table rows; the inner side of joined pieces.
+    pub const ROW: u8 = 1;
     /// Controls, cards, menus, chips.
     pub const CONTROL: u8 = 8;
     /// The window, dialogs, the tray flyout, large panels.
@@ -100,6 +124,8 @@ pub mod timing {
     pub const MENU_SLIDE: f32 = 0.050;
     /// One full pulse (100 → 40 → 100 %) of a starting or waiting ring.
     pub const PULSE: f32 = 1.0;
+    /// The favourite star's colour fade.
+    pub const STAR: f32 = 0.120;
 }
 
 /// Forces the dark theme and installs the One Dark visuals on `ctx`.

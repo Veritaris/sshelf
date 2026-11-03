@@ -544,14 +544,20 @@ impl HostEditor {
             self.session = None;
         }
         if let Some(alias) = open_keys {
-            let ssh_dir = snapshot
-                .path
-                .parent()
-                .map(Path::to_path_buf)
-                .unwrap_or_default();
-            self.keys.open(&alias, &ssh_dir);
+            self.open_keys(snapshot, &alias);
         }
         commands
+    }
+
+    /// Opens the "Generate key" window for `alias` (also from the host
+    /// detail's health banner, without an editor).
+    pub fn open_keys(&mut self, snapshot: &ConfigSnapshot, alias: &str) {
+        let ssh_dir = snapshot
+            .path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_default();
+        self.keys.open(alias, &ssh_dir);
     }
 
     pub fn on_key_generated(&mut self, id: u64, result: Result<GeneratedKey, String>) {

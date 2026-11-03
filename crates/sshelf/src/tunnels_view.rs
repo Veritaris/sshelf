@@ -72,6 +72,13 @@ fn new_forward() -> Forward {
 }
 
 impl TunnelsView {
+    /// Shows tunnel `id` (from a host's *Tunnels* tab).
+    pub fn select(&mut self, id: &str) {
+        self.selected = Some(id.to_string());
+        self.editor = None;
+        self.confirm_delete = false;
+    }
+
     /// Opens the editor for a new tunnel to `host` (host detail "New tunnel").
     pub fn new_tunnel(&mut self, host: &str, file: &TunnelsFile) {
         self.selected = None;

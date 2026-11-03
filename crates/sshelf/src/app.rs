@@ -14,7 +14,7 @@ use crate::close_guard::{self, CloseGuard};
 use crate::fonts;
 use crate::groups_view::GroupsView;
 use crate::hostkey_modal::HostKeyModals;
-use crate::hosts_view::HostsView;
+use crate::hosts_view::{HostsView, Navigate};
 use crate::icon::Status;
 use crate::orphans_window::{self, OrphansWindow};
 use crate::settings_view::SettingsView;
@@ -344,6 +344,14 @@ impl eframe::App for SshelfApp {
             close_guard::running_count(self.tunnel_states.as_deref()),
             self.data.as_deref().map(|d| &d.settings),
         ));
+        match self.hosts.take_navigation() {
+            Some(Navigate::Settings) => self.view = View::Settings,
+            Some(Navigate::Tunnel(id)) => {
+                self.view = View::Tunnels;
+                self.tunnels.select(&id);
+            }
+            None => {}
+        }
         if let Some(host) = self.hosts.detail.take_new_tunnel()
             && let Some(data) = &self.data
         {
