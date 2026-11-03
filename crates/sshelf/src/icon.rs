@@ -1,7 +1,67 @@
 //! The app icon, drawn in code (no image assets yet): a rounded One Dark
-//! square with three shelf bars, plus a green dot while tunnels run (tray).
+//! square with three shelf bars, plus a green dot while tunnels run (tray),
+//! and the [`Status`] its dot shows.
+
+use sshelf_core::supervisor::{GroupState, Snapshot, TunnelState};
+use sshelf_core::tunnels::Group;
 
 use crate::theme::Palette;
+
+/// The app's one status dot (SPEC.md §10 *Status marks*): green while
+/// anything runs, yellow while starting or degraded, red when something
+/// failed, none when idle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Status {
+    Idle,
+    Running,
+    Busy,
+    Failed,
+}
+
+impl Status {
+    pub fn of(states: Option<&Snapshot>, groups: &[Group]) -> Self {
+        let Some(states) = states else {
+            return Status::Idle;
+        };
+        let tunnels = || states.tunnels.values().map(|t| &t.state);
+        if tunnels().any(|s| matches!(s, TunnelState::Failed(_))) {
+            Status::Failed
+        } else if tunnels().any(|s| *s == TunnelState::Starting)
+            || groups.iter().any(|g| {
+                matches!(
+                    states.group_state(g),
+                    GroupState::Starting | GroupState::Degraded { .. }
+                )
+            })
+        {
+            Status::Busy
+        } else if tunnels().any(|s| *s == TunnelState::Running) {
+            Status::Running
+        } else {
+            Status::Idle
+        }
+    }
+
+    pub fn color(self) -> Option<egui::Color32> {
+        let p = &Palette::ONE_DARK;
+        match self {
+            Status::Idle => None,
+            Status::Running => Some(p.green),
+            Status::Busy => Some(p.yellow),
+            Status::Failed => Some(p.red),
+        }
+    }
+
+    /// The app mark's accessible name.
+    pub fn describe(self) -> &'static str {
+        match self {
+            Status::Idle => "sshelf",
+            Status::Running => "sshelf, tunnels running",
+            Status::Busy => "sshelf, tunnels starting or degraded",
+            Status::Failed => "sshelf, a tunnel failed",
+        }
+    }
+}
 
 /// Width and height in pixels.
 pub const SIZE: u32 = 32;
@@ -79,5 +139,37 @@ mod tests {
         let running = rgba(true);
         assert_eq!(pixel(&running, 25, 25), rgb(Palette::ONE_DARK.green));
         assert_ne!(pixel(&idle, 25, 25), pixel(&running, 25, 25));
+    }
+
+    fn status(state: TunnelState) -> sshelf_core::supervisor::TunnelStatus {
+        sshelf_core::supervisor::TunnelStatus {
+            state,
+            owners: Default::default(),
+            log: Default::default(),
+            pid: None,
+            failure: None,
+            reconnect: None,
+        }
+    }
+
+    #[test]
+    fn status_prefers_failures_then_starts_then_running() {
+        let mut states = Snapshot::default();
+        assert_eq!(Status::of(None, &[]), Status::Idle);
+        assert_eq!(Status::of(Some(&states), &[]), Status::Idle);
+        states
+            .tunnels
+            .insert("a".into(), status(TunnelState::Running));
+        assert_eq!(Status::of(Some(&states), &[]), Status::Running);
+        states
+            .tunnels
+            .insert("b".into(), status(TunnelState::Starting));
+        assert_eq!(Status::of(Some(&states), &[]), Status::Busy);
+        states
+            .tunnels
+            .insert("c".into(), status(TunnelState::Failed("x".into())));
+        assert_eq!(Status::of(Some(&states), &[]), Status::Failed);
+        assert_eq!(Status::Failed.color(), Some(Palette::ONE_DARK.red));
+        assert_eq!(Status::Idle.color(), None);
     }
 }

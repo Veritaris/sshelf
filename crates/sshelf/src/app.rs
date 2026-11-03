@@ -4,8 +4,8 @@
 
 use std::sync::Arc;
 use std::sync::mpsc::Receiver;
+use std::time::SystemTime;
 
-use egui::RichText;
 use sshelf_core::core::{AppData, Command, ConfigSnapshot, Core, Event, SshInfo};
 use sshelf_core::paths::Paths;
 use sshelf_core::supervisor::Snapshot;
@@ -15,7 +15,7 @@ use crate::fonts;
 use crate::groups_view::GroupsView;
 use crate::hostkey_modal::HostKeyModals;
 use crate::hosts_view::HostsView;
-use crate::icons;
+use crate::icon::Status;
 use crate::orphans_window::{self, OrphansWindow};
 use crate::settings_view::SettingsView;
 use crate::sidebar::{self, View};
@@ -23,7 +23,7 @@ use crate::theme::{self, Palette};
 use crate::toast::Toasts;
 use crate::tray::{self, Tray, TrayAction};
 use crate::tunnels_view::TunnelsView;
-use crate::{motion, window};
+use crate::{motion, status_bar, window};
 
 pub struct SshelfApp {
     core: Option<(Core, Receiver<Event>)>,
@@ -46,6 +46,8 @@ pub struct SshelfApp {
     error: Option<String>,
     /// Successes, briefly.
     toasts: Toasts,
+    /// When the last config snapshot arrived (the status bar shows it).
+    config_loaded: Option<SystemTime>,
 }
 
 impl SshelfApp {
@@ -88,6 +90,7 @@ impl SshelfApp {
             tray,
             error: tray_error,
             toasts: Toasts::default(),
+            config_loaded: None,
         }
     }
 
@@ -123,6 +126,7 @@ impl SshelfApp {
                 Event::Config(snapshot) => {
                     self.hosts.on_config(&snapshot);
                     self.config = Some(snapshot);
+                    self.config_loaded = Some(SystemTime::now());
                 }
                 Event::Data(data) => self.data = Some(data),
                 Event::Resolved {
@@ -197,23 +201,47 @@ impl SshelfApp {
         }
     }
 
+    /// The status bar, along the whole bottom of the window (under the rail).
     fn status_bar(&mut self, ui: &mut egui::Ui) {
-        let p = &Palette::ONE_DARK;
-        let Some(text) = self.error.clone() else {
-            return;
+        let (running, failed) = status_bar::tunnel_counts(self.tunnel_states.as_deref());
+        let status = status_bar::Status {
+            running,
+            failed,
+            ssh: self.ssh.as_deref(),
+            config_loaded: self.config_loaded,
         };
-        let mut dismiss = false;
-        egui::Panel::bottom("status").show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(text).color(p.red));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    dismiss = icons::button(ui, icons::X, "Dismiss").clicked();
-                });
-            });
-        });
-        if dismiss {
-            self.error = None;
-        }
+        egui::Panel::bottom("status")
+            .resizable(false)
+            .exact_size(status_bar::HEIGHT)
+            .show_separator_line(false)
+            .frame(egui::Frame::NONE)
+            .show(ui, |ui| status_bar::show(ui, &status, &mut self.error));
+    }
+
+    /// The icon rail; returns `true` when the orphan indicator was clicked.
+    fn rail(&mut self, ui: &mut egui::Ui) -> bool {
+        let orphans = self
+            .data
+            .as_deref()
+            .map(orphans_window::descriptions)
+            .unwrap_or_default();
+        let groups = self
+            .data
+            .as_deref()
+            .map(|d| d.tunnels.groups.as_slice())
+            .unwrap_or_default();
+        let rail = sidebar::Rail {
+            orphans: &orphans,
+            running: status_bar::tunnel_counts(self.tunnel_states.as_deref()).0,
+            status: Status::of(self.tunnel_states.as_deref(), groups),
+        };
+        egui::Panel::left("rail")
+            .resizable(false)
+            .exact_size(sidebar::WIDTH)
+            .show_separator_line(false)
+            .frame(egui::Frame::NONE)
+            .show(ui, |ui| sidebar::show(ui, &mut self.view, &rail))
+            .inner
     }
 }
 
@@ -254,21 +282,12 @@ impl eframe::App for SshelfApp {
             return;
         }
 
-        let orphans = self
-            .data
-            .as_deref()
-            .map(orphans_window::descriptions)
-            .unwrap_or_default();
-        let orphans_clicked = egui::Panel::left("sidebar")
-            .resizable(false)
-            .exact_size(150.0)
-            .show(ui, |ui| sidebar::show(ui, &mut self.view, &orphans))
-            .inner;
-        if orphans_clicked {
+        // Bottom first: the status bar runs under the rail.
+        self.status_bar(ui);
+        if self.rail(ui) {
             self.orphans.open = !self.orphans.open;
         }
         self.drag_strip(ui);
-        self.status_bar(ui);
         self.toasts.show(ui.ctx());
 
         let mut commands = Vec::new();

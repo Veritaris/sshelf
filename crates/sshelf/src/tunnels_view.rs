@@ -10,6 +10,7 @@ use sshelf_core::tunnels::{DEFAULT_BIND, Forward, ForwardKind, Tunnel, TunnelsFi
 
 use crate::icons;
 use crate::theme::Palette;
+use crate::widgets::marks;
 
 #[derive(Default)]
 pub struct TunnelsView {
@@ -161,7 +162,7 @@ impl TunnelsView {
                     let state = states.state(&tunnel.id);
                     let (label, color) = state_label(&state);
                     ui.horizontal(|ui| {
-                        status_dot(ui, color).on_hover_text(label);
+                        marks::dot(ui, color).on_hover_text(label);
                         let selected =
                             self.selected.as_ref() == Some(&tunnel.id) && self.editor.is_none();
                         if ui.selectable_label(selected, &tunnel.name).clicked() {
@@ -456,13 +457,6 @@ impl TunnelsView {
             self.editor = None;
         }
     }
-}
-
-/// A small filled circle (status marks are painted shapes, SPEC.md §10).
-pub fn status_dot(ui: &mut egui::Ui, color: egui::Color32) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
-    ui.painter().circle_filled(rect.center(), 4.0, color);
-    response
 }
 
 fn exposed_hint(kind: ForwardKind) -> &'static str {

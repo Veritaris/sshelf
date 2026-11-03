@@ -20,6 +20,8 @@ eframe = { version = "0.37.0", default-features = false, features = [
     "x11",
 ] }
 
+# Local wall-clock times ("config reloaded 12:04"); std has no time zones.
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 # Wipes typed passphrases once they are sent (SPEC.md §11).
 zeroize = { version = "1.9.1" }
 # Tray icon and menu (SPEC.md §10). Native on Windows/macOS; on Linux the

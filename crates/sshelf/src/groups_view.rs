@@ -10,7 +10,8 @@ use sshelf_core::tunnels::Group;
 
 use crate::icons;
 use crate::theme::Palette;
-use crate::tunnels_view::{owner_names, reconnect_text, state_label, status_dot};
+use crate::tunnels_view::{owner_names, reconnect_text, state_label};
+use crate::widgets::marks;
 
 #[derive(Default)]
 pub struct GroupsView {
@@ -166,7 +167,7 @@ impl GroupsView {
                     let tunnel_state = states.state(id);
                     let (label, color) = state_label(&tunnel_state);
                     ui.horizontal(|ui| {
-                        status_dot(ui, color).on_hover_text(&label);
+                        marks::dot(ui, color).on_hover_text(&label);
                         ui.label(&tunnel.name);
                         ui.label(RichText::new(label).color(color));
                         let others: Vec<&Owner> = states

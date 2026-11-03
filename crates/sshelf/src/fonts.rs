@@ -22,6 +22,11 @@ pub fn install(ctx: &egui::Context) {
     ctx.set_fonts(definitions());
 }
 
+/// Inter 600 at `size` (titles, headings, badges).
+pub fn semibold(size: f32) -> egui::FontId {
+    egui::FontId::new(size, FontFamily::Name(SEMIBOLD_FAMILY.into()))
+}
+
 fn definitions() -> FontDefinitions {
     let mut fonts = FontDefinitions::default();
     for (name, data) in [

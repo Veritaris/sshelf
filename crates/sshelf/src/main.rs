@@ -16,6 +16,7 @@ mod motion;
 mod orphans_window;
 mod settings_view;
 mod sidebar;
+mod status_bar;
 #[cfg(test)]
 mod test_util;
 mod theme;
@@ -23,6 +24,7 @@ mod toast;
 mod tray;
 mod tunnels_view;
 mod util;
+mod widgets;
 mod window;
 
 use std::sync::Arc;

@@ -27,6 +27,14 @@ pub struct Palette {
     pub green: Color32,
     pub yellow: Color32,
     pub red: Color32,
+    /// Comment Grey: marks only (a stopped tunnel's dot), never body text.
+    pub comment: Color32,
+    /// Tooltip background.
+    pub tooltip: Color32,
+    /// Light Yellow mixed into the background: warning banners, chips, hovers.
+    pub yellow_tint: Color32,
+    /// Light Red mixed into the background: error banners, the error status bar.
+    pub red_tint: Color32,
 }
 
 impl Palette {
@@ -43,6 +51,10 @@ impl Palette {
         green: Color32::from_rgb(152, 195, 121),       // #98c379
         yellow: Color32::from_rgb(229, 192, 123),      // #e5c07b
         red: Color32::from_rgb(224, 108, 117),         // #e06c75
+        comment: Color32::from_rgb(92, 99, 112),       // #5c6370
+        tooltip: Color32::from_rgb(24, 26, 31),        // #181a1f
+        yellow_tint: Color32::from_rgb(59, 53, 39),    // #3b3527
+        red_tint: Color32::from_rgb(58, 42, 46),       // #3a2a2e
     };
 }
 
@@ -58,6 +70,14 @@ pub mod radius {
 pub mod timing {
     /// Hover background fade of buttons, rows, cards and the like.
     pub const HOVER: f32 = 0.080;
+    /// Sliding selection highlight and its text colour cross-fade.
+    pub const SLIDE: f32 = 0.180;
+    /// Hover time before a tooltip appears.
+    pub const TOOLTIP_DELAY: f32 = 0.400;
+    /// Tooltip fade (with a 3 px slide), in and out.
+    pub const TOOLTIP_FADE: f32 = 0.120;
+    /// The next tooltip within this long after one closes shows at once.
+    pub const TOOLTIP_GRACE: f32 = 0.300;
 }
 
 /// Forces the dark theme and installs the One Dark visuals on `ctx`.

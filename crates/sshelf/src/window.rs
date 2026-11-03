@@ -49,17 +49,22 @@ fn maximized(ctx: &egui::Context) -> bool {
     })
 }
 
-/// Paints the window background behind everything: rounded, except when
-/// maximized or where the platform can't show it.
-pub fn background(ctx: &egui::Context) {
-    let corner = if rounded() && !maximized(ctx) {
+/// The window's corner radius right now: 16 px, or 0 when maximized or
+/// where the platform can't show rounded corners. Panels along the window's
+/// edge round their outer corners with it.
+pub fn corner(ctx: &egui::Context) -> u8 {
+    if rounded() && !maximized(ctx) {
         radius::LARGE
     } else {
         0
-    };
+    }
+}
+
+/// Paints the window background behind everything.
+pub fn background(ctx: &egui::Context) {
     ctx.layer_painter(egui::LayerId::background()).rect_filled(
         ctx.content_rect(),
-        corner,
+        corner(ctx),
         Palette::ONE_DARK.bg,
     );
 }
@@ -129,6 +134,7 @@ fn window_button(ui: &mut Ui, icon: char, name: &str, accent: Color32) -> Respon
         response.id.with("hover"),
         response.hovered(),
         timing::HOVER,
+        motion::ease_out,
     );
     let fill = if response.is_pointer_button_down_on() {
         p.selection

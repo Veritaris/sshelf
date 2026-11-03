@@ -11,13 +11,17 @@ pub const FAMILY: &str = "lucide";
 /// Icon size in small buttons and next to text.
 pub const INLINE: f32 = 14.0;
 
+pub const ARROW_RIGHT_LEFT: char = '\u{e417}';
 pub const CIRCLE_CHECK: char = '\u{e226}';
 pub const CIRCLE_X: char = '\u{e084}';
 pub const INFO: char = '\u{e0f9}';
+pub const LAYERS: char = '\u{e529}';
 pub const MINUS: char = '\u{e11c}';
 pub const PLAY: char = '\u{e13c}';
 pub const REFRESH_CW: char = '\u{e145}';
 pub const ROTATE_CW: char = '\u{e149}';
+pub const SERVER: char = '\u{e153}';
+pub const SETTINGS: char = '\u{e154}';
 pub const SHIELD_ALERT: char = '\u{e1fe}';
 pub const SQUARE: char = '\u{e167}';
 pub const SQUARE_TERMINAL: char = '\u{e20a}';
@@ -28,13 +32,17 @@ pub const X: char = '\u{e1b2}';
 /// Every icon above, for the glyph check in [`crate::fonts`].
 #[cfg(test)]
 pub const ALL: &[char] = &[
+    ARROW_RIGHT_LEFT,
     CIRCLE_CHECK,
     CIRCLE_X,
     INFO,
+    LAYERS,
     MINUS,
     PLAY,
     REFRESH_CW,
     ROTATE_CW,
+    SERVER,
+    SETTINGS,
     SHIELD_ALERT,
     SQUARE,
     SQUARE_TERMINAL,
@@ -58,13 +66,6 @@ pub fn atom<'a>(icon: char) -> Atom<'a> {
             INLINE,
             args.fallback_text_color,
         );
-    })
-}
-
-/// Like [`atom`], always in `color`.
-pub fn tinted<'a>(icon: char, color: Color32) -> Atom<'a> {
-    Atom::paint(egui::Vec2::splat(INLINE), move |ui, args| {
-        paint(ui, args.rect.center(), icon, INLINE, color);
     })
 }
 
