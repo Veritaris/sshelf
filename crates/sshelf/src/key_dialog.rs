@@ -46,6 +46,8 @@ struct Form {
     pending: Option<u64>,
     error: Option<String>,
     generated: Option<GeneratedKey>,
+    /// A security key: ssh-keygen was opened in a terminal; waiting for Done.
+    in_terminal: bool,
 }
 
 impl Drop for Form {
@@ -70,6 +72,7 @@ impl Form {
             pending: None,
             error: None,
             generated: None,
+            in_terminal: false,
         };
         form.path = form.default_path();
         form
@@ -247,14 +250,17 @@ fn options(ui: &mut egui::Ui, form: &mut Form, id: u64, commands: &mut Vec<Comma
                 }
                 ui.end_row();
 
-                let label = ui.label("Passphrase");
-                ui.add(egui::TextEdit::singleline(&mut form.passphrase).password(true))
-                    .labelled_by(label.id);
-                ui.end_row();
-                let label = ui.label("Repeat passphrase");
-                ui.add(egui::TextEdit::singleline(&mut form.confirm).password(true))
-                    .labelled_by(label.id);
-                ui.end_row();
+                // A security key's passphrase is asked for by ssh-keygen.
+                if !form.algorithm.is_hardware() {
+                    let label = ui.label("Passphrase");
+                    ui.add(egui::TextEdit::singleline(&mut form.passphrase).password(true))
+                        .labelled_by(label.id);
+                    ui.end_row();
+                    let label = ui.label("Repeat passphrase");
+                    ui.add(egui::TextEdit::singleline(&mut form.confirm).password(true))
+                        .labelled_by(label.id);
+                    ui.end_row();
+                }
 
                 let label = ui.label("KDF rounds");
                 ui.add(egui::DragValue::new(&mut form.rounds).range(1..=MAX_KDF_ROUNDS))
@@ -284,7 +290,14 @@ fn options(ui: &mut egui::Ui, form: &mut Form, id: u64, commands: &mut Vec<Comma
         .small()
         .color(p.dim),
     );
-    if form.passphrase.is_empty() {
+    let hardware = form.algorithm.is_hardware();
+    if hardware {
+        ui.label(
+            "ssh-keygen runs in a terminal: touch the security key (and enter its PIN) \
+             when asked, and set a passphrase there if you want one. Then come back and \
+             click Done.",
+        );
+    } else if form.passphrase.is_empty() {
         ui.colored_label(
             p.yellow,
             "⚠ Without a passphrase, anyone who gets this file can use the key.",
@@ -297,17 +310,44 @@ fn options(ui: &mut egui::Ui, form: &mut Form, id: u64, commands: &mut Vec<Comma
     if let Some(e) = &form.error {
         ui.colored_label(p.red, e);
     }
+    if form.in_terminal && hardware {
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(!busy, egui::Button::new("Done"))
+                .on_hover_text("Reads the new .pub file (never the private key)")
+                .clicked()
+            {
+                form.error = None;
+                form.pending = Some(id);
+                commands.push(Command::LoadPublicKey {
+                    id,
+                    path: form.target(),
+                });
+            }
+            ui.label(
+                RichText::new("when ssh-keygen has finished")
+                    .small()
+                    .color(p.dim),
+            );
+        });
+    }
     ui.horizontal(|ui| {
+        let can_start = problems.is_empty() && !busy && !(hardware && form.in_terminal);
         if ui
-            .add_enabled(problems.is_empty() && !busy, egui::Button::new("Generate"))
+            .add_enabled(can_start, egui::Button::new("Generate"))
             .clicked()
         {
             form.error = None;
-            form.pending = Some(id);
-            commands.push(Command::GenerateKey {
-                id,
-                request: form.take_request(),
-            });
+            if hardware {
+                form.in_terminal = true;
+                commands.push(Command::GenerateHardwareKey(form.take_request()));
+            } else {
+                form.pending = Some(id);
+                commands.push(Command::GenerateKey {
+                    id,
+                    request: form.take_request(),
+                });
+            }
         }
         if busy {
             ui.spinner();
@@ -551,6 +591,46 @@ mod tests {
             fingerprint: "SHA256:abc".into(),
             encrypted: true,
         }
+    }
+
+    #[test]
+    fn security_keys_are_made_in_the_terminal_then_loaded() {
+        let mut harness = harness("web", "Host web\n");
+        harness.step();
+        form(&mut harness).algorithm = KeyAlgorithm::Ed25519Sk;
+        form(&mut harness).path = form(&mut harness).default_path();
+        harness.step();
+        assert!(harness.query_by_label("Passphrase").is_none());
+        harness.get_by_label_contains("touch the security key");
+        harness.get_by_label("Generate").click();
+        harness.step();
+        let Some(Command::GenerateHardwareKey(request)) = harness.state().commands.last().cloned()
+        else {
+            panic!("{:?}", harness.state().commands);
+        };
+        assert_eq!(request.algorithm, KeyAlgorithm::Ed25519Sk);
+        assert!(request.path.ends_with("id_ed25519_sk_web"));
+        assert!(request.passphrase.is_empty());
+        harness.step();
+        // Generate waits; Done loads the result.
+        assert!(
+            harness
+                .get_by_label("Generate")
+                .accesskit_node()
+                .is_disabled()
+        );
+        harness.get_by_label("Done").click();
+        harness.step();
+        assert_eq!(
+            harness.state().commands.last(),
+            Some(&Command::LoadPublicKey {
+                id: 1,
+                path: request.path.clone()
+            })
+        );
+        harness.state_mut().dialog.on_generated(1, Ok(generated()));
+        harness.step();
+        harness.get_by_label("SHA256:abc");
     }
 
     #[test]

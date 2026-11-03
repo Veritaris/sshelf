@@ -410,6 +410,7 @@ Each milestone ends with its acceptance criteria met, tests green on all three O
 - `ProxyJump` chain visualization (breadcrumb first, graph later).
   - As built: "Route: you › bastion › db-gw › web" in the host detail, for hosts whose effective config has a `ProxyJump` (no extra `ssh -G` for the rest). Core walks the chain like the host key checks do (§9: nested jumps first, each hop once, depth-limited) with `ssh -G` per hop, off the UI thread. Hops that are hosts of the config are links that select them; others show their address on hover. A `ProxyCommand` shows as a "ProxyCommand" step with the command on hover. No graph yet.
 - Optional hardware-key generation via terminal `ssh-keygen`.
+  - As built: *Ed25519-SK* and *ECDSA-SK (security key)* in the key dialog. *Generate* opens the user's terminal with `ssh-keygen -t ed25519-sk -a <rounds> -C <comment> -f <file>` (§10's terminal rules); the device touch, PIN and passphrase all happen there, so sshelf never sees them. *Done* then reads only `<file>.pub` (never the private key file, §1) and shows the fingerprint and the usual follow-ups; *Add to agent* uses the terminal, since sshelf cannot tell whether a passphrase was set. Windows' built-in OpenSSH talks to the key through Windows Hello.
 
 ---
 

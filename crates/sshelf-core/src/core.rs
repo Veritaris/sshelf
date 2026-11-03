@@ -130,6 +130,14 @@ pub enum Command {
     },
     /// Check these hosts' health (SPEC.md §12, M8); a few at a time.
     CheckHealth(Vec<String>),
+    /// Open a terminal running `ssh-keygen` for a security key (SPEC.md §11).
+    GenerateHardwareKey(KeyRequest),
+    /// Read the public half of a key `ssh-keygen` wrote; answered by
+    /// [`Event::KeyGenerated`] under `id`.
+    LoadPublicKey {
+        id: u64,
+        path: PathBuf,
+    },
     /// Work out every jump host on the way to an alias (`ssh -G` per hop);
     /// answered by [`Event::Route`].
     ResolveRoute(String),
@@ -659,6 +667,22 @@ impl Worker {
                 }
                 Command::AddKeyToAgent { path, encrypted } => self.add_to_agent(&path, encrypted),
                 Command::ResolveRoute(alias) => self.resolve_route(alias),
+                Command::GenerateHardwareKey(request) => {
+                    let started = keygen::hardware_args(&request).and_then(|args| {
+                        self.run_in_terminal("Generate a security key", "ssh-keygen", &args)
+                    });
+                    match started {
+                        Ok(()) => self.emitter.emit(Event::Notice(
+                            "Opened a terminal for ssh-keygen: touch your security key when asked"
+                                .into(),
+                        )),
+                        Err(e) => self.error(format!("cannot generate the key: {e}")),
+                    }
+                }
+                Command::LoadPublicKey { id, path } => {
+                    let result = keygen::load_public(&path);
+                    self.emitter.emit(Event::KeyGenerated { id, result });
+                }
                 Command::CheckHealth(aliases) => {
                     for alias in aliases {
                         if self.health.checking.insert(alias.clone()) {

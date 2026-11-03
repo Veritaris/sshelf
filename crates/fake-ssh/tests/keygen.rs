@@ -158,6 +158,53 @@ fn installing_a_key_opens_the_terminal_with_ssh_and_the_script() {
 }
 
 #[test]
+fn security_keys_run_ssh_keygen_in_the_terminal() {
+    let tmp = tempfile::tempdir().unwrap();
+    let paths = Paths::new(&tmp.path().join("home"), tmp.path().join("app"));
+    let record = tmp.path().join("launches.txt");
+    let fake = PathBuf::from(env!("CARGO_BIN_EXE_fake-ssh"));
+    Store::new(&paths.app_dir)
+        .save(&Settings {
+            ssh_path: Some(fake.clone()),
+            terminal_command: format!(
+                "\"{}\" --record \"{}\" {{ssh}} {{alias}}",
+                fake.display(),
+                record.display()
+            ),
+            ..Settings::default()
+        })
+        .unwrap();
+    let (core, events) = Core::start(paths.clone(), Arc::new(|| {}));
+    let path = paths.ssh_dir.join("id_ed25519_sk_web");
+    core.send(Command::GenerateHardwareKey(KeyRequest {
+        algorithm: KeyAlgorithm::Ed25519Sk,
+        path: path.clone(),
+        comment: "web (sshelf)".into(),
+        passphrase: Secret::default(),
+        kdf_rounds: keygen::DEFAULT_KDF_ROUNDS,
+    }));
+    let launches = recorded(&record);
+    let args = &launches[0];
+    let at = args.iter().position(|a| a == "-t").expect("ssh-keygen -t");
+    assert!(args[at - 1].contains("ssh-keygen"), "{args:?}");
+    assert_eq!(&args[at..at + 2], ["-t", "ed25519-sk"]);
+    assert_eq!(args.last().unwrap(), &path.display().to_string());
+    assert!(
+        !args.iter().any(|a| a == "-N" || a == "-P"),
+        "no secrets: {args:?}"
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if let Event::Notice(text) = events.recv_timeout(left).expect("a notice") {
+            assert!(text.contains("touch your security key"), "{text}");
+            break;
+        }
+    }
+    drop(core);
+}
+
+#[test]
 fn ssh_keygen_opens_an_encrypted_key_only_with_its_passphrase() {
     let dir = tempfile::tempdir().unwrap();
     let key = keygen::generate(&KeyRequest {
