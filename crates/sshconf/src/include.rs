@@ -77,6 +77,9 @@ pub struct Diagnostic {
 pub struct ConfigSet {
     /// Each file once, in first-reached order; `files[0]` is the main file.
     pub files: Vec<ConfigFile>,
+    /// For each file, the `Include` line that first reached it (`None` for
+    /// the main file).
+    pub included_from: Vec<Option<LineRef>>,
     pub headers: Vec<HeaderRef>,
     /// Every resolved `Include` argument, in evaluation order.
     pub includes: Vec<IncludeTarget>,
@@ -113,6 +116,7 @@ impl ConfigSet {
             opts,
             set: ConfigSet {
                 files: Vec::new(),
+                included_from: Vec::new(),
                 headers: Vec::new(),
                 includes: Vec::new(),
                 diagnostics: Vec::new(),
@@ -121,7 +125,7 @@ impl ConfigSet {
             walked: HashSet::new(),
             stack: Vec::new(),
         };
-        let id = loader.add(identity(main), file);
+        let id = loader.add(identity(main), file, None);
         loader.walk(id, 0, &[]);
         Ok(loader.set)
     }
@@ -174,9 +178,10 @@ struct Loader<'a> {
 }
 
 impl Loader<'_> {
-    fn add(&mut self, key: PathBuf, file: ConfigFile) -> FileId {
+    fn add(&mut self, key: PathBuf, file: ConfigFile, from: Option<LineRef>) -> FileId {
         let id = self.set.files.len();
         self.set.files.push(file);
+        self.set.included_from.push(from);
         self.ids.insert(key, id);
         id
     }
@@ -297,7 +302,7 @@ impl Loader<'_> {
         let id = match self.ids.get(&key) {
             Some(&id) => id,
             None => match ConfigFile::read(path) {
-                Ok(file) => self.add(key, file),
+                Ok(file) => self.add(key, file, Some(at)),
                 Err(e) => {
                     self.diag(Severity::Error, at, e.to_string());
                     return;

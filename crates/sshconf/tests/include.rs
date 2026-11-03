@@ -67,6 +67,18 @@ fn glob_expands_sorted_skipping_hidden_files_and_dirs() {
 }
 
 #[test]
+fn every_file_knows_the_include_that_reached_it() {
+    let set = load("glob");
+    assert_eq!(set.included_from.len(), set.files.len());
+    assert_eq!(set.included_from[0], None);
+    for from in &set.included_from[1..] {
+        let at = from.expect("an included file");
+        assert_eq!(at.file, 0);
+        assert!(matches!(set.line(at).kind, LineKind::Include(_)));
+    }
+}
+
+#[test]
 fn tilde_expands_to_home() {
     let set = load("tilde");
     assert_eq!(header_names(&set), ["t"]);
