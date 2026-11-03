@@ -330,10 +330,14 @@ Before starting a tunnel, determine the host key state using values from `ssh -G
 Available when adding/editing a host.
 
 - Generated in-process with the RustCrypto `ssh-key` crate (writes standard encrypted OpenSSH format; passphrase never appears in process arguments). Zeroize secrets after writing.
+  - `ssh-key` 0.6.7 (0.7 is a release candidate). Encrypted keys use bcrypt-pbkdf with AES-256-CTR, like `ssh-keygen`. Generation runs off the UI and core threads (RSA takes seconds).
+  - The passphrase travels as a `Secret`: wiped on drop, printed as `***` in debug output. egui may keep copies of typed text in its own buffers (e.g. undo history); that is outside sshelf's control.
+  - The private key file is created owner-only *before* anything is written into it: mode `600` on Unix; on Windows its DACL is replaced by one full-access entry for the current user, with inheritance cut. A missing `~/.ssh` is created (`700` on Unix). If writing the `.pub` fails, the private key is removed again.
 - Options:
   - Algorithm: **Ed25519 (default)**, ECDSA (256/384/521), RSA (3072/4096). Length field hidden for Ed25519.
   - Passphrase + confirmation; empty allowed with a visible warning.
   - KDF rounds, comment, file name (refuse to overwrite existing files).
+    - KDF rounds default to 16 (`ssh-keygen`'s default), 1–1000. The comment defaults to `<alias> (sshelf)` and may not contain quotes, backslashes or line breaks (it ends up in the install command). The file name defaults to `~/.ssh/<id_ed25519|id_ecdsa|id_rsa>_<alias>`; the key or its `.pub` existing refuses the name.
 - Hardware keys (`ed25519-sk`, `ecdsa-sk`) require device interaction → run `ssh-keygen` in a terminal. Optional, later.
 - File permissions: mode `600` on Unix; on Windows restrict the file ACL to the current user (OpenSSH rejects keys with open permissions).
 - Follow-up actions (checkboxes):

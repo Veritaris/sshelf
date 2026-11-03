@@ -12,18 +12,24 @@ humantime = { version = "2.4.0" }
 # 9.x is still a release candidate.
 notify = { version = "8.2.1" }
 serde = { version = "1.0.229", features = ["derive"] }
+# Key generation (SPEC.md §11): standard encrypted OpenSSH key files.
+# 0.7 is still a release candidate.
+ssh-key = { version = "0.6.7", features = ["crypto", "encryption", "getrandom"] }
+zeroize = { version = "1.9.1" }
 tempfile = { version = "3.27.0" }
 thiserror = { version = "2.0.21" }
 toml = { version = "1.1.8" }
 
 [target.'cfg(windows)'.dependencies]
-# Service Control Manager (read-only `ssh-agent` query) and Job Objects
-# (stopping a tunnel's whole process tree).
+# Service Control Manager (read-only `ssh-agent` query), Job Objects
+# (stopping a tunnel's whole process tree) and owner-only ACLs for new keys.
 windows-sys = { version = "0.61.2", features = [
     "Win32_Foundation",
     "Win32_Security",
+    "Win32_Security_Authorization",
     "Win32_System_JobObjects",
     "Win32_System_Services",
+    "Win32_System_Threading",
 ] }
 
 [target.'cfg(unix)'.dependencies]

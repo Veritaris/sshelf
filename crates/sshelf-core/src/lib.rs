@@ -5,6 +5,8 @@
 //! resolution, host key checks and the tunnel supervisor. Must never depend on
 //! egui; the UI talks to it through commands and events. See SPEC.md §2–§9.
 
+#[cfg(windows)]
+pub mod acl;
 pub mod agent_service;
 pub mod child;
 pub mod config_edit;
@@ -12,6 +14,7 @@ pub mod core;
 pub mod hints;
 pub mod history;
 pub mod hostkeys;
+pub mod keygen;
 pub mod metadata;
 pub mod orphans;
 pub mod paths;

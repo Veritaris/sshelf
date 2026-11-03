@@ -18,6 +18,7 @@ use crate::agent_service::{self, AgentService};
 use crate::config_edit::{self, Change, ConfigWriter, Edit, Problem};
 use crate::history::History;
 use crate::hostkeys::{self, ChangedKey, Keygen, KnownHostsWriter, UnknownKey};
+use crate::keygen::{self, GeneratedKey, KeyRequest};
 use crate::metadata::{HostMeta, HostsFile};
 use crate::orphans::{self, GroupOrphan, Orphan, TunnelOrphan};
 use crate::paths::Paths;
@@ -108,6 +109,11 @@ pub enum Command {
         alias: String,
         to: String,
     },
+    /// Generate a key pair (SPEC.md §11); answered by [`Event::KeyGenerated`].
+    GenerateKey {
+        id: u64,
+        request: KeyRequest,
+    },
     Shutdown,
 }
 
@@ -172,6 +178,11 @@ pub enum Event {
     EditConflict {
         id: u64,
         disk: Arc<Vec<u8>>,
+    },
+    /// Result of [`Command::GenerateKey`] `id`.
+    KeyGenerated {
+        id: u64,
+        result: Result<GeneratedKey, String>,
     },
     /// Something the user asked for succeeded (e.g. "Settings saved").
     Notice(String),
@@ -567,6 +578,14 @@ impl Worker {
                     self.check_edit(edit, AfterCheck::Save { overwrite })
                 }
                 Command::RenameHost { id, alias, to } => self.rename_host(id, alias, to),
+                Command::GenerateKey { id, request } => {
+                    // RSA can take seconds: off the core thread.
+                    let emitter = self.emitter.clone();
+                    thread::spawn(move || {
+                        let result = keygen::generate(&request);
+                        emitter.emit(Event::KeyGenerated { id, result });
+                    });
+                }
                 // Dropping the supervisor stops every tunnel.
                 Command::Shutdown => break,
             }

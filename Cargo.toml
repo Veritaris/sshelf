@@ -14,3 +14,16 @@ license = "MIT"
 
 [profile.release]
 opt-level = 3
+
+# Key generation is far too slow unoptimized (RSA-4096 primes, bcrypt rounds):
+# optimize just those crates in dev builds and tests.
+[profile.dev.package.num-bigint-dig]
+opt-level = 3
+[profile.dev.package.rsa]
+opt-level = 3
+[profile.dev.package.bcrypt-pbkdf]
+opt-level = 3
+[profile.dev.package.blowfish]
+opt-level = 3
+[profile.dev.package.sha2]
+opt-level = 3
