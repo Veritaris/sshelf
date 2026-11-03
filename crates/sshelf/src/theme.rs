@@ -46,12 +46,27 @@ impl Palette {
     };
 }
 
+/// Corner radii (SPEC.md §10: 1, 4, 8 and 16 px).
+pub mod radius {
+    /// Controls, cards, menus, chips.
+    pub const CONTROL: u8 = 8;
+    /// The window, dialogs, the tray flyout, large panels.
+    pub const LARGE: u8 = 16;
+}
+
+/// Motion timings in seconds (SPEC.md §10 *Interaction and motion*).
+pub mod timing {
+    /// Hover background fade of buttons, rows, cards and the like.
+    pub const HOVER: f32 = 0.080;
+}
+
 /// Forces the dark theme and installs the One Dark visuals on `ctx`.
 pub fn apply(ctx: &egui::Context) {
     let p = &Palette::ONE_DARK;
     let mut vis = egui::Visuals::dark();
 
-    vis.panel_fill = p.bg;
+    // The window paints its own (rounded) background; panels sit on it.
+    vis.panel_fill = Color32::TRANSPARENT;
     vis.window_fill = p.bg_dark;
     vis.window_stroke = Stroke::new(1.0, p.border);
     vis.faint_bg_color = p.surface;

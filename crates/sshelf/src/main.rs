@@ -12,6 +12,7 @@ mod hosts_view;
 mod icon;
 mod icons;
 mod key_dialog;
+mod motion;
 mod orphans_window;
 mod settings_view;
 mod sidebar;
@@ -22,6 +23,7 @@ mod toast;
 mod tray;
 mod tunnels_view;
 mod util;
+mod window;
 
 use std::sync::Arc;
 
@@ -29,11 +31,11 @@ use app::SshelfApp;
 
 fn main() -> eframe::Result<()> {
     let native_options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([960.0, 640.0])
-            .with_min_inner_size([640.0, 420.0])
-            .with_title("sshelf")
-            .with_icon(Arc::new(icon::egui_icon())),
+        viewport: window::viewport(
+            egui::ViewportBuilder::default()
+                .with_title("sshelf")
+                .with_icon(Arc::new(icon::egui_icon())),
+        ),
         ..Default::default()
     };
 

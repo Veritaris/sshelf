@@ -23,6 +23,7 @@ use crate::theme::{self, Palette};
 use crate::toast::Toasts;
 use crate::tray::{self, Tray, TrayAction};
 use crate::tunnels_view::TunnelsView;
+use crate::{motion, window};
 
 pub struct SshelfApp {
     core: Option<(Core, Receiver<Event>)>,
@@ -51,6 +52,8 @@ impl SshelfApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         fonts::install(&cc.egui_ctx);
         theme::apply(&cc.egui_ctx);
+        #[cfg(target_os = "windows")]
+        window::native::prepare(cc);
         let ctx = cc.egui_ctx.clone();
         // The event loop runs by now, as macOS requires for tray icons.
         let (tray, tray_error) = match Tray::create(&cc.egui_ctx) {
@@ -175,6 +178,25 @@ impl SshelfApp {
         }
     }
 
+    /// The window's drag strip (SPEC.md §10), above everything but the sidebar.
+    fn drag_strip(&self, ui: &mut egui::Ui) {
+        let action = egui::Panel::top("drag_strip")
+            .resizable(false)
+            .exact_size(window::STRIP_HEIGHT)
+            .show_separator_line(false)
+            .frame(egui::Frame::NONE.inner_margin(egui::Margin {
+                left: 16,
+                right: 8,
+                top: 0,
+                bottom: 0,
+            }))
+            .show(ui, |ui| window::strip(ui, "sshelf"))
+            .inner;
+        if let Some(action) = action {
+            window::apply(ui.ctx(), action);
+        }
+    }
+
     fn status_bar(&mut self, ui: &mut egui::Ui) {
         let p = &Palette::ONE_DARK;
         let Some(text) = self.error.clone() else {
@@ -200,6 +222,10 @@ impl eframe::App for SshelfApp {
     /// the tray are handled here, the drawing in [`Self::ui`].
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.apply_events(ctx);
+        motion::set_reduce_motion(
+            ctx,
+            self.data.as_ref().is_some_and(|d| d.settings.reduce_motion),
+        );
         self.run_tray(ctx);
         // A tray exists only if one was created and the desktop shows it.
         let tray = self.tray.is_some() && self.ssh.as_ref().is_some_and(|s| s.tray == Ok(true));
@@ -211,12 +237,20 @@ impl eframe::App for SshelfApp {
         );
     }
 
+    /// Transparent, so the window's rounded corners show what is behind it.
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        [0.0; 4]
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let p = &Palette::ONE_DARK;
+        window::background(ui.ctx());
         if let Some(error) = &self.startup_error {
+            self.drag_strip(ui);
             egui::CentralPanel::default().show(ui, |ui| {
                 ui.colored_label(p.red, error);
             });
+            window::resize_handles(ui);
             return;
         }
 
@@ -233,6 +267,7 @@ impl eframe::App for SshelfApp {
         if orphans_clicked {
             self.orphans.open = !self.orphans.open;
         }
+        self.drag_strip(ui);
         self.status_bar(ui);
         self.toasts.show(ui.ctx());
 
@@ -293,5 +328,6 @@ impl eframe::App for SshelfApp {
             self.tunnels.new_tunnel(&host, &data.tunnels);
         }
         self.send(commands);
+        window::resize_handles(ui);
     }
 }

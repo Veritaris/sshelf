@@ -26,6 +26,17 @@ zeroize = { version = "1.9.1" }
 # pure-Rust KSNI (StatusNotifierItem over D-Bus) backend, without GTK.
 tray-icon = { version = "0.26.1", default-features = false }
 
+[target.'cfg(target_os = "windows")'.dependencies]
+# The frameless window's Windows fix (src/window.rs, `native`): DWM attributes
+# and a subclass on the root window, reached through its raw handle.
+raw-window-handle = { version = "0.6.2" }
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 tray-icon = { version = "0.26.1", default-features = false, features = ["ksni"] }
 

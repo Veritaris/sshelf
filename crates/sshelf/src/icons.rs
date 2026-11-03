@@ -14,6 +14,7 @@ pub const INLINE: f32 = 14.0;
 pub const CIRCLE_CHECK: char = '\u{e226}';
 pub const CIRCLE_X: char = '\u{e084}';
 pub const INFO: char = '\u{e0f9}';
+pub const MINUS: char = '\u{e11c}';
 pub const PLAY: char = '\u{e13c}';
 pub const REFRESH_CW: char = '\u{e145}';
 pub const ROTATE_CW: char = '\u{e149}';
@@ -30,6 +31,7 @@ pub const ALL: &[char] = &[
     CIRCLE_CHECK,
     CIRCLE_X,
     INFO,
+    MINUS,
     PLAY,
     REFRESH_CW,
     ROTATE_CW,
