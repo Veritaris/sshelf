@@ -1,5 +1,6 @@
 //! Top-level eframe app: applies core events and lays out the sidebar, the
-//! current view and the status bar. All side effects go through the core.
+//! current view, the status bar (errors) and toasts (successes). All side
+//! effects go through the core.
 
 use std::sync::Arc;
 use std::sync::mpsc::Receiver;
@@ -17,13 +18,9 @@ use crate::orphans_window::{self, OrphansWindow};
 use crate::settings_view::SettingsView;
 use crate::sidebar::{self, View};
 use crate::theme::{self, Palette};
+use crate::toast::Toasts;
 use crate::tray::{self, Tray, TrayAction};
 use crate::tunnels_view::TunnelsView;
-
-enum Status {
-    Info(String),
-    Error(String),
-}
 
 pub struct SshelfApp {
     core: Option<(Core, Receiver<Event>)>,
@@ -42,7 +39,10 @@ pub struct SshelfApp {
     close: CloseGuard,
     /// `None` when the platform could not create one.
     tray: Option<Tray>,
-    status: Option<Status>,
+    /// The last error, in the status bar until dismissed.
+    error: Option<String>,
+    /// Successes, briefly.
+    toasts: Toasts,
 }
 
 impl SshelfApp {
@@ -80,7 +80,8 @@ impl SshelfApp {
             hostkeys: HostKeyModals::default(),
             close: CloseGuard::default(),
             tray,
-            status: tray_error.map(Status::Error),
+            error: tray_error,
+            toasts: Toasts::default(),
         }
     }
 
@@ -125,9 +126,10 @@ impl SshelfApp {
                 } => self.hosts.detail.on_resolved(alias, generation, result),
                 Event::Ssh(info) => self.ssh = Some(info),
                 Event::Launched { alias } => {
-                    self.status = Some(Status::Info(format!("Opened a terminal for {alias}")));
+                    self.toasts.push(format!("Opened a terminal for {alias}"));
                 }
-                Event::Error(message) => self.status = Some(Status::Error(message)),
+                Event::Notice(text) => self.toasts.push(text),
+                Event::Error(message) => self.error = Some(message),
                 Event::Tunnels(states) => self.tunnel_states = Some(states),
                 // A start from the tray may need an answer: show the window.
                 Event::HostKeyPrompt(prompt) => {
@@ -145,11 +147,11 @@ impl SshelfApp {
             }
         }
         if let Some((error, text)) = self.hosts.editor.take_status() {
-            self.status = Some(if error {
-                Status::Error(text)
+            if error {
+                self.error = Some(text);
             } else {
-                Status::Info(text)
-            });
+                self.toasts.push(text);
+            }
         }
     }
 
@@ -163,24 +165,20 @@ impl SshelfApp {
 
     fn status_bar(&mut self, ui: &mut egui::Ui) {
         let p = &Palette::ONE_DARK;
-        let Some(status) = &self.status else {
+        let Some(text) = self.error.clone() else {
             return;
-        };
-        let (text, color) = match status {
-            Status::Info(text) => (text.clone(), p.dim),
-            Status::Error(text) => (text.clone(), p.red),
         };
         let mut dismiss = false;
         egui::Panel::bottom("status").show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(RichText::new(text).color(color));
+                ui.label(RichText::new(text).color(p.red));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     dismiss = ui.small_button("✖").clicked();
                 });
             });
         });
         if dismiss {
-            self.status = None;
+            self.error = None;
         }
     }
 }
@@ -224,6 +222,7 @@ impl eframe::App for SshelfApp {
             self.orphans.open = !self.orphans.open;
         }
         self.status_bar(ui);
+        self.toasts.show(ui.ctx());
 
         let mut commands = Vec::new();
         egui::CentralPanel::default().show(ui, |ui| match self.view {

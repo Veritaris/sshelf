@@ -173,6 +173,8 @@ pub enum Event {
         id: u64,
         disk: Arc<Vec<u8>>,
     },
+    /// Something the user asked for succeeded (e.g. "Settings saved").
+    Notice(String),
     Error(String),
 }
 
@@ -1001,6 +1003,10 @@ impl Worker {
             Ok(()) => {
                 self.data.settings = settings;
                 self.publish_data();
+                self.emitter.emit(Event::Notice(format!(
+                    "Settings saved to {}",
+                    Settings::FILE
+                )));
                 self.refresh_ssh();
             }
             Err(e) => self.error(e.to_string()),

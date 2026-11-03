@@ -13,6 +13,7 @@ mod orphans_window;
 mod settings_view;
 mod sidebar;
 mod theme;
+mod toast;
 mod tray;
 mod tunnels_view;
 mod util;

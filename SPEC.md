@@ -283,6 +283,7 @@ Before starting a tunnel, determine the host key state using values from `ssh -G
 
 - **Sidebar:** Hosts · Tunnels · Groups · Settings, plus the orphan warning indicator.
 - **Main area:** list + detail pane.
+- **Feedback:** successes (settings saved, host saved/added/renamed, terminal opened) show as a toast in the bottom-right corner that fades after ~3 s; errors stay in the status bar until dismissed.
   - Hosts: list (search, tags, favorites, *New host*) with a separate collapsible *Patterns* section; detail pane with source file, metadata, actions (Connect, New tunnel, Edit, Rename…), and the `ssh -G` resolved panel.
   - *Edit* replaces the detail pane with the editor (§5): *Form* and *Raw text* tabs over the same block, the problems found, the changed lines as they will be written, and Save / Check / Discard. Picking another host closes an editor without changes. *New host* opens the same editor with an alias field and the target file picker (§4).
   - Tunnels: list with status, start/stop, forwards, stderr log.

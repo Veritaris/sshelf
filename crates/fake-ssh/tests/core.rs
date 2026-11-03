@@ -496,6 +496,30 @@ fn changed_host_key_is_reviewed_and_replaced() {
 }
 
 #[test]
+fn saving_settings_publishes_them_and_says_so() {
+    let tmp = tempfile::tempdir().unwrap();
+    let paths = Paths::new(&tmp.path().join("home"), tmp.path().join("app"));
+    let (core, events) = Core::start(paths.clone(), Arc::new(|| {}));
+    let settings = Settings {
+        ssh_path: Some(fake_ssh()),
+        close_behavior: sshelf_core::settings::CloseBehavior::MinimizeToTray,
+        ..Settings::default()
+    };
+    core.send(Command::SaveSettings(settings.clone()));
+    wait_for(&events, "the saved settings", |e| match e {
+        Event::Data(data) if data.settings == settings => Some(()),
+        _ => None,
+    });
+    let notice = wait_for(&events, "a notice", |e| match e {
+        Event::Notice(text) => Some(text),
+        _ => None,
+    });
+    assert_eq!(notice, "Settings saved to settings.toml");
+    assert_eq!(Store::new(&paths.app_dir).load::<Settings>().data, settings);
+    drop(core);
+}
+
+#[test]
 fn missing_config_is_not_an_error_and_is_watched() {
     let tmp = tempfile::tempdir().unwrap();
     let home = tmp.path().join("home");
