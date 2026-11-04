@@ -320,6 +320,9 @@ impl HostsView {
         }
         commands.extend(self.editor.show_rename(ui.ctx(), config, data, states));
         commands.extend(self.editor.show_keys(ui.ctx(), config, ssh));
+        if self.editor.take_open_settings() {
+            self.navigate = Some(Navigate::Settings);
+        }
         commands
     }
 
@@ -1622,7 +1625,7 @@ mod tests {
         harness.get_by_label("Generate key…").click();
         harness.step();
         harness.step();
-        harness.get_by_label_contains("Generate key for web");
+        harness.get_by_label_contains("Generate a key for web");
     }
 
     #[test]

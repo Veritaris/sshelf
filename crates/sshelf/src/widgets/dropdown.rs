@@ -41,7 +41,29 @@ pub struct Choice<T> {
     pub disabled: Option<String>,
     /// A Lucide icon before the label (actions such as *Browse…*).
     pub icon: Option<char>,
+    /// A dim note at the right end (e.g. "recommended").
+    pub note: Option<String>,
+    /// Starts a group: a separator and this overline above the row.
+    pub group: Option<String>,
 }
+
+impl<T> Choice<T> {
+    /// A plain row: just its value and label.
+    pub fn new(value: T, label: impl Into<String>) -> Self {
+        Self {
+            value,
+            label: label.into(),
+            detail: None,
+            disabled: None,
+            icon: None,
+            note: None,
+            group: None,
+        }
+    }
+}
+
+/// Height of a group's separator and overline.
+const GROUP: f32 = 30.0;
 
 /// How the closed control looks.
 #[derive(Debug, Clone, Copy)]
@@ -76,13 +98,7 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
     ) -> Self {
         let choices = options
             .iter()
-            .map(|(value, label)| Choice {
-                value: *value,
-                label: label.to_string(),
-                detail: None,
-                disabled: None,
-                icon: None,
-            })
+            .map(|(value, label)| Choice::new(*value, *label))
             .collect();
         Self::with_choices(id, name, choices, trigger)
     }
@@ -203,7 +219,8 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
         if shown > 0.0 {
             let row = self.row_height();
             let rows = self.choices.len().min(self.max_visible);
-            let height = rows as f32 * row + 8.0;
+            let groups = self.choices.iter().filter(|c| c.group.is_some()).count();
+            let height = rows as f32 * row + groups as f32 * GROUP + 8.0;
             let width = trigger.rect.width().max(self.panel_width);
             let below = trigger.rect.bottom() + GAP;
             let room_below = ctx.content_rect().bottom() - below;
@@ -361,6 +378,24 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
                 let slot = ui.painter().add(Shape::Noop);
                 let mut highlighted = None;
                 for (index, choice) in self.choices.iter().enumerate() {
+                    if let Some(group) = &choice.group {
+                        let (rect, _) = ui
+                            .allocate_exact_size(vec2(ui.available_width(), GROUP), Sense::hover());
+                        if index > 0 {
+                            ui.painter().hline(
+                                (rect.left() + 4.0)..=(rect.right() - 4.0),
+                                rect.top() + 4.0,
+                                Stroke::new(1.0, p.selection),
+                            );
+                        }
+                        ui.painter().text(
+                            pos2(rect.left() + 10.0, rect.bottom() - 9.0),
+                            Align2::LEFT_CENTER,
+                            group.to_uppercase(),
+                            crate::fonts::semibold(11.0),
+                            p.dim,
+                        );
+                    }
                     let enabled = choice.disabled.is_none();
                     let sense = if enabled {
                         Sense::click()
@@ -410,8 +445,24 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
                         );
                         left += 14.0 + 8.0;
                     }
-                    // Text stops before the check mark's column.
-                    let room = (rect.right() - 10.0 - 14.0 - 8.0 - left).max(0.0);
+                    // Text stops before the check mark's column (and the
+                    // note, if any).
+                    let mut right = rect.right() - 10.0 - 14.0 - 8.0;
+                    if let Some(note) = &choice.note {
+                        let galley = ui.painter().layout_no_wrap(
+                            note.clone(),
+                            FontId::proportional(11.0),
+                            p.dim,
+                        );
+                        right -= galley.size().x;
+                        ui.painter().galley(
+                            pos2(right, label_y - galley.size().y / 2.0),
+                            galley,
+                            p.dim,
+                        );
+                        right -= 8.0;
+                    }
+                    let room = (right - left).max(0.0);
                     let font = self.label_font();
                     let (label, _) = text::elide(ui.painter(), &choice.label, &font, room);
                     ui.painter()

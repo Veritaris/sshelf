@@ -495,6 +495,8 @@ pub struct HostEditor {
     /// editor opened (a new key may have appeared since).
     found_keys: Option<Arc<Vec<FoundKey>>>,
     keys_requested: bool,
+    /// The key dialog asked for *Settings* (the agent service).
+    open_settings: bool,
 }
 
 impl HostEditor {
@@ -822,12 +824,22 @@ impl HostEditor {
         if !commands.is_empty() {
             self.next_id = id;
         }
-        if let (Some(KeyAction::UseInHost { identity_file }), Some(session)) =
-            (action, &mut self.session)
-        {
-            session.use_key(&identity_file);
+        match action {
+            Some(KeyAction::UseInHost { identity_file }) => {
+                if let Some(session) = &mut self.session {
+                    session.use_key(&identity_file);
+                }
+            }
+            Some(KeyAction::Copied(what)) => self.status = Some((false, format!("Copied {what}"))),
+            Some(KeyAction::OpenSettings) => self.open_settings = true,
+            None => {}
         }
         commands
+    }
+
+    /// "How to start it" was clicked in the key dialog, once.
+    pub fn take_open_settings(&mut self) -> bool {
+        std::mem::take(&mut self.open_settings)
     }
 
     /// The rename dialog, if open (board *Dialog-Rename*): the new alias,
@@ -1418,6 +1430,8 @@ fn add_key_menu(
                 .is_some()
                 .then(|| "the file dialog is open".into()),
             icon: Some(icons::FOLDER),
+            note: None,
+            group: None,
         },
         Choice {
             value: TYPE,
@@ -1425,6 +1439,8 @@ fn add_key_menu(
             detail: Some(format!("adds {example} to edit")),
             disabled: None,
             icon: Some(icons::PENCIL),
+            note: None,
+            group: None,
         },
     ];
     choices.extend(keys.iter().enumerate().map(|(i, key)| {
@@ -1441,6 +1457,8 @@ fn add_key_menu(
             detail: Some(detail),
             disabled: used.then(|| "already in this host".into()),
             icon: None,
+            note: None,
+            group: None,
         }
     }));
     let name = format!("Add {keyword}");
@@ -1818,6 +1836,8 @@ fn target_picker(
                         .filter(|_| !targets.contains(&file.path))
                         .map(|r| format!("read-only: {r}")),
                     icon: None,
+                    note: None,
+                    group: None,
                 });
                 paths.push(file.path.clone());
             }
@@ -1829,6 +1849,8 @@ fn target_picker(
                 detail: Some("main config · created with this host".into()),
                 disabled: None,
                 icon: None,
+                note: None,
+                group: None,
             });
             paths.push(session.file.clone());
         }

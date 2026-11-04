@@ -19,6 +19,9 @@ pub struct TextField<'a> {
     /// `None`: the style's inset colour (`extreme_bg_color`), which a pane
     /// whose own fill is the dark one sets lighter.
     fill: Option<Color32>,
+    password: bool,
+    /// Room kept free at the right end (for a button over the field).
+    inset_right: f32,
 }
 
 impl<'a> TextField<'a> {
@@ -31,7 +34,21 @@ impl<'a> TextField<'a> {
             width: None,
             height: 32.0,
             fill: None,
+            password: false,
+            inset_right: 0.0,
         }
+    }
+
+    /// Hides the text (passphrases).
+    pub fn password(mut self, hidden: bool) -> Self {
+        self.password = hidden;
+        self
+    }
+
+    /// Keeps `width` free at the right end, e.g. for a show / hide button.
+    pub fn inset_right(mut self, width: f32) -> Self {
+        self.inset_right = width;
+        self
     }
 
     pub fn hint(mut self, hint: &'a str) -> Self {
@@ -78,10 +95,12 @@ impl Widget for TextField<'_> {
             FontId::proportional(13.0)
         };
         // The text sits 12 px in; the edit fills the rest of the field.
-        let text_rect = rect.shrink2(vec2(12.0, 0.0));
+        let mut text_rect = rect.shrink2(vec2(12.0, 0.0));
+        text_rect.max.x -= self.inset_right;
         let response = ui.put(
             text_rect,
             TextEdit::singleline(self.text)
+                .password(self.password)
                 .frame(egui::Frame::NONE)
                 .hint_text(self.hint)
                 .font(font)
