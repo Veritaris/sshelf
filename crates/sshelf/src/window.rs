@@ -282,10 +282,15 @@ pub mod native {
         let Ok(RawWindowHandle::Win32(handle)) = cc.window_handle().map(|h| h.as_raw()) else {
             return;
         };
-        let hwnd = handle.hwnd.get() as HWND;
-        // SAFETY: `hwnd` is the live root window; the attribute values are
-        // 4-byte integers as DWM expects, and the subclass procedure is a
-        // plain function that lives as long as the program.
+        frameless(handle.hwnd.get() as HWND);
+    }
+
+    /// The fix for any frameless window of ours (the root, the tray menu):
+    /// no DWM corners or accent-colour border, all of it client area.
+    pub fn frameless(hwnd: HWND) {
+        // SAFETY: `hwnd` is a live window of this process; the attribute
+        // values are 4-byte integers as DWM expects, and the subclass
+        // procedure is a plain function that lives as long as the program.
         unsafe {
             // Both are no-ops before Windows 11, which doesn't round anyway.
             set_attribute(

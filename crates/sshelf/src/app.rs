@@ -179,6 +179,11 @@ impl SshelfApp {
         );
         // During the tour the tray mirrors the sandbox, under "Tour".
         self.tray_model.tour = self.tour_running();
+        // The sshelf tray menu's clicks, carried out here: `ui` may not run.
+        let model = self.tray_model.clone();
+        for action in self.tray_menu.poll(ctx, &model) {
+            self.tray_action(ctx, action);
+        }
         // Linux trays (KSNI) report no icon position: always the system menu.
         let native = cfg!(target_os = "linux")
             || self
@@ -398,10 +403,7 @@ impl eframe::App for SshelfApp {
         let p = &Palette::ONE_DARK;
         // The sshelf tray menu: drawn here even while the window is hidden
         // (it asked for this pass; see `tray_menu`).
-        let model = self.tray_model.clone();
-        for action in self.tray_menu.show(ui.ctx(), &model) {
-            self.tray_action(ui.ctx(), action);
-        }
+        self.tray_menu.show(ui.ctx());
         window::background(ui.ctx());
         if let Some(error) = self.startup_error.clone() {
             self.drag_strip(ui);

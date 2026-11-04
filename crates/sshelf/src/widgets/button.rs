@@ -19,6 +19,8 @@ pub enum Kind {
     Ghost,
     Danger,
     Warning,
+    /// Secondary that turns Red on hover (the tray menu's *Quit*).
+    RedOnHover,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,6 +99,12 @@ impl<'a> Button<'a> {
         self
     }
 
+    /// Raised like Secondary, Red with dark text while hovered (quitting).
+    pub fn red_on_hover(mut self) -> Self {
+        self.kind = Kind::RedOnHover;
+        self
+    }
+
     /// A 32 × 32 icon-only button; `name` is its accessible name and tooltip.
     pub fn icon_only(icon: char, name: &'a str) -> Self {
         Self {
@@ -151,7 +159,7 @@ impl Widget for Button<'_> {
         };
         let font = match self.kind {
             Kind::Primary | Kind::Danger | Kind::Warning => fonts::semibold(text_size),
-            Kind::Secondary | Kind::Ghost => FontId::proportional(text_size),
+            Kind::Secondary | Kind::Ghost | Kind::RedOnHover => FontId::proportional(text_size),
         };
         let (fg, fill, hover_fill, pressed_fill) = match self.kind {
             Kind::Primary => (p.bg_dark, p.accent, p.accent_hover, p.accent_pressed),
@@ -164,6 +172,7 @@ impl Widget for Button<'_> {
                 p.yellow.lerp_to_gamma(Color32::WHITE, 0.15),
                 p.yellow,
             ),
+            Kind::RedOnHover => (p.text, p.surface, p.red, p.danger),
         };
         let galley = (!self.text.is_empty())
             .then(|| ui.painter().layout_no_wrap(self.text.clone(), font, fg));
@@ -191,6 +200,10 @@ impl Widget for Button<'_> {
         };
         let painter = ui.painter();
         painter.rect_filled(rect, radius::CONTROL, fill);
+        let fg = match self.kind {
+            Kind::RedOnHover => fg.lerp_to_gamma(p.bg_dark, hover),
+            _ => fg,
+        };
         let fg = if enabled { fg } else { fg.gamma_multiply(0.45) };
         let mut x = match &galley {
             None => rect.center().x - icon_size / 2.0,

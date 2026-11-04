@@ -3,8 +3,10 @@
 //! same widgets as the main window — a status header, a banner while a host
 //! key waits, group switches (*Retry* on degraded ones), the active tunnels
 //! (*Stop* for a manual start; a failed one opens the window on it), the
-//! hosts to connect to, *Show window* and *Quit*. It closes on focus loss,
-//! `Esc` or a click that opens something.
+//! hosts to connect to, *Show window* and *Quit*. It closes on a click
+//! outside it, `Esc` or a click that opens something. On Windows it never
+//! takes the foreground, so the taskbar's overflow flyout it may have been
+//! opened from stays open (see `native`); elsewhere it closes on focus loss.
 //!
 //! It must work while the main window is hidden: a right click arrives in
 //! `App::logic`, which asks eframe for a full pass of the hidden root
@@ -16,7 +18,9 @@
 //! loop and runs its passes on their own. (An immediate viewport is created
 //! inside the root's pass, which a tray click can start where no window can
 //! be made; egui then panics.) Its clicks go back to the root through
-//! [`Shared`].
+//! [`Shared`], and [`TrayMenu::poll`] takes them in `App::logic`: the root's
+//! full passes can be held back (Windows hands `WM_PAINT` to one window at a
+//! time), and the menu must neither show stale state nor lose a click.
 
 use std::sync::{Arc, Mutex};
 
@@ -26,12 +30,12 @@ use egui::{
 };
 use sshelf_core::supervisor::{GroupState, TunnelState};
 
-use crate::theme::{Palette, radius, timing};
+use crate::theme::{Palette, radius};
 use crate::tray::{IconRect, TrayAction, TrayModel};
 use crate::widgets::button::Button;
-use crate::widgets::marks;
 use crate::widgets::switch::switch;
-use crate::{fonts, icons, motion};
+use crate::widgets::{marks, nav};
+use crate::{fonts, icons};
 
 const WIDTH: f32 = 340.0;
 /// Padding inside the window.
@@ -66,7 +70,9 @@ struct Shared {
     actions: Vec<TrayAction>,
     /// The menu asked to close.
     close: bool,
-    /// It had the focus once: losing it closes the menu.
+    /// It had the focus once: losing it closes the menu (not on Windows,
+    /// where it never takes the focus).
+    #[cfg(not(target_os = "windows"))]
     had_focus: bool,
 }
 
@@ -122,20 +128,24 @@ impl TrayMenu {
         {
             let mut shared = lock(&self.shared);
             shared.close = false;
-            shared.had_focus = false;
+            #[cfg(not(target_os = "windows"))]
+            {
+                shared.had_focus = false;
+            }
             shared.actions.clear();
         }
         ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::RequestPaintWhileHidden);
         ctx.request_repaint();
     }
 
-    /// The menu while open; returns what was clicked in it since the last
-    /// call. Call from `App::ui` on every pass: the menu's window lives as
-    /// long as it is shown each pass.
-    pub fn show(&mut self, ctx: &egui::Context, model: &TrayModel) -> Vec<TrayAction> {
-        let Some(icon) = self.open else {
+    /// Keeps the open menu's model current and returns what was clicked in
+    /// it since the last call; call from `App::logic`, which runs even when
+    /// the root gets no full pass (hidden, or its redraws held back), so the
+    /// menu never shows stale state or loses a click.
+    pub fn poll(&mut self, ctx: &egui::Context, model: &TrayModel) -> Vec<TrayAction> {
+        if self.open.is_none() {
             return Vec::new();
-        };
+        }
         let (actions, close) = {
             let mut shared = lock(&self.shared);
             if shared.model != *model {
@@ -146,11 +156,23 @@ impl TrayMenu {
         };
         if close {
             self.open = None;
-            // One more pass without it removes its window.
+            #[cfg(target_os = "windows")]
+            native::detach();
+            // The next full pass doesn't show it, which removes its window
+            // (it hid itself already).
             ctx.request_repaint();
-            return actions;
         }
-        let size = vec2(WIDTH, height(model));
+        actions
+    }
+
+    /// The menu while open. Call from `App::ui` on every pass: its window
+    /// lives as long as it is shown each pass.
+    pub fn show(&mut self, ctx: &egui::Context) {
+        let Some(icon) = self.open else {
+            return;
+        };
+        let model = lock(&self.shared).model.clone();
+        let size = vec2(WIDTH, height(&model));
         let (ppp, screen) = ctx.input(|i| {
             let viewport = i.viewport();
             (
@@ -165,28 +187,41 @@ impl TrayMenu {
             .with_always_on_top()
             .with_taskbar(false)
             .with_resizable(false)
-            .with_active(true)
+            // Windows: shown without taking the foreground (see `native`).
+            .with_active(!cfg!(target_os = "windows"))
             .with_position(placement(icon, ppp, screen, size))
             .with_inner_size(size);
         let shared = self.shared.clone();
         ctx.show_viewport_deferred(viewport_id(), builder, move |ui, class| {
-            let (model, had_focus) = {
-                let shared = lock(&shared);
-                (shared.model.clone(), shared.had_focus)
-            };
-            let (focused, escape, close_requested) = ui.input(|i| {
+            let model = lock(&shared).model.clone();
+            let (escape, close_requested) = ui.input(|i| {
                 (
-                    i.viewport().focused,
                     i.key_pressed(egui::Key::Escape),
                     i.viewport().close_requested(),
                 )
             });
             // No native windows (tests): nothing to dock.
             let mut close = class == ViewportClass::EmbeddedWindow;
-            if focused != Some(true) && !had_focus {
-                ui.ctx().send_viewport_cmd(ViewportCommand::Focus);
+            // Windows: never focused; the hooks see clicks outside and Esc.
+            #[cfg(target_os = "windows")]
+            {
+                if !close {
+                    native::attach(ui.ctx());
+                }
+                close |= native::take_dismissed();
             }
-            close |= escape || close_requested || (had_focus && focused == Some(false));
+            // Elsewhere it takes the focus and closes when it loses it.
+            #[cfg(not(target_os = "windows"))]
+            {
+                let focused = ui.input(|i| i.viewport().focused);
+                let had_focus = lock(&shared).had_focus;
+                if focused != Some(true) && !had_focus {
+                    ui.ctx().send_viewport_cmd(ViewportCommand::Focus);
+                }
+                close |= had_focus && focused == Some(false);
+                lock(&shared).had_focus |= focused == Some(true);
+            }
+            close |= escape || close_requested;
             let mut actions = Vec::new();
             if !close {
                 contents(ui, &model, &mut actions);
@@ -201,16 +236,18 @@ impl TrayMenu {
                         | TrayAction::Connect(_)
                 )
             });
+            if close && class != ViewportClass::EmbeddedWindow {
+                // Gone at once, before the root drops the window.
+                ui.ctx().send_viewport_cmd(ViewportCommand::Visible(false));
+            }
             let mut shared = lock(&shared);
-            shared.had_focus |= focused == Some(true);
             if close || !actions.is_empty() {
                 shared.close |= close;
                 shared.actions.extend(actions);
-                // The root carries them out (and drops the window).
+                // The root's `logic` carries them out (see `poll`).
                 ui.ctx().request_repaint_of(ViewportId::ROOT);
             }
         });
-        actions
     }
 }
 
@@ -352,9 +389,11 @@ fn contents_in(ui: &mut Ui, rect: egui::Rect, model: &TrayModel, actions: &mut V
 
     if !model.tunnels.is_empty() {
         section(ui, "Active tunnels");
-        for tunnel in &model.tunnels {
+        let slot = ui.painter().add(egui::Shape::Noop);
+        let mut hovered = None;
+        for (index, tunnel) in model.tunnels.iter().enumerate() {
             let failed = matches!(tunnel.state, TunnelState::Failed(_));
-            let response = row(ui, ("tunnel", &tunnel.id), failed, |ui| {
+            let response = row(ui, failed, |ui| {
                 ui.add_space(10.0);
                 match &tunnel.state {
                     TunnelState::Running => marks::dot(ui, p.green),
@@ -396,10 +435,15 @@ fn contents_in(ui: &mut Ui, rect: egui::Rect, model: &TrayModel, actions: &mut V
                     }
                 });
             });
+            if failed && response.hovered() {
+                hovered = Some((index, response.rect));
+            }
             if failed && response.clicked() {
                 actions.push(TrayAction::ShowTunnel(tunnel.id.clone()));
             }
         }
+        let id = Id::unique("tray_tunnels_hover");
+        nav::hover_highlight(ui, id, slot, hovered, p.surface);
     }
 
     section(ui, "Connect");
@@ -413,8 +457,10 @@ fn contents_in(ui: &mut Ui, rect: egui::Rect, model: &TrayModel, actions: &mut V
             );
         });
     }
-    for alias in model.recent.iter().take(RECENT) {
-        let response = row(ui, ("connect", alias), true, |ui| {
+    let slot = ui.painter().add(egui::Shape::Noop);
+    let mut hovered = None;
+    for (index, alias) in model.recent.iter().take(RECENT).enumerate() {
+        let response = row(ui, true, |ui| {
             ui.add_space(10.0);
             ui.label(
                 RichText::new(alias)
@@ -426,10 +472,16 @@ fn contents_in(ui: &mut Ui, rect: egui::Rect, model: &TrayModel, actions: &mut V
                 icons::show(ui, icons::SQUARE_TERMINAL, icons::INLINE, p.dim);
             });
         });
+        if response.hovered() {
+            hovered = Some((index, response.rect));
+        }
         if response.clicked() {
             actions.push(TrayAction::Connect(alias.clone()));
         }
     }
+    // Slides between hosts (50 ms), as in every list and menu.
+    let id = Id::unique("tray_connect_hover");
+    nav::hover_highlight(ui, id, slot, hovered, p.surface);
 
     fixed(ui, FOOTER, |ui| {
         let line = ui.max_rect();
@@ -447,7 +499,12 @@ fn contents_in(ui: &mut Ui, rect: egui::Rect, model: &TrayModel, actions: &mut V
             actions.push(TrayAction::Show);
         }
         if ui
-            .add(Button::new("Quit").small().min_width(quit_width))
+            .add(
+                Button::new("Quit")
+                    .small()
+                    .red_on_hover()
+                    .min_width(quit_width),
+            )
             .clicked()
         {
             actions.push(TrayAction::Quit);
@@ -479,31 +536,15 @@ fn section(ui: &mut Ui, title: &str) {
     );
 }
 
-/// A row; `clickable` ones get the hover background and the hand cursor.
-fn row(
-    ui: &mut Ui,
-    id: impl std::hash::Hash + std::fmt::Debug,
-    clickable: bool,
-    add: impl FnOnce(&mut Ui),
-) -> egui::Response {
-    let p = &Palette::ONE_DARK;
+/// A row; `clickable` ones get the hand cursor (the caller paints the
+/// sliding hover background).
+fn row(ui: &mut Ui, clickable: bool, add: impl FnOnce(&mut Ui)) -> egui::Response {
     let sense = if clickable {
         Sense::click()
     } else {
         Sense::hover()
     };
     let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), ROW), sense);
-    let hover = motion::fade(
-        ui.ctx(),
-        Id::unique(&id).with("hover"),
-        clickable && response.hovered(),
-        timing::HOVER,
-        motion::ease_out,
-    );
-    if hover > 0.0 {
-        ui.painter()
-            .rect_filled(rect, radius::CONTROL, p.surface.gamma_multiply(hover));
-    }
     let mut child = ui.new_child(
         egui::UiBuilder::new()
             .max_rect(rect)
@@ -514,6 +555,179 @@ fn row(
         response.on_hover_cursor(CursorIcon::PointingHand)
     } else {
         response
+    }
+}
+
+/// Windows: the menu never activates, so opening it from the taskbar's
+/// overflow flyout leaves the flyout open (it closes when it loses the
+/// foreground). Without the focus, a click outside and `Esc` are seen by
+/// low-level hooks, which run on a thread of their own with its own message
+/// loop (never inside an egui pass). The window also gets the frameless fix
+/// (no accent-colour border).
+#[cfg(target_os = "windows")]
+mod native {
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+
+    use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+    use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows_sys::Win32::System::Threading::{GetCurrentProcessId, GetCurrentThreadId};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        CallNextHookEx, EnumWindows, GWL_EXSTYLE, GetMessageW, GetWindowLongPtrW, GetWindowRect,
+        GetWindowTextW, GetWindowThreadProcessId, HC_ACTION, IsWindowVisible, KBDLLHOOKSTRUCT, MSG,
+        MSLLHOOKSTRUCT, PM_NOREMOVE, PeekMessageW, PostThreadMessageW, SetWindowLongPtrW,
+        SetWindowsHookExW, UnhookWindowsHookEx, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN,
+        WM_LBUTTONDOWN, WM_MBUTTONDOWN, WM_QUIT, WM_RBUTTONDOWN, WM_XBUTTONDOWN, WS_EX_NOACTIVATE,
+    };
+
+    const TITLE: &str = "sshelf menu";
+    const VK_ESCAPE: u32 = 0x1B;
+
+    /// The menu's window, once found (0: none).
+    static MENU: AtomicIsize = AtomicIsize::new(0);
+    /// A click outside or `Esc` since the menu opened.
+    static DISMISSED: AtomicBool = AtomicBool::new(false);
+    /// Repaints the menu when the hooks see something.
+    static CTX: Mutex<Option<egui::Context>> = Mutex::new(None);
+    /// The hook thread's id, to stop it.
+    static HOOKS: Mutex<Option<u32>> = Mutex::new(None);
+
+    /// Finds the menu's window and prepares it, and starts the hooks; call
+    /// on every pass of the menu (it does its work once per window).
+    pub fn attach(ctx: &egui::Context) {
+        if MENU.load(Ordering::Relaxed) != 0 {
+            return;
+        }
+        let Some(hwnd) = find() else {
+            return;
+        };
+        crate::window::native::frameless(hwnd);
+        // SAFETY: `hwnd` is the menu's live window, found in this process.
+        unsafe {
+            let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style | WS_EX_NOACTIVATE as isize);
+        }
+        MENU.store(hwnd as isize, Ordering::Relaxed);
+        DISMISSED.store(false, Ordering::Relaxed);
+        *CTX.lock().unwrap_or_else(|e| e.into_inner()) = Some(ctx.clone());
+        start_hooks();
+    }
+
+    /// A click outside the menu or `Esc` happened (once).
+    pub fn take_dismissed() -> bool {
+        DISMISSED.swap(false, Ordering::Relaxed)
+    }
+
+    /// The menu closed: stops the hooks and forgets the window.
+    pub fn detach() {
+        MENU.store(0, Ordering::Relaxed);
+        DISMISSED.store(false, Ordering::Relaxed);
+        if let Some(thread) = HOOKS.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            // SAFETY: posting to a thread id; it fails harmlessly if gone.
+            unsafe { PostThreadMessageW(thread, WM_QUIT, 0, 0) };
+        }
+        *CTX.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
+    /// This process's visible window titled "sshelf menu".
+    fn find() -> Option<HWND> {
+        let mut found: HWND = std::ptr::null_mut();
+        // SAFETY: the callback only reads window properties and writes
+        // `found`, which outlives the synchronous `EnumWindows` call.
+        unsafe {
+            EnumWindows(Some(each), &mut found as *mut HWND as LPARAM);
+        }
+        (!found.is_null()).then_some(found)
+    }
+
+    unsafe extern "system" fn each(hwnd: HWND, found: LPARAM) -> i32 {
+        // SAFETY: called by `EnumWindows` with live windows; `found` is the
+        // pointer `find` passed.
+        unsafe {
+            let mut pid = 0;
+            GetWindowThreadProcessId(hwnd, &mut pid);
+            if pid != GetCurrentProcessId() || IsWindowVisible(hwnd) == 0 {
+                return 1;
+            }
+            let mut text = [0u16; 32];
+            let len = GetWindowTextW(hwnd, text.as_mut_ptr(), text.len() as i32);
+            if String::from_utf16_lossy(&text[..len.max(0) as usize]) == TITLE {
+                *(found as *mut HWND) = hwnd;
+                return 0;
+            }
+            1
+        }
+    }
+
+    fn start_hooks() {
+        let mut hooks = HOOKS.lock().unwrap_or_else(|e| e.into_inner());
+        if hooks.is_some() {
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            // SAFETY: plain Win32 calls on this thread; the hook procedures
+            // are functions that live as long as the program.
+            unsafe {
+                let mut msg: MSG = std::mem::zeroed();
+                // Makes the thread's message queue, so WM_QUIT can reach it.
+                PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_NOREMOVE);
+                let module = GetModuleHandleW(std::ptr::null());
+                let mouse = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse), module, 0);
+                let keys = SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard), module, 0);
+                let _ = tx.send(GetCurrentThreadId());
+                while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {}
+                UnhookWindowsHookEx(mouse);
+                UnhookWindowsHookEx(keys);
+            }
+        });
+        *hooks = rx.recv().ok();
+    }
+
+    fn dismiss() {
+        DISMISSED.store(true, Ordering::Relaxed);
+        if let Some(ctx) = CTX.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+            ctx.request_repaint_of(super::viewport_id());
+        }
+    }
+
+    unsafe extern "system" fn mouse(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+        // SAFETY: for HC_ACTION, `lparam` points at an MSLLHOOKSTRUCT;
+        // `MENU` holds a window of this process (or 0).
+        unsafe {
+            let down = matches!(
+                wparam as u32,
+                WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_XBUTTONDOWN
+            );
+            let menu = MENU.load(Ordering::Relaxed) as HWND;
+            if code == HC_ACTION as i32 && down && !menu.is_null() {
+                let at = (*(lparam as *const MSLLHOOKSTRUCT)).pt;
+                let mut rect: RECT = std::mem::zeroed();
+                GetWindowRect(menu, &mut rect);
+                let inside = at.x >= rect.left
+                    && at.x < rect.right
+                    && at.y >= rect.top
+                    && at.y < rect.bottom;
+                if !inside {
+                    dismiss();
+                }
+            }
+            CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam)
+        }
+    }
+
+    unsafe extern "system" fn keyboard(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+        // SAFETY: for HC_ACTION, `lparam` points at a KBDLLHOOKSTRUCT.
+        unsafe {
+            if code == HC_ACTION as i32
+                && wparam as u32 == WM_KEYDOWN
+                && (*(lparam as *const KBDLLHOOKSTRUCT)).vkCode == VK_ESCAPE
+                && MENU.load(Ordering::Relaxed) != 0
+            {
+                dismiss();
+            }
+            CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam)
+        }
     }
 }
 
@@ -583,6 +797,33 @@ mod tests {
         // Physical pixels at 150 %.
         let scaled = placement(icon(1575.0), 1.5, screen, size);
         assert_eq!(scaled.y, 1050.0 - 300.0 - GAP);
+    }
+
+    /// `poll` (from `App::logic`) keeps the model current and carries out the
+    /// menu's clicks and its close, with no full pass of the root at all.
+    #[test]
+    fn poll_works_without_the_roots_ui() {
+        let ctx = egui::Context::default();
+        let icon = IconRect {
+            x: 0.0,
+            y: 0.0,
+            width: 24.0,
+            height: 24.0,
+        };
+        let mut menu = TrayMenu::default();
+        assert!(menu.poll(&ctx, &model()).is_empty(), "closed: nothing");
+        menu.open(&ctx, icon);
+        lock(&menu.shared)
+            .actions
+            .push(TrayAction::StartGroup("g-1".into()));
+        assert_eq!(
+            menu.poll(&ctx, &model()),
+            [TrayAction::StartGroup("g-1".into())]
+        );
+        assert_eq!(lock(&menu.shared).model, model());
+        lock(&menu.shared).close = true;
+        menu.poll(&ctx, &model());
+        assert!(menu.open.is_none());
     }
 
     #[test]
