@@ -3,7 +3,7 @@ name = "fake-ssh"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Scriptable stand-in for `ssh`, used by supervisor tests"
+description = "Scriptable stand-in for `ssh`: used by tests, and embedded in sshelf for the onboarding tour"
 publish = false
 
 [dependencies]
