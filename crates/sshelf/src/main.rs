@@ -1,5 +1,7 @@
-// Hide the console window on Windows in release builds.
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+// No console window on Windows, in debug builds too. Started from a terminal
+// (`cargo run`), stdout and stderr still reach it through the inherited
+// handles; `sshelf --fake-ssh` relies on the same with piped stdio.
+#![windows_subsystem = "windows"]
 
 mod app;
 mod close_guard;
