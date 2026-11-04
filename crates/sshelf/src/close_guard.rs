@@ -7,12 +7,16 @@
 //! [`CloseGuard::on_close_request`] runs from `App::logic`, so it also works
 //! while the window is hidden; the modal is drawn from `App::ui`.
 
-use egui::{RichText, ViewportCommand};
-use sshelf_core::core::Command;
+use egui::{Align, FontId, Frame, Layout, Margin, RichText, Stroke, Ui, ViewportCommand, vec2};
+use sshelf_core::core::{AppData, Command};
 use sshelf_core::settings::{CloseBehavior, Settings};
 use sshelf_core::supervisor::{Snapshot, TunnelState};
 
-use crate::theme::Palette;
+use crate::fonts;
+use crate::theme::{Palette, radius};
+use crate::widgets::button::Button;
+use crate::widgets::marks;
+use crate::widgets::switch::switch;
 
 #[derive(Default)]
 pub struct CloseGuard {
@@ -36,6 +40,32 @@ pub fn running_count(states: Option<&Snapshot>) -> usize {
             .filter(|t| matches!(t.state, TunnelState::Starting | TunnelState::Running))
             .count()
     })
+}
+
+/// The tunnels quitting would stop, for the modal: name and first listen
+/// port (":6443"), in the order of `tunnels.toml`.
+pub fn running_tunnels(states: Option<&Snapshot>, data: Option<&AppData>) -> Vec<(String, String)> {
+    let (Some(states), Some(data)) = (states, data) else {
+        return Vec::new();
+    };
+    data.tunnels
+        .tunnels
+        .iter()
+        .filter(|t| {
+            matches!(
+                states.state(&t.id),
+                TunnelState::Starting | TunnelState::Running
+            )
+        })
+        .map(|t| {
+            let port = t
+                .forwards
+                .first()
+                .map(|f| format!(":{}", f.listen))
+                .unwrap_or_default();
+            (t.name.clone(), port)
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,52 +141,89 @@ impl CloseGuard {
         }
     }
 
-    /// Call from `App::ui`: the modal, while asking.
+    /// Call from `App::ui`: the modal, while asking. `tunnels` are the
+    /// running ones with their ports ([`running_tunnels`]).
     pub fn modal(
         &mut self,
         ctx: &egui::Context,
-        running: usize,
+        tunnels: &[(String, String)],
         settings: Option<&Settings>,
     ) -> Vec<Command> {
         if !self.asking {
             return Vec::new();
         }
         let p = &Palette::ONE_DARK;
+        let running = tunnels.len();
+        let plural = if running == 1 { "" } else { "s" };
         let mut commands = Vec::new();
         let mut choice = None;
         let mut cancel = false;
-        let response = egui::Modal::new(egui::Id::unique("close_with_tunnels")).show(ctx, |ui| {
-            ui.set_max_width(460.0);
-            ui.heading(RichText::new("Quit sshelf?").color(p.accent).strong());
-            ui.label(format!(
-                "{running} tunnel{} running and will be stopped.",
-                if running == 1 { " is" } else { "s are" }
-            ));
-            ui.checkbox(&mut self.remember, "Remember my choice");
-            ui.label(
-                RichText::new("You can change this later in Settings.")
-                    .small()
-                    .color(p.dim),
-            );
-            ui.horizontal(|ui| {
-                if self.offer_tray
-                    && ui
-                        .button("Minimize to tray")
-                        .on_hover_text("Hide the window; the tunnels keep running")
-                        .clicked()
-                {
-                    choice = Some(CloseBehavior::MinimizeToTray);
-                }
-                let label = format!(
-                    "Stop {running} tunnel{} and quit",
-                    if running == 1 { "" } else { "s" }
+        let response = egui::Modal::new(egui::Id::unique("close_with_tunnels"))
+            .backdrop_color(p.overlay)
+            .frame(
+                Frame::new()
+                    .fill(p.bg_dark)
+                    .stroke(Stroke::new(1.0, p.selection))
+                    .corner_radius(radius::LARGE)
+                    .inner_margin(Margin::same(24)),
+            )
+            .show(ctx, |ui| {
+                ui.set_width(452.0);
+                ui.spacing_mut().item_spacing.y = 16.0;
+                ui.label(
+                    RichText::new(format!(
+                        "{running} tunnel{plural} {} running",
+                        if running == 1 { "is" } else { "are" }
+                    ))
+                    .font(fonts::semibold(17.0))
+                    .color(p.text_strong),
                 );
-                if ui.button(label).clicked() {
-                    choice = Some(CloseBehavior::StopAndQuit);
-                }
-                cancel = ui.button("Cancel").clicked();
+                tunnel_list(ui, tunnels);
+                ui.label(
+                    RichText::new(if self.offer_tray {
+                        "Quitting stops them. In the tray they keep running."
+                    } else {
+                        "Quitting stops them."
+                    })
+                    .size(13.0)
+                    .color(p.dim),
+                );
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    switch(ui, &mut self.remember, "Remember my choice");
+                    ui.label(RichText::new("Remember my choice").size(13.0));
+                    ui.label(
+                        RichText::new("(change it in Settings, under Window & tray)")
+                            .size(12.0)
+                            .color(p.dim),
+                    );
+                });
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    // Right to left: the main button ends up rightmost.
+                    if self.offer_tray
+                        && ui
+                            .add(
+                                Button::new("Minimize to tray")
+                                    .primary()
+                                    .dialog()
+                                    .tip("Hide the window; the tunnels keep running"),
+                            )
+                            .clicked()
+                    {
+                        choice = Some(CloseBehavior::MinimizeToTray);
+                    }
+                    let mut stop =
+                        Button::new(format!("Stop {running} tunnel{plural} and quit")).dialog();
+                    if !self.offer_tray {
+                        stop = stop.primary();
+                    }
+                    if ui.add(stop).clicked() {
+                        choice = Some(CloseBehavior::StopAndQuit);
+                    }
+                    cancel = ui.add(Button::new("Cancel").ghost().dialog()).clicked();
+                });
             });
-        });
         if let Some(behavior) = choice {
             if self.remember
                 && let Some(settings) = settings
@@ -180,6 +247,52 @@ impl CloseGuard {
         }
         commands
     }
+}
+
+/// The running tunnels on an inset card: a green dot, the name, the port;
+/// past six, "+N more".
+fn tunnel_list(ui: &mut Ui, tunnels: &[(String, String)]) {
+    const SHOWN: usize = 6;
+    let p = &Palette::ONE_DARK;
+    Frame::new()
+        .fill(p.bg)
+        .corner_radius(radius::CONTROL)
+        .inner_margin(Margin::symmetric(14, 6))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing.y = 0.0;
+            for (name, port) in tunnels.iter().take(SHOWN) {
+                ui.allocate_ui_with_layout(
+                    vec2(ui.available_width(), 30.0),
+                    Layout::left_to_right(Align::Center),
+                    |ui| {
+                        ui.spacing_mut().item_spacing.x = 10.0;
+                        marks::dot(ui, p.green);
+                        ui.label(RichText::new(name).size(13.0));
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            ui.label(
+                                RichText::new(port)
+                                    .font(FontId::monospace(11.0))
+                                    .color(p.dim),
+                            );
+                        });
+                    },
+                );
+            }
+            if tunnels.len() > SHOWN {
+                ui.allocate_ui_with_layout(
+                    vec2(ui.available_width(), 30.0),
+                    Layout::left_to_right(Align::Center),
+                    |ui| {
+                        ui.label(
+                            RichText::new(format!("+{} more", tunnels.len() - SHOWN))
+                                .size(12.0)
+                                .color(p.dim),
+                        );
+                    },
+                );
+            }
+        });
 }
 
 #[cfg(test)]
@@ -222,7 +335,11 @@ mod tests {
             .with_size([800.0, 600.0])
             .build_ui_state(
                 move |ui, (guard, commands): &mut (CloseGuard, Vec<Command>)| {
-                    commands.extend(guard.modal(ui.ctx(), 2, Some(&settings)));
+                    let tunnels = [
+                        ("dev cluster".to_string(), ":6443".to_string()),
+                        ("vault".to_string(), ":8200".to_string()),
+                    ];
+                    commands.extend(guard.modal(ui.ctx(), &tunnels, Some(&settings)));
                 },
                 (guard, Vec::new()),
             )
@@ -232,9 +349,14 @@ mod tests {
     fn quitting_can_remember_the_choice() {
         let mut harness = harness(Settings::default(), false);
         harness.step();
-        harness.get_by_label("2 tunnels are running and will be stopped.");
+        harness.get_by_label("2 tunnels are running");
+        harness.get_by_label("dev cluster");
+        harness.get_by_label(":8200");
+        harness.get_by_label("Quitting stops them.");
         assert!(harness.query_by_label("Minimize to tray").is_none());
-        harness.get_by_label("Remember my choice").click();
+        harness
+            .get_by_role_and_label(egui::accesskit::Role::Switch, "Remember my choice")
+            .click();
         harness.step();
         harness.get_by_label("Stop 2 tunnels and quit").click();
         harness.step();
@@ -253,7 +375,10 @@ mod tests {
     fn minimizing_keeps_running_and_can_be_remembered() {
         let mut harness = harness(Settings::default(), true);
         harness.step();
-        harness.get_by_label("Remember my choice").click();
+        harness.get_by_label("Quitting stops them. In the tray they keep running.");
+        harness
+            .get_by_role_and_label(egui::accesskit::Role::Switch, "Remember my choice")
+            .click();
         harness.step();
         harness.get_by_label("Minimize to tray").click();
         harness.step();
@@ -272,7 +397,9 @@ mod tests {
     fn cancel_keeps_running_and_saves_nothing() {
         let mut harness = harness(Settings::default(), true);
         harness.step();
-        harness.get_by_label("Remember my choice").click();
+        harness
+            .get_by_role_and_label(egui::accesskit::Role::Switch, "Remember my choice")
+            .click();
         harness.step();
         harness.get_by_label("Cancel").click();
         harness.step();

@@ -134,6 +134,19 @@ pub fn banner<R>(ui: &mut Ui, tint: Color32, add: impl FnOnce(&mut Ui) -> R) -> 
         .inner
 }
 
+/// A dialog's 36 px icon tile: `icon` in `color` on `fill`.
+pub fn tile(ui: &mut Ui, icon: char, fill: Color32, color: Color32) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(36.0), Sense::hover());
+    ui.painter().rect_filled(rect, radius::CONTROL, fill);
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        icon,
+        icons::font(18.0),
+        color,
+    );
+}
+
 /// An outline around `rect` inside it, e.g. a row whose menu is open.
 pub fn outline(painter: &Painter, rect: egui::Rect, color: Color32) {
     painter.rect_stroke(

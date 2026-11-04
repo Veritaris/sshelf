@@ -310,15 +310,7 @@ fn header(
     let mut close = false;
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 12.0;
-        let (rect, _) = ui.allocate_exact_size(Vec2::splat(36.0), Sense::hover());
-        ui.painter().rect_filled(rect, radius::CONTROL, tile);
-        ui.painter().text(
-            rect.center(),
-            Align2::CENTER_CENTER,
-            icon,
-            icons::font(18.0),
-            color,
-        );
+        marks::tile(ui, icon, tile, color);
         let room = ui.available_width() - 32.0 - 12.0;
         ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = 2.0;

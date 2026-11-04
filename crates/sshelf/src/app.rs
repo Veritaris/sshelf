@@ -377,9 +377,14 @@ impl eframe::App for SshelfApp {
             commands.extend(self.orphans.show(ui.ctx(), data, &hosts));
         }
         commands.extend(self.hostkeys.show(ui.ctx()));
+        for notice in self.hostkeys.take_notices() {
+            self.toasts.push(notice);
+        }
+        let running =
+            close_guard::running_tunnels(self.tunnel_states.as_deref(), self.data.as_deref());
         commands.extend(self.close.modal(
             ui.ctx(),
-            close_guard::running_count(self.tunnel_states.as_deref()),
+            &running,
             self.data.as_deref().map(|d| &d.settings),
         ));
         // A tunnel's "via" link shows its host.

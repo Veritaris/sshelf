@@ -40,6 +40,8 @@ pub struct Palette {
     pub red_tint: Color32,
     /// Green mixed into the background: success banners, "running" chips.
     pub green_tint: Color32,
+    /// Blue mixed into the background: info banners and tiles.
+    pub blue_tint: Color32,
     /// Disabled menu items.
     pub disabled_text: Color32,
     /// Info, links, keyboard focus.
@@ -88,6 +90,7 @@ impl Palette {
         yellow_tint: Color32::from_rgb(59, 53, 39),      // #3b3527
         red_tint: Color32::from_rgb(58, 42, 46),         // #3a2a2e
         green_tint: Color32::from_rgb(43, 53, 40),       // #2b3528
+        blue_tint: Color32::from_rgb(36, 48, 61),        // #24303d
         disabled_text: Color32::from_rgb(127, 132, 142), // #7f848e
         blue: Color32::from_rgb(97, 175, 239),           // #61afef
         link_hover: Color32::from_rgb(140, 196, 245),    // #8cc4f5
