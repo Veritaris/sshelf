@@ -22,11 +22,13 @@ pub const CHEVRON_UP: char = '\u{e070}';
 pub const CIRCLE_CHECK: char = '\u{e226}';
 pub const CIRCLE_X: char = '\u{e084}';
 pub const COPY: char = '\u{e09e}';
+pub const FOLDER: char = '\u{e0d7}';
 pub const INFO: char = '\u{e0f9}';
 pub const KEY_ROUND: char = '\u{e4a3}';
 pub const LAYERS: char = '\u{e529}';
 pub const LOCK: char = '\u{e10b}';
 pub const MINUS: char = '\u{e11c}';
+pub const PENCIL: char = '\u{e1f9}';
 pub const PLAY: char = '\u{e13c}';
 pub const PLUS: char = '\u{e13d}';
 pub const REFRESH_CW: char = '\u{e145}';
@@ -55,11 +57,13 @@ pub const ALL: &[char] = &[
     CIRCLE_CHECK,
     CIRCLE_X,
     COPY,
+    FOLDER,
     INFO,
     KEY_ROUND,
     LAYERS,
     LOCK,
     MINUS,
+    PENCIL,
     PLAY,
     PLUS,
     REFRESH_CW,

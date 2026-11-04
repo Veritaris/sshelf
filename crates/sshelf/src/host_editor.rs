@@ -1403,47 +1403,51 @@ fn add_key_menu(
     const BROWSE: usize = usize::MAX;
     const NONE: usize = usize::MAX - 2;
     let keys = session.keys.clone().unwrap_or_default();
-    let mut choices: Vec<Choice<usize>> = keys
-        .iter()
-        .enumerate()
-        .map(|(i, key)| {
-            let shown = tilde(&key.path, &session.ssh_dir);
-            let used = rows.iter().any(|r| *r == shown || Path::new(r) == key.path);
-            let detail = if key.comment.is_empty() {
-                key.kind.clone()
-            } else {
-                format!("{} · {}", key.kind, key.comment)
-            };
-            Choice {
-                value: i,
-                label: shown,
-                detail: Some(detail),
-                disabled: used.then(|| "already in this host".into()),
-            }
-        })
-        .collect();
-    choices.push(Choice {
-        value: TYPE,
-        label: "Type a path".into(),
-        detail: Some(format!("adds {example} to edit")),
-        disabled: None,
-    });
-    choices.push(Choice {
-        value: BROWSE,
-        label: "Browse…".into(),
-        detail: Some("choose a key file anywhere".into()),
-        disabled: session
-            .picking
-            .is_some()
-            .then(|| "the file dialog is open".into()),
-    });
+    // The two actions first, then the keys found.
+    let mut choices = vec![
+        Choice {
+            value: BROWSE,
+            label: "Browse…".into(),
+            detail: Some("choose a key file anywhere".into()),
+            disabled: session
+                .picking
+                .is_some()
+                .then(|| "the file dialog is open".into()),
+            icon: Some(icons::FOLDER),
+        },
+        Choice {
+            value: TYPE,
+            label: "Type a path".into(),
+            detail: Some(format!("adds {example} to edit")),
+            disabled: None,
+            icon: Some(icons::PENCIL),
+        },
+    ];
+    choices.extend(keys.iter().enumerate().map(|(i, key)| {
+        let shown = tilde(&key.path, &session.ssh_dir);
+        let used = rows.iter().any(|r| *r == shown || Path::new(r) == key.path);
+        let detail = if key.comment.is_empty() {
+            key.kind.clone()
+        } else {
+            format!("{} · {}", key.kind, key.comment)
+        };
+        Choice {
+            value: i,
+            label: shown,
+            detail: Some(detail),
+            disabled: used.then(|| "already in this host".into()),
+            icon: None,
+        }
+    }));
     let name = format!("Add {keyword}");
     let trigger = if session.picking.is_some() {
         "Choosing a file…".to_string()
     } else {
         name.clone()
     };
-    match Dropdown::with_choices("add_identity_file", &name, choices, trigger).show(ui, NONE) {
+    let menu =
+        Dropdown::with_choices("add_identity_file", &name, choices, trigger).panel_width(270.0);
+    match menu.show(ui, NONE) {
         Some(TYPE) => Some(example.to_string()),
         Some(BROWSE) => {
             session.browse = true;
@@ -1777,6 +1781,7 @@ fn target_picker(
                         .read_only(id)
                         .filter(|_| !targets.contains(&file.path))
                         .map(|r| format!("read-only: {r}")),
+                    icon: None,
                 });
                 paths.push(file.path.clone());
             }
@@ -1787,6 +1792,7 @@ fn target_picker(
                 label: session.file.display().to_string(),
                 detail: Some("main config · created with this host".into()),
                 disabled: None,
+                icon: None,
             });
             paths.push(session.file.clone());
         }

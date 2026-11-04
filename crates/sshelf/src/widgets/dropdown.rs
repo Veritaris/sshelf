@@ -11,7 +11,7 @@ use egui::{
 };
 
 use crate::theme::{Palette, radius, timing};
-use crate::widgets::nav;
+use crate::widgets::{nav, text};
 use crate::{icons, motion};
 
 const ROW: f32 = 30.0;
@@ -39,6 +39,8 @@ pub struct Choice<T> {
     pub label: String,
     pub detail: Option<String>,
     pub disabled: Option<String>,
+    /// A Lucide icon before the label (actions such as *Browse…*).
+    pub icon: Option<char>,
 }
 
 /// How the closed control looks.
@@ -60,6 +62,8 @@ pub struct Dropdown<'a, T> {
     look: Trigger,
     mono: bool,
     max_visible: usize,
+    /// The panel's least width (it is never narrower than the trigger).
+    panel_width: f32,
 }
 
 impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
@@ -77,6 +81,7 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
                 label: label.to_string(),
                 detail: None,
                 disabled: None,
+                icon: None,
             })
             .collect();
         Self::with_choices(id, name, choices, trigger)
@@ -97,7 +102,14 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
             look: Trigger::Button,
             mono: false,
             max_visible: 10,
+            panel_width: 180.0,
         }
+    }
+
+    /// A wider panel than the default 180 px (long labels).
+    pub fn panel_width(mut self, width: f32) -> Self {
+        self.panel_width = width;
+        self
     }
 
     /// An input-like closed control `width` wide.
@@ -192,7 +204,7 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
             let row = self.row_height();
             let rows = self.choices.len().min(self.max_visible);
             let height = rows as f32 * row + 8.0;
-            let width = trigger.rect.width().max(180.0);
+            let width = trigger.rect.width().max(self.panel_width);
             let below = trigger.rect.bottom() + GAP;
             let room_below = ctx.content_rect().bottom() - below;
             let upward = room_below < height && trigger.rect.top() - GAP > height;
@@ -387,15 +399,25 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
                     } else {
                         rect.center().y
                     };
-                    ui.painter().text(
-                        pos2(rect.left() + 10.0, label_y),
-                        Align2::LEFT_CENTER,
-                        &choice.label,
-                        self.label_font(),
-                        color,
-                    );
+                    let mut left = rect.left() + 10.0;
+                    if let Some(icon) = choice.icon {
+                        ui.painter().text(
+                            pos2(left + 7.0, label_y),
+                            Align2::CENTER_CENTER,
+                            icon,
+                            icons::font(14.0),
+                            color,
+                        );
+                        left += 14.0 + 8.0;
+                    }
+                    // Text stops before the check mark's column.
+                    let room = (rect.right() - 10.0 - 14.0 - 8.0 - left).max(0.0);
+                    let font = self.label_font();
+                    let (label, _) = text::elide(ui.painter(), &choice.label, &font, room);
+                    ui.painter()
+                        .text(pos2(left, label_y), Align2::LEFT_CENTER, label, font, color);
                     if let Some(second) = second {
-                        let mut x = rect.left() + 10.0;
+                        let mut x = left;
                         let y = rect.bottom() - 10.0;
                         if !enabled {
                             ui.painter().text(
@@ -407,11 +429,14 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
                             );
                             x += 16.0;
                         }
+                        let font = FontId::proportional(11.0);
+                        let room = (room - (x - left)).max(0.0);
+                        let (second, _) = text::elide(ui.painter(), second, &font, room);
                         ui.painter().text(
                             pos2(x, y),
                             Align2::LEFT_CENTER,
                             second,
-                            FontId::proportional(11.0),
+                            font,
                             if enabled { p.dim } else { p.disabled_text },
                         );
                     }
