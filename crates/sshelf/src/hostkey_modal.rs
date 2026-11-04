@@ -47,6 +47,11 @@ impl HostKeyModals {
         }
     }
 
+    /// A prompt waits for the user (the tray menu says so).
+    pub fn waiting(&self) -> bool {
+        !self.unknown.is_empty() || !self.changed.is_empty()
+    }
+
     /// Toasts to show, once.
     pub fn take_notices(&mut self) -> Vec<String> {
         std::mem::take(&mut self.notices)

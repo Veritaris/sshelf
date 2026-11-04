@@ -1,6 +1,5 @@
 //! The app icon, drawn in code (no image assets yet): a rounded One Dark
-//! square with three shelf bars, plus a green dot while tunnels run (tray),
-//! and the [`Status`] its dot shows.
+//! square with three shelf bars, plus the [`Status`] dot (tray).
 
 use sshelf_core::supervisor::{GroupState, Snapshot, TunnelState};
 use sshelf_core::tunnels::Group;
@@ -66,8 +65,8 @@ impl Status {
 /// Width and height in pixels.
 pub const SIZE: u32 = 32;
 
-/// RGBA pixels, row by row.
-pub fn rgba(running: bool) -> Vec<u8> {
+/// RGBA pixels, row by row, with `status`'s dot.
+pub fn rgba(status: Status) -> Vec<u8> {
     let p = &Palette::ONE_DARK;
     let size = SIZE as f32;
     let mut pixels = Vec::with_capacity((SIZE * SIZE * 4) as usize);
@@ -87,10 +86,10 @@ pub fn rgba(running: bool) -> Vec<u8> {
             if bar {
                 color = rgb(p.bg_dark);
             }
-            if running {
+            if let Some(dot) = status.color() {
                 let d = ((fx - 25.0).powi(2) + (fy - 25.0).powi(2)).sqrt();
                 if d <= 6.5 {
-                    color = rgb(if d <= 5.0 { p.green } else { p.bg_dark });
+                    color = rgb(if d <= 5.0 { dot } else { p.bg_dark });
                 }
             }
             pixels.extend_from_slice(&color);
@@ -101,7 +100,7 @@ pub fn rgba(running: bool) -> Vec<u8> {
 
 pub fn egui_icon() -> egui::IconData {
     egui::IconData {
-        rgba: rgba(false),
+        rgba: rgba(Status::Idle),
         width: SIZE,
         height: SIZE,
     }
@@ -130,15 +129,17 @@ mod tests {
     }
 
     #[test]
-    fn icon_has_corners_bars_and_a_running_dot() {
-        let idle = rgba(false);
+    fn icon_has_corners_bars_and_a_status_dot() {
+        let p = &Palette::ONE_DARK;
+        let idle = rgba(Status::Idle);
         assert_eq!(idle.len(), (SIZE * SIZE * 4) as usize);
         assert_eq!(pixel(&idle, 0, 0)[3], 0, "transparent corner");
-        assert_eq!(pixel(&idle, 4, 16), rgb(Palette::ONE_DARK.accent));
-        assert_eq!(pixel(&idle, 12, 9), rgb(Palette::ONE_DARK.bg_dark));
-        let running = rgba(true);
-        assert_eq!(pixel(&running, 25, 25), rgb(Palette::ONE_DARK.green));
-        assert_ne!(pixel(&idle, 25, 25), pixel(&running, 25, 25));
+        assert_eq!(pixel(&idle, 4, 16), rgb(p.accent));
+        assert_eq!(pixel(&idle, 12, 9), rgb(p.bg_dark));
+        assert_eq!(pixel(&rgba(Status::Running), 25, 25), rgb(p.green));
+        assert_eq!(pixel(&rgba(Status::Busy), 25, 25), rgb(p.yellow));
+        assert_eq!(pixel(&rgba(Status::Failed), 25, 25), rgb(p.red));
+        assert_ne!(pixel(&idle, 25, 25), rgb(p.green));
     }
 
     fn status(state: TunnelState) -> sshelf_core::supervisor::TunnelStatus {

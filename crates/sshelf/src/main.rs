@@ -22,6 +22,7 @@ mod test_util;
 mod theme;
 mod toast;
 mod tray;
+mod tray_menu;
 mod tunnels_view;
 mod util;
 mod widgets;

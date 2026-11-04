@@ -8,6 +8,7 @@ use std::time::SystemTime;
 
 use sshelf_core::core::{AppData, Command, ConfigSnapshot, Core, Event, ParentWindow, SshInfo};
 use sshelf_core::paths::Paths;
+use sshelf_core::settings;
 use sshelf_core::supervisor::Snapshot;
 
 use crate::close_guard::{self, CloseGuard};
@@ -21,7 +22,8 @@ use crate::settings_view::SettingsView;
 use crate::sidebar::{self, View};
 use crate::theme::{self, Palette};
 use crate::toast::Toasts;
-use crate::tray::{self, Tray, TrayAction};
+use crate::tray::{self, Tray, TrayAction, TrayModel};
+use crate::tray_menu::TrayMenu;
 use crate::tunnels_view::TunnelsView;
 use crate::{motion, status_bar, window};
 
@@ -42,6 +44,10 @@ pub struct SshelfApp {
     close: CloseGuard,
     /// `None` when the platform could not create one.
     tray: Option<Tray>,
+    /// What both tray menus show, from the last `logic`.
+    tray_model: TrayModel,
+    /// The sshelf tray menu (right click).
+    tray_menu: TrayMenu,
     /// The last error, in the status bar until dismissed.
     error: Option<String>,
     /// Successes, briefly.
@@ -99,6 +105,8 @@ impl SshelfApp {
             hostkeys: HostKeyModals::default(),
             close: CloseGuard::default(),
             tray,
+            tray_model: TrayModel::default(),
+            tray_menu: TrayMenu::default(),
             error: tray_error,
             toasts: Toasts::default(),
             config_loaded: None,
@@ -106,27 +114,47 @@ impl SshelfApp {
         }
     }
 
-    /// Carries out tray clicks and keeps the tray menu current.
+    /// Carries out tray clicks and keeps the tray menus current.
     fn run_tray(&mut self, ctx: &egui::Context) {
-        let Some(tray) = &mut self.tray else {
-            return;
-        };
-        for action in tray.actions() {
-            match action.command() {
-                Some(command) => self.send(vec![command]),
-                None if action == TrayAction::Show => close_guard::show(ctx),
-                // The same close request as the window's (SPEC.md §10).
-                None => self.close.quit_from_tray(ctx),
-            }
+        let actions = self
+            .tray
+            .as_mut()
+            .map(|tray| tray.actions())
+            .unwrap_or_default();
+        for action in actions {
+            self.tray_action(ctx, action);
         }
-        let Some(tray) = &mut self.tray else {
-            return;
-        };
-        tray.update(tray::model(
+        self.tray_model = tray::model(
             self.data.as_deref(),
             self.config.as_deref().and_then(|c| c.hosts()),
             self.tunnel_states.as_deref(),
-        ));
+            self.hostkeys.waiting(),
+        );
+        // Linux trays (KSNI) report no icon position: always the system menu.
+        let native = cfg!(target_os = "linux")
+            || self
+                .data
+                .as_ref()
+                .is_some_and(|d| d.settings.tray_menu == settings::TrayMenu::System);
+        if let Some(tray) = &mut self.tray {
+            tray.update(self.tray_model.clone(), native);
+        }
+    }
+
+    /// A click in either tray menu.
+    fn tray_action(&mut self, ctx: &egui::Context, action: TrayAction) {
+        match action {
+            TrayAction::Show => close_guard::show(ctx),
+            // The same close request as the window's (SPEC.md §10).
+            TrayAction::Quit => self.close.quit_from_tray(ctx),
+            TrayAction::OpenMenu(icon) => self.tray_menu.open(ctx, icon),
+            TrayAction::ShowTunnel(id) => {
+                close_guard::show(ctx);
+                self.view = View::Tunnels;
+                self.tunnels.select(&id);
+            }
+            other => self.send(other.command().into_iter().collect()),
+        }
     }
 
     fn apply_events(&mut self, ctx: &egui::Context) {
@@ -294,6 +322,12 @@ impl eframe::App for SshelfApp {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let p = &Palette::ONE_DARK;
+        // The sshelf tray menu: drawn here even while the window is hidden
+        // (it asked for this pass; see `tray_menu`).
+        let model = self.tray_model.clone();
+        for action in self.tray_menu.show(ui.ctx(), &model) {
+            self.tray_action(ui.ctx(), action);
+        }
         window::background(ui.ctx());
         if let Some(error) = &self.startup_error {
             self.drag_strip(ui);

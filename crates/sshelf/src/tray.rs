@@ -1,9 +1,11 @@
 //! Tray icon and menu (SPEC.md §10 "Tray"): recent hosts to connect to,
 //! groups to start or stop, active tunnels to stop, Show and Quit.
 //!
-//! [`model`] builds the menu from app state (pure, tested); [`Tray`] owns the
-//! platform icon, rebuilds its menu only when the model changes, and turns
-//! clicks into [`TrayAction`]s. Everything here runs on the main thread from
+//! [`model`] builds a [`TrayModel`] from app state (pure, tested); the native
+//! menu ([`TrayModel::entries`]) and the sshelf menu (`tray_menu`) both show
+//! it. [`Tray`] owns the platform icon, rebuilds the native menu only when it
+//! changes (and drops it while the sshelf menu is used), and turns clicks into
+//! [`TrayAction`]s. Everything here runs on the main thread from
 //! `App::logic`, which eframe keeps calling while the window is hidden; tray
 //! clicks request a repaint to get there.
 
@@ -16,19 +18,32 @@ use tray_icon::menu::{IsMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem,
 use tray_icon::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
 use crate::close_guard;
-use crate::icon;
+use crate::icon::{self, Status};
 
 /// Recent hosts in the menu.
 pub const RECENT_HOSTS: usize = 8;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Where the icon is on screen, in physical pixels (from the click).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct IconRect {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum TrayAction {
     Connect(String),
     StartGroup(String),
     StopGroup(String),
     StopTunnel(String),
+    /// Shows the window on this tunnel (a failed one in the sshelf menu).
+    ShowTunnel(String),
     Show,
     Quit,
+    /// Right click with the sshelf menu on: open it by the icon.
+    OpenMenu(IconRect),
 }
 
 impl TrayAction {
@@ -39,8 +54,10 @@ impl TrayAction {
             TrayAction::StartGroup(id) => format!("group-start:{id}"),
             TrayAction::StopGroup(id) => format!("group-stop:{id}"),
             TrayAction::StopTunnel(id) => format!("tunnel-stop:{id}"),
+            TrayAction::ShowTunnel(id) => format!("tunnel-show:{id}"),
             TrayAction::Show => "show".into(),
             TrayAction::Quit => "quit".into(),
+            TrayAction::OpenMenu(_) => "open-menu".into(),
         }
     }
 
@@ -57,6 +74,7 @@ impl TrayAction {
             "group-start" => TrayAction::StartGroup(arg),
             "group-stop" => TrayAction::StopGroup(arg),
             "tunnel-stop" => TrayAction::StopTunnel(arg),
+            "tunnel-show" => TrayAction::ShowTunnel(arg),
             _ => return None,
         })
     }
@@ -68,17 +86,21 @@ impl TrayAction {
             TrayAction::StartGroup(id) => Command::StartGroup(id.clone()),
             TrayAction::StopGroup(id) => Command::StopGroup(id.clone()),
             TrayAction::StopTunnel(id) => Command::StopTunnel(id.clone()),
-            TrayAction::Show | TrayAction::Quit => return None,
+            TrayAction::ShowTunnel(_)
+            | TrayAction::Show
+            | TrayAction::Quit
+            | TrayAction::OpenMenu(_) => return None,
         })
     }
 }
 
+/// A native menu entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Entry {
     /// A clickable item, or a disabled line of information (`None`).
     Item {
         label: String,
-        action: Option<TrayAction>,
+        action: Option<String>,
     },
     Separator,
     Submenu {
@@ -90,7 +112,7 @@ pub enum Entry {
 fn item(label: impl Into<String>, action: TrayAction) -> Entry {
     Entry::Item {
         label: label.into(),
-        action: Some(action),
+        action: Some(action.id()),
     }
 }
 
@@ -101,12 +123,49 @@ fn info(label: impl Into<String>) -> Entry {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// A group in the menu.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupRow {
+    pub id: String,
+    pub name: String,
+    pub state: GroupState,
+}
+
+/// A tunnel that isn't stopped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TunnelRow {
+    pub id: String,
+    pub name: String,
+    /// The first forward's listen port.
+    pub port: Option<u16>,
+    pub state: TunnelState,
+    /// Started by hand: *Stop* releases that start.
+    pub manual: bool,
+    pub reconnecting: bool,
+    /// The groups holding it.
+    pub used_by: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrayModel {
-    pub entries: Vec<Entry>,
-    pub tooltip: String,
-    /// Tunnels starting or running (the icon shows a dot).
+    /// Tunnels starting or running.
     pub running: usize,
+    pub failed: usize,
+    /// The icon's dot.
+    pub status: Status,
+    pub tooltip: String,
+    pub groups: Vec<GroupRow>,
+    pub tunnels: Vec<TunnelRow>,
+    /// Hosts launched from sshelf that still exist, newest first.
+    pub recent: Vec<String>,
+    /// A host key waits for the user's answer.
+    pub host_key_waiting: bool,
+}
+
+impl Default for TrayModel {
+    fn default() -> Self {
+        model(None, None, None, false)
+    }
 }
 
 /// The menu for the current state.
@@ -114,12 +173,11 @@ pub fn model(
     data: Option<&AppData>,
     hosts: Option<&HostList>,
     states: Option<&Snapshot>,
+    host_key_waiting: bool,
 ) -> TrayModel {
     let empty = Snapshot::default();
     let states = states.unwrap_or(&empty);
-    let mut entries = Vec::new();
 
-    // Recent hosts launched from sshelf that still exist, newest first.
     let mut recent: Vec<String> = Vec::new();
     if let (Some(data), Some(hosts)) = (data, hosts) {
         for launch in &data.history.entries {
@@ -133,104 +191,156 @@ pub fn model(
             }
         }
     }
-    let connect: Vec<Entry> = if recent.is_empty() {
-        vec![info("No sessions launched from sshelf yet")]
-    } else {
-        recent
-            .into_iter()
-            .map(|alias| item(alias.clone(), TrayAction::Connect(alias)))
+
+    let groups = data.map_or_else(Vec::new, |data| {
+        data.tunnels
+            .groups
+            .iter()
+            .map(|group| GroupRow {
+                id: group.id.clone(),
+                name: group.name.clone(),
+                state: states.group_state(group),
+            })
             .collect()
-    };
-    entries.push(Entry::Submenu {
-        label: "Connect".into(),
-        entries: connect,
     });
 
-    if let Some(data) = data
-        && !data.tunnels.groups.is_empty()
-    {
-        entries.push(Entry::Separator);
-        entries.push(info("Groups"));
-        for group in &data.tunnels.groups {
-            let name = &group.name;
-            entries.push(match states.group_state(group) {
-                GroupState::Stopped => item(
-                    format!("Start {name}"),
-                    TrayAction::StartGroup(group.id.clone()),
-                ),
-                GroupState::Starting => item(
-                    format!("Stop {name} (starting)"),
-                    TrayAction::StopGroup(group.id.clone()),
-                ),
-                GroupState::Running => item(
-                    format!("Stop {name}"),
-                    TrayAction::StopGroup(group.id.clone()),
-                ),
-                GroupState::Degraded { running, total } => item(
-                    format!("Stop {name} ({running}/{total} running)"),
-                    TrayAction::StopGroup(group.id.clone()),
-                ),
-            });
-        }
-    }
-
-    let mut active = Vec::new();
+    let mut tunnels = Vec::new();
     if let Some(data) = data {
         for tunnel in &data.tunnels.tunnels {
             let Some(status) = states.tunnels.get(&tunnel.id) else {
                 continue;
             };
-            let name = &tunnel.name;
-            let entry = match &status.state {
-                TunnelState::Stopped => continue,
-                TunnelState::Stopping => info(format!("{name} (stopping)")),
-                state if status.owners.contains(&Owner::Manual) => {
-                    let suffix = match state {
-                        TunnelState::Starting => " (starting)",
-                        TunnelState::Failed(_) if status.reconnect.is_some() => " (reconnecting)",
-                        TunnelState::Failed(_) => " (failed)",
-                        _ => "",
-                    };
-                    item(
-                        format!("Stop {name}{suffix}"),
-                        TrayAction::StopTunnel(tunnel.id.clone()),
-                    )
-                }
-                _ => {
-                    let groups: Vec<&str> = status
-                        .owners
-                        .iter()
-                        .filter_map(|o| match o {
-                            Owner::Group(id) => data.tunnels.group(id).map(|g| g.name.as_str()),
-                            Owner::Manual => None,
-                        })
-                        .collect();
-                    info(format!("{name} (used by {})", groups.join(", ")))
-                }
-            };
-            active.push(entry);
+            if status.state == TunnelState::Stopped {
+                continue;
+            }
+            tunnels.push(TunnelRow {
+                id: tunnel.id.clone(),
+                name: tunnel.name.clone(),
+                port: tunnel.forwards.first().map(|f| f.listen),
+                state: status.state.clone(),
+                manual: status.owners.contains(&Owner::Manual),
+                reconnecting: status.reconnect.is_some(),
+                used_by: status
+                    .owners
+                    .iter()
+                    .filter_map(|o| match o {
+                        Owner::Group(id) => data.tunnels.group(id).map(|g| g.name.clone()),
+                        Owner::Manual => None,
+                    })
+                    .collect(),
+            });
         }
     }
-    if !active.is_empty() {
-        entries.push(Entry::Separator);
-        entries.push(info("Active tunnels"));
-        entries.extend(active);
-    }
-
-    entries.push(Entry::Separator);
-    entries.push(item("Show sshelf", TrayAction::Show));
-    entries.push(item("Quit", TrayAction::Quit));
 
     let running = close_guard::running_count(Some(states));
-    let tooltip = match running {
+    let failed = states
+        .tunnels
+        .values()
+        .filter(|t| matches!(t.state, TunnelState::Failed(_)))
+        .count();
+    let mut tooltip = match running {
         0 => "sshelf".to_string(),
-        1 => "sshelf: 1 tunnel running".to_string(),
-        n => format!("sshelf: {n} tunnels running"),
+        1 => "sshelf · 1 tunnel running".to_string(),
+        n => format!("sshelf · {n} tunnels running"),
     };
+    if failed > 0 {
+        tooltip.push_str(&format!(" · {failed} failed"));
+    }
+    let status = Status::of(
+        Some(states),
+        data.map(|d| d.tunnels.groups.as_slice())
+            .unwrap_or_default(),
+    );
     TrayModel {
-        entries,
-        tooltip,
         running,
+        failed,
+        status,
+        tooltip,
+        groups,
+        tunnels,
+        recent,
+        host_key_waiting,
+    }
+}
+
+impl TrayModel {
+    /// "2 running · 1 failed", or "nothing running".
+    pub fn summary(&self) -> String {
+        match (self.running, self.failed) {
+            (0, 0) => "nothing running".into(),
+            (r, 0) => format!("{r} running"),
+            (0, f) => format!("{f} failed"),
+            (r, f) => format!("{r} running · {f} failed"),
+        }
+    }
+
+    /// The native menu.
+    pub fn entries(&self) -> Vec<Entry> {
+        let mut entries = vec![info(format!("sshelf: {}", self.summary()))];
+        if self.host_key_waiting {
+            entries.push(item("A host key waits for you…", TrayAction::Show));
+        }
+        entries.push(Entry::Separator);
+        let connect: Vec<Entry> = if self.recent.is_empty() {
+            vec![info("No sessions launched from sshelf yet")]
+        } else {
+            self.recent
+                .iter()
+                .map(|alias| item(alias.clone(), TrayAction::Connect(alias.clone())))
+                .collect()
+        };
+        entries.push(Entry::Submenu {
+            label: "Connect".into(),
+            entries: connect,
+        });
+
+        if !self.groups.is_empty() {
+            entries.push(Entry::Separator);
+            entries.push(info("Groups"));
+            for group in &self.groups {
+                let (name, stop) = (&group.name, TrayAction::StopGroup(group.id.clone()));
+                entries.push(match group.state {
+                    GroupState::Stopped => item(
+                        format!("Start {name}"),
+                        TrayAction::StartGroup(group.id.clone()),
+                    ),
+                    GroupState::Starting => item(format!("Stop {name} (starting)"), stop),
+                    GroupState::Running => item(format!("Stop {name}"), stop),
+                    GroupState::Degraded { running, total } => {
+                        item(format!("Stop {name} ({running}/{total} running)"), stop)
+                    }
+                });
+            }
+        }
+
+        if !self.tunnels.is_empty() {
+            entries.push(Entry::Separator);
+            entries.push(info("Active tunnels"));
+            for tunnel in &self.tunnels {
+                let name = &tunnel.name;
+                entries.push(match &tunnel.state {
+                    TunnelState::Stopping => info(format!("{name} (stopping)")),
+                    state if tunnel.manual => {
+                        let suffix = match state {
+                            TunnelState::Starting => " (starting)",
+                            TunnelState::Failed(_) if tunnel.reconnecting => " (reconnecting)",
+                            TunnelState::Failed(_) => " (failed)",
+                            _ => "",
+                        };
+                        item(
+                            format!("Stop {name}{suffix}"),
+                            TrayAction::StopTunnel(tunnel.id.clone()),
+                        )
+                    }
+                    _ => info(format!("{name} (used by {})", tunnel.used_by.join(", "))),
+                });
+            }
+        }
+
+        entries.push(Entry::Separator);
+        entries.push(item("Show sshelf", TrayAction::Show));
+        entries.push(item("Quit", TrayAction::Quit));
+        entries
     }
 }
 
@@ -239,12 +349,15 @@ enum TrayEvent {
     Menu(String),
     /// The icon itself was clicked.
     Clicked,
+    RightClicked(IconRect),
 }
 
 /// The platform tray icon.
 pub struct Tray {
     icon: TrayIcon,
     shown: Option<TrayModel>,
+    /// The native menu is attached (not the sshelf menu).
+    native: Option<bool>,
     events: Receiver<TrayEvent>,
 }
 
@@ -260,17 +373,28 @@ impl Tray {
         let icon_ctx = ctx.clone();
         TrayIconEvent::set_event_handler(Some(move |event: TrayIconEvent| {
             if let TrayIconEvent::Click {
-                button: MouseButton::Left,
+                button,
                 button_state: MouseButtonState::Up,
+                rect,
                 ..
             } = event
             {
-                let _ = tx.send(TrayEvent::Clicked);
+                let event = match button {
+                    MouseButton::Left => TrayEvent::Clicked,
+                    MouseButton::Right => TrayEvent::RightClicked(IconRect {
+                        x: rect.position.x,
+                        y: rect.position.y,
+                        width: f64::from(rect.size.width),
+                        height: f64::from(rect.size.height),
+                    }),
+                    MouseButton::Middle => return,
+                };
+                let _ = tx.send(event);
                 icon_ctx.request_repaint();
             }
         }));
         let icon = TrayIconBuilder::new()
-            .with_icon(tray_icon(false)?)
+            .with_icon(tray_icon(Status::Idle)?)
             .with_tooltip("sshelf")
             .with_menu_on_left_click(false)
             .build()
@@ -278,48 +402,60 @@ impl Tray {
         Ok(Self {
             icon,
             shown: None,
+            native: None,
             events,
         })
     }
 
-    /// Shows `model`, rebuilding the menu only when it changed.
-    pub fn update(&mut self, model: TrayModel) {
-        if self.shown.as_ref() == Some(&model) {
+    /// Shows `model`, rebuilding what changed. `native`: the system menu
+    /// opens on right click; otherwise there is none, and right clicks come
+    /// back as [`TrayAction::OpenMenu`].
+    pub fn update(&mut self, model: TrayModel, native: bool) {
+        if self.shown.as_ref() == Some(&model) && self.native == Some(native) {
             return;
         }
         let previous = self.shown.as_ref();
-        if previous.is_none_or(|p| (p.running > 0) != (model.running > 0))
-            && let Ok(icon) = tray_icon(model.running > 0)
+        if previous.is_none_or(|p| p.status != model.status)
+            && let Ok(icon) = tray_icon(model.status)
         {
             let _ = self.icon.set_icon(Some(icon));
         }
         if previous.is_none_or(|p| p.tooltip != model.tooltip) {
             let _ = self.icon.set_tooltip(Some(&model.tooltip));
         }
-        if previous.is_none_or(|p| p.entries != model.entries) {
-            let menu = Menu::new();
-            for entry in build(&model.entries) {
-                let _ = menu.append(entry.as_ref());
+        let entries = model.entries();
+        let menu_changed = previous.is_none_or(|p| p.entries() != entries);
+        if self.native != Some(native) || (native && menu_changed) {
+            if native {
+                let menu = Menu::new();
+                for entry in build(&entries) {
+                    let _ = menu.append(entry.as_ref());
+                }
+                self.icon.set_menu(Some(Box::new(menu)));
+            } else {
+                self.icon.set_menu(None);
             }
-            self.icon.set_menu(Some(Box::new(menu)));
         }
+        self.native = Some(native);
         self.shown = Some(model);
     }
 
     /// Clicks since the last call; a click on the icon shows the window.
     pub fn actions(&mut self) -> Vec<TrayAction> {
+        let native = self.native != Some(false);
         self.events
             .try_iter()
             .filter_map(|event| match event {
                 TrayEvent::Menu(id) => TrayAction::parse(&id),
                 TrayEvent::Clicked => Some(TrayAction::Show),
+                TrayEvent::RightClicked(rect) => (!native).then_some(TrayAction::OpenMenu(rect)),
             })
             .collect()
     }
 }
 
-fn tray_icon(running: bool) -> Result<tray_icon::Icon, String> {
-    tray_icon::Icon::from_rgba(icon::rgba(running), icon::SIZE, icon::SIZE)
+fn tray_icon(status: Status) -> Result<tray_icon::Icon, String> {
+    tray_icon::Icon::from_rgba(icon::rgba(status), icon::SIZE, icon::SIZE)
         .map_err(|e| e.to_string())
 }
 
@@ -331,8 +467,8 @@ fn build(entries: &[Entry]) -> Vec<Box<dyn IsMenuItem>> {
             match entry {
                 Entry::Item {
                     label,
-                    action: Some(action),
-                } => Box::new(MenuItem::with_id(action.id(), menu_text(label), true, None)),
+                    action: Some(id),
+                } => Box::new(MenuItem::with_id(id.clone(), menu_text(label), true, None)),
                 Entry::Item {
                     label,
                     action: None,
@@ -368,7 +504,7 @@ mod tests {
 
     use sshconf::{ConfigSet, ResolveOptions};
     use sshelf_core::supervisor::TunnelStatus;
-    use sshelf_core::tunnels::{Group, Tunnel};
+    use sshelf_core::tunnels::{Forward, ForwardKind, Group, Tunnel};
 
     use super::*;
 
@@ -409,7 +545,12 @@ mod tests {
                 id: id.into(),
                 name: name.into(),
                 host: host.into(),
-                forwards: Vec::new(),
+                forwards: vec![Forward {
+                    kind: ForwardKind::L,
+                    bind: "127.0.0.1".into(),
+                    listen: 6443,
+                    target: Some("localhost:6443".into()),
+                }],
                 auto_reconnect: false,
             });
         }
@@ -440,10 +581,12 @@ mod tests {
     #[test]
     fn idle_menu_has_recent_hosts_groups_show_and_quit() {
         let hosts = hosts("Host web w1\nHost db\n");
-        let model = model(Some(&data()), Some(&hosts), None);
+        let model = model(Some(&data()), Some(&hosts), None, false);
         assert_eq!(
-            labels(&model.entries),
+            labels(&model.entries()),
             [
+                "sshelf: nothing running [off]",
+                "---",
                 // Deduplicated by host (w1 is web), missing hosts dropped.
                 "Connect > db | web",
                 "---",
@@ -456,6 +599,7 @@ mod tests {
         );
         assert_eq!(model.tooltip, "sshelf");
         assert_eq!(model.running, 0);
+        assert_eq!(model.status, Status::Idle);
     }
 
     #[test]
@@ -477,8 +621,10 @@ mod tests {
                 ),
             ]),
         };
-        let model = model(Some(&data()), Some(&hosts), Some(&states));
-        let shown = labels(&model.entries);
+        let model = model(Some(&data()), Some(&hosts), Some(&states), true);
+        let shown = labels(&model.entries());
+        assert_eq!(shown[0], "sshelf: 2 running · 1 failed [off]");
+        assert_eq!(shown[1], "A host key waits for you…");
         assert!(
             shown.contains(&"Stop Work (1/2 running)".to_string()),
             "{shown:?}"
@@ -493,14 +639,17 @@ mod tests {
             "{shown:?}"
         );
         assert_eq!(model.running, 2);
-        assert_eq!(model.tooltip, "sshelf: 2 tunnels running");
+        assert_eq!(model.failed, 1);
+        assert_eq!(model.status, Status::Failed);
+        assert_eq!(model.tooltip, "sshelf · 2 tunnels running · 1 failed");
+        assert_eq!(model.tunnels[0].port, Some(6443));
     }
 
     #[test]
     fn nothing_launched_yet() {
-        let model = model(None, None, None);
+        let model = model(None, None, None, false);
         assert_eq!(
-            labels(&model.entries)[0],
+            labels(&model.entries())[2],
             "Connect > No sessions launched from sshelf yet [off]"
         );
     }
@@ -512,6 +661,7 @@ mod tests {
             TrayAction::StartGroup("g-1".into()),
             TrayAction::StopGroup("g-1".into()),
             TrayAction::StopTunnel("t-a".into()),
+            TrayAction::ShowTunnel("t-a".into()),
             TrayAction::Show,
             TrayAction::Quit,
         ] {

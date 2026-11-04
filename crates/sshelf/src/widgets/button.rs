@@ -45,6 +45,8 @@ pub struct Button<'a> {
     name: Option<&'a str>,
     tip: Option<&'a str>,
     size: Size,
+    /// At least this wide, the content centred (a footer button that fills).
+    min_width: f32,
 }
 
 impl<'a> Button<'a> {
@@ -56,7 +58,14 @@ impl<'a> Button<'a> {
             name: None,
             tip: None,
             size: Size::Default,
+            min_width: 0.0,
         }
+    }
+
+    /// At least `width` wide, the content centred.
+    pub fn min_width(mut self, width: f32) -> Self {
+        self.min_width = width;
+        self
     }
 
     /// 28 px high, 12 px text, 14 px icon (health lines, banners, rows).
@@ -97,6 +106,7 @@ impl<'a> Button<'a> {
             name: Some(name),
             tip: Some(name),
             size: Size::Default,
+            min_width: 0.0,
         }
     }
 
@@ -158,10 +168,11 @@ impl Widget for Button<'_> {
         let galley = (!self.text.is_empty())
             .then(|| ui.painter().layout_no_wrap(self.text.clone(), font, fg));
         let lead = !matches!(self.lead, Lead::None);
-        let width = match &galley {
+        let natural = match &galley {
             None => height,
             Some(g) => padding * 2.0 + g.size().x + if lead { icon_size + GAP } else { 0.0 },
         };
+        let width = natural.max(self.min_width);
         let (rect, response) = ui.allocate_exact_size(vec2(width, height), Sense::click());
         let enabled = ui.is_enabled();
         let name = self.name.unwrap_or(&self.text).to_string();
@@ -183,7 +194,7 @@ impl Widget for Button<'_> {
         let fg = if enabled { fg } else { fg.gamma_multiply(0.45) };
         let mut x = match &galley {
             None => rect.center().x - icon_size / 2.0,
-            Some(_) => rect.left() + padding,
+            Some(_) => rect.center().x - natural / 2.0 + padding,
         };
         match self.lead {
             Lead::None => {}
