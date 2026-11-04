@@ -19,6 +19,7 @@ fn ssh_keygen() -> std::path::PathBuf {
     SshTools::locate(None)
         .expect("the system ssh is installed")
         .companion("ssh-keygen")
+        .program
 }
 
 /// `ssh-keygen -y -P <passphrase> -f <key>`: the public key OpenSSH derives.

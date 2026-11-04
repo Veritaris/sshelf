@@ -15,7 +15,7 @@ use sshelf_core::history::History;
 use sshelf_core::metadata::{HostMeta, HostsFile};
 use sshelf_core::paths::Paths;
 use sshelf_core::settings::Settings;
-use sshelf_core::ssh::SshTools;
+use sshelf_core::ssh::{SshTools, Tool};
 use sshelf_core::storage::{Store, Versioned};
 use sshelf_core::supervisor::TunnelState;
 use sshelf_core::tunnels::{Tunnel, TunnelsFile};
@@ -25,7 +25,7 @@ const WAIT: Duration = Duration::from_secs(10);
 const NEW_KEY: &str =
     "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIO/867Gn6gWVC9L/2TosddbUBIfUwN1FA755XCQA20kG";
 
-fn ssh() -> PathBuf {
+fn ssh() -> Tool {
     SshTools::locate(None)
         .expect("the system ssh is installed")
         .ssh

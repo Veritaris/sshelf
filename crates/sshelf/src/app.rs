@@ -179,6 +179,10 @@ impl SshelfApp {
                     self.toasts.push_value("Opened a terminal for", alias);
                 }
                 Event::Notice(text) => self.toasts.push(text),
+                Event::TourWouldRun { command } => {
+                    self.toasts
+                        .push(format!("Tour: would run `{command}` in your terminal"));
+                }
                 Event::Health(health) => self.hosts.on_health(health),
                 Event::Route {
                     alias,

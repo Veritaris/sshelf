@@ -1,5 +1,6 @@
 //! `settings.toml`: ssh binary override, terminal command template, close
-//! behavior, appearance (host list style, reduced motion) and the tray menu.
+//! behavior, appearance (host list style, reduced motion), the tray menu and
+//! the onboarding tour's state.
 
 use std::path::PathBuf;
 
@@ -28,6 +29,20 @@ pub struct Settings {
     pub reduce_motion: bool,
     /// What a right click on the tray icon opens (SPEC.md §10 *Tray*).
     pub tray_menu: TrayMenu,
+    /// The onboarding tour (SPEC.md §10 *Onboarding tour*); missing until the
+    /// welcome screen was answered, which shows it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tour: Option<TourState>,
+}
+
+/// How far the onboarding tour got.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TourState {
+    /// The welcome screen was answered.
+    Offered,
+    /// The tour ended (finished, skipped or exited).
+    Done,
 }
 
 /// What closing the window does while tunnels run.
@@ -83,6 +98,7 @@ impl Default for Settings {
             cards_group_by: CardsGroupBy::Tag,
             reduce_motion: false,
             tray_menu: TrayMenu::Sshelf,
+            tour: None,
         }
     }
 }
@@ -109,6 +125,7 @@ mod tests {
             cards_group_by: CardsGroupBy::None,
             reduce_motion: true,
             tray_menu: TrayMenu::System,
+            tour: Some(TourState::Done),
         };
         store.save(&settings).unwrap();
         let text = std::fs::read_to_string(store.path::<Settings>()).unwrap();
@@ -118,6 +135,7 @@ mod tests {
             "cards_group_by = \"none\"",
             "reduce_motion = true",
             "tray_menu = \"system\"",
+            "tour = \"done\"",
         ] {
             assert!(text.contains(line), "{line}: {text}");
         }
@@ -157,5 +175,7 @@ mod tests {
         assert_eq!(loaded.data.cards_group_by, CardsGroupBy::Tag);
         assert!(!loaded.data.reduce_motion);
         assert_eq!(loaded.data.tray_menu, TrayMenu::Sshelf);
+        // No `tour` key: the welcome screen is due.
+        assert_eq!(loaded.data.tour, None);
     }
 }

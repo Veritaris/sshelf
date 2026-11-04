@@ -7,8 +7,9 @@
 //! from the same directory as `ssh`.
 
 use std::env;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::Duration;
 
 use crate::process::{self, Output};
@@ -57,11 +58,59 @@ pub enum ToolSource {
     BuiltIn,
     /// Found on `PATH`.
     Path,
+    /// The onboarding tour's stand-in (SPEC.md §8 *Tour sandbox*): only code
+    /// sets it, never `settings.toml`.
+    Sandbox,
+}
+
+/// A program to run as ssh or one of its companions: the binary, arguments
+/// that always come first, and environment (SPEC.md §8 *Tour sandbox*). A
+/// real tool is just its path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tool {
+    pub program: PathBuf,
+    pub prefix: Vec<OsString>,
+    pub env: Vec<(OsString, OsString)>,
+}
+
+impl Tool {
+    pub fn new(program: impl Into<PathBuf>) -> Self {
+        Self {
+            program: program.into(),
+            prefix: Vec::new(),
+            env: Vec::new(),
+        }
+    }
+
+    /// A command for the tool, prefix and environment set, with no stdin and
+    /// without a console window ([`process::command`]).
+    pub fn command(&self) -> Command {
+        let mut cmd = process::command(&self.program);
+        cmd.args(&self.prefix);
+        cmd.envs(self.env.iter().map(|(k, v)| (k, v)));
+        cmd
+    }
+
+    /// The path and any prefix, for display.
+    pub fn display(&self) -> String {
+        let mut text = self.program.display().to_string();
+        for arg in &self.prefix {
+            text.push(' ');
+            text.push_str(&arg.to_string_lossy());
+        }
+        text
+    }
+}
+
+impl From<PathBuf> for Tool {
+    fn from(program: PathBuf) -> Self {
+        Self::new(program)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SshTools {
-    pub ssh: PathBuf,
+    pub ssh: Tool,
     pub source: ToolSource,
 }
 
@@ -74,12 +123,21 @@ pub enum LocateError {
 }
 
 impl SshTools {
+    /// The tour sandbox's ssh (SPEC.md §8): `ssh`, and every companion as
+    /// the same program with `--as <name>` after `ssh`'s prefix.
+    pub fn sandbox(ssh: Tool) -> Self {
+        Self {
+            ssh,
+            source: ToolSource::Sandbox,
+        }
+    }
+
     /// Uses `override_path` if given (without falling back), else the platform default.
     pub fn locate(override_path: Option<&Path>) -> Result<Self, LocateError> {
         if let Some(path) = override_path {
             return if path.is_file() {
                 Ok(Self {
-                    ssh: path.to_path_buf(),
+                    ssh: Tool::new(path),
                     source: ToolSource::Override,
                 })
             } else {
@@ -91,7 +149,7 @@ impl SshTools {
             let ssh = dir.join("ssh.exe");
             return if ssh.is_file() {
                 Ok(Self {
-                    ssh,
+                    ssh: Tool::new(ssh),
                     source: ToolSource::BuiltIn,
                 })
             } else {
@@ -104,7 +162,7 @@ impl SshTools {
         let path_var = env::var_os("PATH").unwrap_or_default();
         find_in_path("ssh", &path_var)
             .map(|ssh| Self {
-                ssh,
+                ssh: Tool::new(ssh),
                 source: ToolSource::Path,
             })
             .ok_or_else(|| LocateError::NotFound("no `ssh` on PATH".to_string()))
@@ -112,24 +170,29 @@ impl SshTools {
 
     /// A companion tool such as `ssh-add`: next to `ssh`; if an overridden
     /// ssh has none beside it, the system's (Windows' built-in OpenSSH, else
-    /// `PATH`).
-    pub fn companion(&self, name: &str) -> PathBuf {
+    /// `PATH`). In the sandbox, ssh's own program as `--as <name>`.
+    pub fn companion(&self, name: &str) -> Tool {
+        if self.source == ToolSource::Sandbox {
+            let mut tool = self.ssh.clone();
+            tool.prefix.extend(["--as".into(), name.into()]);
+            return tool;
+        }
         let file = format!("{name}{}", env::consts::EXE_SUFFIX);
-        let beside = self.ssh.with_file_name(&file);
+        let beside = self.ssh.program.with_file_name(&file);
         if beside.is_file() {
-            return beside;
+            return Tool::new(beside);
         }
         if cfg!(windows) {
             let builtin = windows_openssh_dir(env::var_os("SystemRoot").as_deref()).join(&file);
-            return if builtin.is_file() { builtin } else { beside };
+            return Tool::new(if builtin.is_file() { builtin } else { beside });
         }
         let path_var = env::var_os("PATH").unwrap_or_default();
-        find_in_path(name, &path_var).unwrap_or(beside)
+        Tool::new(find_in_path(name, &path_var).unwrap_or(beside))
     }
 
     /// First line of `ssh -V` (printed on stderr).
     pub fn version(&self) -> Result<String, String> {
-        let mut cmd = process::command(&self.ssh);
+        let mut cmd = self.ssh.command();
         cmd.arg("-V");
         let out = process::run(cmd, QUICK_TIMEOUT).map_err(|e| e.to_string())?;
         first_line(&out.stderr)
@@ -140,7 +203,7 @@ impl SshTools {
     /// `ssh -G -- <alias>`: the effective configuration as ssh itself
     /// resolves it (SPEC.md §1.6). Never connects.
     pub fn resolve(&self, alias: &str) -> Result<Resolved, String> {
-        let mut cmd = process::command(&self.ssh);
+        let mut cmd = self.ssh.command();
         cmd.args(["-G", "--", alias]);
         let out = process::run(cmd, RESOLVE_TIMEOUT).map_err(|e| e.to_string())?;
         if out.code != Some(0) {
@@ -156,7 +219,7 @@ impl SshTools {
 
     /// Agent reachability and loaded keys, via `ssh-add -l`.
     pub fn agent_status(&self) -> AgentStatus {
-        let mut cmd = process::command(&self.companion("ssh-add"));
+        let mut cmd = self.companion("ssh-add").command();
         cmd.arg("-l");
         match process::run(cmd, QUICK_TIMEOUT) {
             Ok(out) => parse_agent_list(&out),
@@ -346,7 +409,7 @@ mod tests {
         let ssh = make_tool(tmp.path(), "my-ssh");
         let tools = SshTools::locate(Some(&ssh)).unwrap();
         assert_eq!(tools.source, ToolSource::Override);
-        assert_eq!(tools.ssh, ssh);
+        assert_eq!(tools.ssh, Tool::new(ssh));
 
         let missing = tmp.path().join("nope");
         assert_eq!(
@@ -361,9 +424,30 @@ mod tests {
         let ssh = make_tool(tmp.path(), "ssh");
         let add = make_tool(tmp.path(), "ssh-add");
         let tools = SshTools {
-            ssh,
+            ssh: Tool::new(ssh),
             source: ToolSource::Override,
         };
-        assert_eq!(tools.companion("ssh-add"), add);
+        assert_eq!(tools.companion("ssh-add"), Tool::new(add));
+    }
+
+    #[test]
+    fn sandbox_companions_run_the_same_program_as_another_tool() {
+        let ssh = Tool {
+            program: PathBuf::from("sshelf"),
+            prefix: vec!["--fake-ssh".into()],
+            env: vec![("FAKE_SSH_SCENARIOS".into(), "s.toml".into())],
+        };
+        let tools = SshTools::sandbox(ssh.clone());
+        let add = tools.companion("ssh-add");
+        assert_eq!(add.program, ssh.program);
+        assert_eq!(add.prefix, ["--fake-ssh", "--as", "ssh-add"]);
+        assert_eq!(add.env, ssh.env);
+        assert_eq!(add.display(), "sshelf --fake-ssh --as ssh-add");
+        let cmd = add.command();
+        assert_eq!(
+            cmd.get_args().collect::<Vec<_>>(),
+            ["--fake-ssh", "--as", "ssh-add"]
+        );
+        assert_eq!(cmd.get_envs().count(), 1);
     }
 }

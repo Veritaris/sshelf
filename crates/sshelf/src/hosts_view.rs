@@ -1347,7 +1347,7 @@ mod tests {
     fn ssh_info(agent: Option<AgentStatus>, service_running: Option<bool>) -> SshInfo {
         SshInfo {
             tools: Ok(SshTools {
-                ssh: PathBuf::from("ssh"),
+                ssh: PathBuf::from("ssh").into(),
                 source: ToolSource::Path,
             }),
             version: None,

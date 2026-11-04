@@ -12,7 +12,7 @@ use sshconf::diff::{DiffOp, diff};
 use sshconf::{ConfigFile, LineKind};
 
 use crate::process;
-use crate::ssh::RESOLVE_TIMEOUT;
+use crate::ssh::{RESOLVE_TIMEOUT, Tool};
 use crate::storage::replace_file;
 
 /// What an edit does to its file.
@@ -67,7 +67,7 @@ pub struct Problem {
 /// Problems the edit introduces: invalid lines in the edited block, and
 /// errors `ssh -G -F` reports for the candidate file that it did not already
 /// report for the file as it was (old problems never block a save).
-pub fn validate(ssh: &Path, edit: &Edit) -> Result<Vec<Problem>, String> {
+pub fn validate(ssh: &Tool, edit: &Edit) -> Result<Vec<Problem>, String> {
     let (candidate, range) = edit.candidate()?;
     let mut problems: Vec<Problem> = candidate.lines[range.clone()]
         .iter()
@@ -135,11 +135,11 @@ pub fn validate(ssh: &Path, edit: &Edit) -> Result<Vec<Problem>, String> {
 
 /// `ssh -G -F <temp copy of bytes> -- <alias>`: the errors it reports, as
 /// (1-based line, message). Nothing is connected to.
-fn check(ssh: &Path, bytes: &[u8], alias: &str) -> Result<Vec<(Option<usize>, String)>, String> {
+fn check(ssh: &Tool, bytes: &[u8], alias: &str) -> Result<Vec<(Option<usize>, String)>, String> {
     let dir = tempfile::tempdir().map_err(|e| format!("creating a temp dir: {e}"))?;
     let path = dir.path().join("config");
     fs::write(&path, bytes).map_err(|e| format!("writing a temp file: {e}"))?;
-    let mut cmd = process::command(ssh);
+    let mut cmd = ssh.command();
     cmd.arg("-G").arg("-F").arg(&path).args(["--", alias]);
     let out = process::run(cmd, RESOLVE_TIMEOUT).map_err(|e| e.to_string())?;
     if out.code == Some(0) {

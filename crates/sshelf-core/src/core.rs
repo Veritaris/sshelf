@@ -30,7 +30,7 @@ use crate::paths::Paths;
 use crate::process;
 use crate::rename;
 use crate::settings::Settings;
-use crate::ssh::{self, AgentStatus, Resolved, SshTools};
+use crate::ssh::{self, AgentStatus, Resolved, SshTools, Tool};
 use crate::storage::{LoadStatus, Store, Versioned};
 use crate::supervisor::{self, Owner, Request, Snapshot, Supervisor, SupervisorEvent, TunnelState};
 use crate::terminal::{self, Terminal};
@@ -235,6 +235,11 @@ pub enum Event {
     Ssh(Arc<SshInfo>),
     Launched {
         alias: String,
+    },
+    /// The tour's sandbox didn't run a terminal or touch the agent: what it
+    /// would have run (SPEC.md §10 *Onboarding tour*), e.g. `ssh web-01`.
+    TourWouldRun {
+        command: String,
     },
     /// Tunnel states from the supervisor.
     Tunnels(Arc<Snapshot>),
@@ -448,8 +453,32 @@ pub struct Core {
     thread: Option<JoinHandle<()>>,
 }
 
+/// The onboarding tour's sandbox Core (SPEC.md §10 *Onboarding tour*, §8
+/// *Tour sandbox*). Its `Paths` are the sandbox's temporary home; besides:
+/// - its ssh and every companion is `ssh` (sshelf as fake-ssh), never one
+///   located on this computer or set in Settings;
+/// - Connect, terminals and the agent don't run: [`Event::TourWouldRun`]
+///   says what would have;
+/// - *Install on server* runs through fake-ssh, then restarts the host's
+///   failed tunnels;
+/// - host keys are not checked (the sample's servers are fake, and the tour
+///   has no host key step), and groups never start with it.
+#[derive(Debug, Clone)]
+pub struct SandboxOptions {
+    pub ssh: Tool,
+}
+
 impl Core {
     pub fn start(paths: Paths, repaint: Repaint) -> (Self, Receiver<Event>) {
+        Self::start_with(paths, None, repaint)
+    }
+
+    /// A Core; `sandbox` makes it the tour's.
+    pub fn start_with(
+        paths: Paths,
+        sandbox: Option<SandboxOptions>,
+        repaint: Repaint,
+    ) -> (Self, Receiver<Event>) {
         let (tx, messages) = mpsc::channel();
         let (events_tx, events) = mpsc::channel();
         let self_tx = tx.clone();
@@ -460,7 +489,9 @@ impl Core {
                     tx: events_tx,
                     repaint,
                 };
-                Worker::new(paths, emitter, self_tx).run(messages);
+                let mut worker = Worker::new(paths, emitter, self_tx);
+                worker.sandbox = sandbox;
+                worker.run(messages);
             })
             .expect("spawning the core thread");
         (
@@ -522,6 +553,8 @@ struct Worker {
     /// Aliases waiting for a free check slot, in order.
     health_queue: VecDeque<String>,
     health_running: usize,
+    /// The tour's sandbox Core.
+    sandbox: Option<SandboxOptions>,
 }
 
 impl Worker {
@@ -573,7 +606,13 @@ impl Worker {
             health: HealthSnapshot::default(),
             health_queue: VecDeque::new(),
             health_running: 0,
+            sandbox: None,
         }
+    }
+
+    /// The sandbox didn't run `command`: tell the UI what it would have.
+    fn would_run(&self, command: String) {
+        self.emitter.emit(Event::TourWouldRun { command });
     }
 
     fn run(mut self, messages: Receiver<Message>) {
@@ -595,12 +634,13 @@ impl Worker {
         self.reload();
         // Groups marked "Start on app launch" (SPEC.md §7), through the
         // normal start: host keys are checked and may ask first.
+        // Never in the tour's sandbox.
         let launch: Vec<String> = self
             .data
             .tunnels
             .groups
             .iter()
-            .filter(|g| g.start_on_launch)
+            .filter(|g| g.start_on_launch && self.sandbox.is_none())
             .map(|g| g.id.clone())
             .collect();
         for id in launch {
@@ -707,6 +747,9 @@ impl Worker {
                     self.check_edit(edit, AfterCheck::Save { overwrite })
                 }
                 Command::RenameHost { id, alias, to } => self.rename_host(id, alias, to),
+                Command::InstallKey { alias, public_line } if self.sandbox.is_some() => {
+                    self.install_in_sandbox(alias, &public_line);
+                }
                 Command::InstallKey { alias, public_line } => {
                     let args = keygen::install_args(&alias, &public_line);
                     let title = format!("Install key on {alias}");
@@ -719,6 +762,12 @@ impl Worker {
                 }
                 Command::AddKeyToAgent { path, encrypted } => self.add_to_agent(&path, encrypted),
                 Command::ResolveRoute(alias) => self.resolve_route(alias),
+                Command::GenerateHardwareKey(request) if self.sandbox.is_some() => {
+                    match keygen::hardware_args(&request) {
+                        Ok(args) => self.would_run(format!("ssh-keygen {}", args.join(" "))),
+                        Err(e) => self.error(format!("cannot generate the key: {e}")),
+                    }
+                }
                 Command::GenerateHardwareKey(request) => {
                     let started = keygen::hardware_args(&request).and_then(|args| {
                         self.run_in_terminal("Generate a security key", "ssh-keygen", &args)
@@ -1060,7 +1109,7 @@ impl Worker {
     fn keygen(&self) -> Result<(SshTools, Keygen), String> {
         let tools = self.tools.clone()?;
         let keygen = Keygen {
-            path: tools.companion("ssh-keygen"),
+            tool: tools.companion("ssh-keygen"),
         };
         Ok((tools, keygen))
     }
@@ -1078,6 +1127,10 @@ impl Worker {
             _ => Vec::new(),
         };
         destinations.dedup();
+        if self.sandbox.is_some() {
+            // Fake servers: no host keys to check.
+            return self.key_checked(start, Ok(None));
+        }
         let (tools, keygen) = match self.keygen() {
             Ok(found) => found,
             Err(e) => return self.error(format!("cannot start: {e}")),
@@ -1421,12 +1474,18 @@ impl Worker {
     /// Locates the tools now; version, agent and service are checked in the
     /// background and reported as one [`Event::Ssh`].
     fn refresh_ssh(&mut self) {
-        self.tools =
-            SshTools::locate(self.data.settings.ssh_path.as_deref()).map_err(|e| e.to_string());
+        let sandbox = self.sandbox.clone();
+        self.tools = match &sandbox {
+            Some(sandbox) => Ok(SshTools::sandbox(sandbox.ssh.clone())),
+            None => {
+                SshTools::locate(self.data.settings.ssh_path.as_deref()).map_err(|e| e.to_string())
+            }
+        };
         self.supervise(Request::SetSsh(
             self.tools.as_ref().ok().map(|t| t.ssh.clone()),
         ));
-        self.terminal = Terminal::detect();
+        // The sandbox opens no terminal, and leaves the agent's service be.
+        self.terminal = sandbox.is_none().then(Terminal::detect).flatten();
         let tools = self.tools.clone();
         let terminal = self.terminal.clone();
         let emitter = self.emitter.clone();
@@ -1439,7 +1498,7 @@ impl Worker {
                 tools,
                 version,
                 agent,
-                service: agent_service::query(),
+                service: sandbox.is_none().then(agent_service::query).flatten(),
                 terminal,
                 tray: tray_host::available(),
             })));
@@ -1510,6 +1569,9 @@ impl Worker {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
+        if self.sandbox.is_some() {
+            return self.would_run(format!("ssh-add {}", args.join(" ")));
+        }
         if encrypted {
             match self.run_in_terminal("ssh-add", "ssh-add", &args) {
                 Ok(()) => self.emitter.emit(Event::Notice(format!(
@@ -1526,7 +1588,7 @@ impl Worker {
         let emitter = self.emitter.clone();
         let tx = self.self_tx.clone();
         thread::spawn(move || {
-            let mut cmd = process::command(&ssh_add);
+            let mut cmd = ssh_add.command();
             cmd.args(&args);
             match process::run(cmd, ssh::QUICK_TIMEOUT) {
                 Ok(out) if out.code == Some(0) => {
@@ -1546,14 +1608,54 @@ impl Worker {
         });
     }
 
+    /// *Install on server* in the sandbox: the install command runs through
+    /// fake-ssh (no terminal), which adds the key to the sample server; then
+    /// the host's failed tunnels start again (SPEC.md §10 *Onboarding tour*).
+    fn install_in_sandbox(&mut self, alias: String, public_line: &str) {
+        let prepared = keygen::install_args(&alias, public_line)
+            .and_then(|args| Ok((args, self.tools.clone()?)));
+        let (args, tools) = match prepared {
+            Ok(prepared) => prepared,
+            Err(e) => return self.error(format!("cannot install the key: {e}")),
+        };
+        let failed: Vec<String> = self
+            .data
+            .tunnels
+            .tunnels
+            .iter()
+            .filter(|t| {
+                t.host == alias && matches!(self.tunnel_states.state(&t.id), TunnelState::Failed(_))
+            })
+            .map(|t| t.id.clone())
+            .collect();
+        let (emitter, tx) = (self.emitter.clone(), self.self_tx.clone());
+        thread::spawn(move || {
+            let mut cmd = tools.ssh.command();
+            cmd.args(&args);
+            match process::run(cmd, ssh::QUICK_TIMEOUT) {
+                Ok(out) if out.code == Some(0) => {
+                    emitter.emit(Event::Notice(format!("fake-ssh: key added to {alias}")));
+                    for id in failed {
+                        let _ = tx.send(Message::Command(Command::StartTunnel(id)));
+                    }
+                }
+                Ok(out) => emitter.emit(Event::Error(format!(
+                    "cannot install the key: {}",
+                    out.stderr.trim()
+                ))),
+                Err(e) => emitter.emit(Event::Error(format!("cannot install the key: {e}"))),
+            }
+        });
+    }
+
     /// Runs `tool` (`ssh` or a companion such as `ssh-add`) with `args` in
     /// the user's terminal (SPEC.md §10, §11).
     fn run_in_terminal(&self, title: &str, tool: &str, args: &[String]) -> Result<(), String> {
         let tools = self.tools.as_ref().map_err(String::clone)?;
         let program = if tool == "ssh" {
-            tools.ssh.clone()
+            tools.ssh.program.clone()
         } else {
-            tools.companion(tool)
+            tools.companion(tool).program
         };
         let plan = terminal::plan_command(
             &self.data.settings.terminal_command,
@@ -1567,25 +1669,29 @@ impl Worker {
     }
 
     fn connect(&mut self, alias: &str) {
-        let tools = match &self.tools {
-            Ok(tools) => tools,
-            Err(e) => return self.error(format!("cannot connect: {e}")),
-        };
-        let plan = match terminal::plan(
-            &self.data.settings.terminal_command,
-            &tools.ssh,
-            alias,
-            self.terminal.as_ref(),
-        ) {
-            Ok(plan) => plan,
-            Err(e) => return self.error(format!("cannot connect: {e}")),
-        };
-        if let Err(e) = terminal::spawn(&plan) {
-            return self.error(format!("cannot connect: {e}"));
+        if self.sandbox.is_some() {
+            self.would_run(format!("ssh {alias}"));
+        } else {
+            let tools = match &self.tools {
+                Ok(tools) => tools,
+                Err(e) => return self.error(format!("cannot connect: {e}")),
+            };
+            let plan = match terminal::plan(
+                &self.data.settings.terminal_command,
+                &tools.ssh.program,
+                alias,
+                self.terminal.as_ref(),
+            ) {
+                Ok(plan) => plan,
+                Err(e) => return self.error(format!("cannot connect: {e}")),
+            };
+            if let Err(e) = terminal::spawn(&plan) {
+                return self.error(format!("cannot connect: {e}"));
+            }
+            self.emitter.emit(Event::Launched {
+                alias: alias.to_string(),
+            });
         }
-        self.emitter.emit(Event::Launched {
-            alias: alias.to_string(),
-        });
 
         let mut history = self.data.history.clone();
         history.record(alias, SystemTime::now());

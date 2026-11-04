@@ -22,7 +22,7 @@ fn fake_ssh() -> PathBuf {
 fn keygen() -> Keygen {
     let tools = SshTools::locate(None).expect("the system ssh is installed");
     Keygen {
-        path: tools.companion("ssh-keygen"),
+        tool: tools.companion("ssh-keygen"),
     }
 }
 
@@ -97,15 +97,20 @@ fn target_comes_from_ssh_g_and_finds_keys_in_any_file() {
 
 #[test]
 fn fetch_returns_the_server_key_even_when_login_fails() {
-    let lines = hostkeys::fetch(&fake_ssh(), "newkey-a", None).unwrap();
+    let lines = hostkeys::fetch(&fake_ssh().into(), "newkey-a", None).unwrap();
     assert_eq!(lines, [format!("newkey-a.example.com {NEW}")]);
 
-    let lines = hostkeys::fetch(&fake_ssh(), "admin@newkey-b:2200", Some("ssh-ed25519")).unwrap();
+    let lines = hostkeys::fetch(
+        &fake_ssh().into(),
+        "admin@newkey-b:2200",
+        Some("ssh-ed25519"),
+    )
+    .unwrap();
     assert_eq!(lines, [format!("[newkey-b.example.com]:2200 {NEW}")]);
 }
 
 #[test]
 fn fetch_reports_why_no_key_arrived() {
-    let err = hostkeys::fetch(&fake_ssh(), "unreachable-x", None).unwrap_err();
+    let err = hostkeys::fetch(&fake_ssh().into(), "unreachable-x", None).unwrap_err();
     assert!(err.contains("timed out"), "{err}");
 }

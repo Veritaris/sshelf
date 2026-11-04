@@ -26,7 +26,7 @@ impl Harness {
     fn new() -> Self {
         let (tx, events) = mpsc::channel();
         let supervisor = Supervisor::start(
-            Some(PathBuf::from(env!("CARGO_BIN_EXE_fake-ssh"))),
+            Some(PathBuf::from(env!("CARGO_BIN_EXE_fake-ssh")).into()),
             move |event| {
                 let _ = tx.send(event);
             },

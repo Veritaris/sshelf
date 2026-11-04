@@ -45,7 +45,7 @@ pub struct SettingsView {
 }
 
 impl SettingsView {
-    /// The settings as edited (this view edits every field).
+    /// The settings as edited (the tour's state is kept as saved).
     fn draft(&self) -> Settings {
         let path = self.ssh_path.trim();
         Settings {
@@ -56,6 +56,7 @@ impl SettingsView {
             cards_group_by: self.cards_group_by,
             reduce_motion: self.reduce_motion,
             tray_menu: self.tray_menu,
+            tour: self.base.as_ref().and_then(|b| b.tour),
         }
     }
 
@@ -357,8 +358,9 @@ impl SettingsView {
                             ToolSource::Override => "from Settings",
                             ToolSource::BuiltIn => "built-in",
                             ToolSource::Path => "from PATH",
+                            ToolSource::Sandbox => "tour",
                         };
-                        path_label(ui, &tools.ssh.display().to_string(), Some(source));
+                        path_label(ui, &tools.ssh.display(), Some(source));
                     }
                     Err(e) => {
                         ui.add(egui::Label::new(RichText::new(e).size(13.0).color(p.red)).wrap());

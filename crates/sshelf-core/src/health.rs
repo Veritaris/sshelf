@@ -4,10 +4,10 @@
 //! checking every host on its own would mean connecting to every server.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::process::{self, RunError};
+use crate::ssh::Tool;
 use crate::supervisor::{FailureKind, classify_lines};
 
 /// `ConnectTimeout` per connection (each jump host has its own).
@@ -92,8 +92,8 @@ pub fn classify(code: Option<i32>, stderr: &str, elapsed: Duration) -> Health {
 }
 
 /// Runs one check (blocks up to [`CHECK_TIMEOUT`]).
-pub fn check(ssh: &Path, alias: &str) -> HealthReport {
-    let mut cmd = process::command(ssh);
+pub fn check(ssh: &Tool, alias: &str) -> HealthReport {
+    let mut cmd = ssh.command();
     cmd.args(args(alias));
     let started = Instant::now();
     let health = match process::run(cmd, CHECK_TIMEOUT) {

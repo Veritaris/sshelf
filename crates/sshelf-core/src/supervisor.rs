@@ -12,14 +12,14 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::{BufRead, BufReader};
 use std::net::TcpListener;
-use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::child::{self, KILL_GRACE, TreeKiller};
+use crate::ssh::Tool;
 use crate::tunnels::{Group, Tunnel};
 
 /// Stderr lines kept per tunnel.
@@ -199,8 +199,8 @@ pub enum Request {
     Remove {
         tunnel_id: String,
     },
-    /// ssh binary for processes started from now on.
-    SetSsh(Option<PathBuf>),
+    /// ssh for processes started from now on.
+    SetSsh(Option<Tool>),
 }
 
 #[derive(Debug, Clone)]
@@ -232,10 +232,7 @@ pub struct Supervisor {
 }
 
 impl Supervisor {
-    pub fn start(
-        ssh: Option<PathBuf>,
-        on_event: impl Fn(SupervisorEvent) + Send + 'static,
-    ) -> Self {
+    pub fn start(ssh: Option<Tool>, on_event: impl Fn(SupervisorEvent) + Send + 'static) -> Self {
         let (tx, rx) = mpsc::channel();
         let worker_tx = tx.clone();
         let thread = thread::Builder::new()
@@ -327,7 +324,7 @@ pub fn reconnect_delay(attempt: u32) -> Duration {
 }
 
 struct Worker {
-    ssh: Option<PathBuf>,
+    ssh: Option<Tool>,
     tx: Sender<Message>,
     on_event: Box<dyn Fn(SupervisorEvent) + Send>,
     entries: BTreeMap<String, Entry>,
@@ -578,7 +575,7 @@ impl Worker {
             return self.fail(id, "no ssh binary".to_string());
         };
         let entry = self.entries.get_mut(id).expect("spawn of a known tunnel");
-        let mut cmd = Command::new(&ssh);
+        let mut cmd = ssh.command();
         cmd.args(entry.tunnel.ssh_args())
             .stdin(Stdio::null())
             .stdout(Stdio::null())

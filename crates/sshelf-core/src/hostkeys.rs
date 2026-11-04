@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use crate::process;
-use crate::ssh::{Resolved, SshTools};
+use crate::ssh::{Resolved, SshTools, Tool};
 use crate::storage;
 
 /// Nested `ProxyJump` chains followed at most this deep.
@@ -182,12 +182,12 @@ pub fn host_key_algorithms(line: &str) -> Option<String> {
 /// `ssh-keygen` operations on `known_hosts` files.
 #[derive(Debug, Clone)]
 pub struct Keygen {
-    pub path: PathBuf,
+    pub tool: Tool,
 }
 
 impl Keygen {
     fn run(&self, args: &[&str]) -> Result<process::Output, String> {
-        let mut cmd = process::command(&self.path);
+        let mut cmd = self.tool.command();
         cmd.args(args);
         process::run(cmd, KEYGEN_TIMEOUT).map_err(|e| e.to_string())
     }
@@ -259,7 +259,7 @@ impl Keygen {
 /// authentication, so the key arrives even if the login then fails. Returns
 /// the `known_hosts` lines ssh wrote (in the user's `HashKnownHosts` format).
 pub fn fetch(
-    ssh: &Path,
+    ssh: &Tool,
     destination: &str,
     algorithms: Option<&str>,
 ) -> Result<Vec<String>, String> {
@@ -267,7 +267,7 @@ pub fn fetch(
     let file = dir.path().join("known_hosts");
     // ssh splits the value on spaces; quote it and use forward slashes.
     let quoted = file.to_string_lossy().replace('\\', "/");
-    let mut cmd = process::command(ssh);
+    let mut cmd = ssh.command();
     cmd.args([
         "-o",
         &format!("UserKnownHostsFile=\"{quoted}\""),
