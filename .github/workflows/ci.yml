@@ -27,11 +27,13 @@ jobs:
             target: x86_64-pc-windows-msvc
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-          # Pinned: macos-latest runners failed to provision.
-          - os: macos-15
+          # Pinned: macos-latest and macos-15 runners were slow to provision.
+          - os: macos-14
             target: aarch64-apple-darwin
 
     runs-on: ${{ matrix.platform.os }}
+    # A normal run takes ~10 minutes; a hanging one must not burn hours.
+    timeout-minutes: 30
 
     steps:
       - name: Checkout
@@ -72,7 +74,7 @@ jobs:
       # converts to .icns, Info.plist is valid, and a .dmg builds with its
       # window layout (here around the debug binary).
       - name: Check the macOS bundle and .dmg
-        if: matrix.platform.os == 'macos-15'
+        if: runner.os == 'macOS'
         run: |
           t="$RUNNER_TEMP"
           cargo run -p sshelf --example iconset -- "$t/sshelf.iconset"

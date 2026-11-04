@@ -19,11 +19,13 @@ jobs:
             target: x86_64-pc-windows-msvc
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-          # Pinned: macos-latest runners failed to provision.
-          - os: macos-15
+          # Pinned: macos-latest and macos-15 runners were slow to provision.
+          - os: macos-14
             target: aarch64-apple-darwin
 
     runs-on: ${{ matrix.platform.os }}
+    # Release builds are slower than CI's; still, a hanging job must stop.
+    timeout-minutes: 45
 
     steps:
       - name: Checkout
@@ -61,7 +63,7 @@ jobs:
           dirname="${bin}-${VERSION}-${{ matrix.platform.target }}"
           mkdir "$dirname"
 
-          if [ "${{ matrix.platform.os }}" = "macos-15" ]; then
+          if [ "${{ runner.os }}" = "macOS" ]; then
             # sshelf.app with the full icon set, in a .dmg whose window shows
             # it beside an Applications shortcut over a background (dmgbuild
             # writes the layout itself; no Finder scripting). Signed ad hoc
