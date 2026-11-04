@@ -50,6 +50,8 @@ pub struct LogLine {
     pub text: String,
     /// `debug1:`-style output from `-v`; hidden unless asked for.
     pub debug: bool,
+    /// When the line came (the log shows `HH:MM:SS`).
+    pub at: SystemTime,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,6 +65,9 @@ pub struct TunnelStatus {
     /// A pending automatic restart (`auto_reconnect`, SPEC.md §7); the state
     /// stays `Failed` until it happens.
     pub reconnect: Option<Reconnect>,
+    /// When the current run reached `Running` (its uptime); `None` while it
+    /// doesn't run.
+    pub running_since: Option<Instant>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -305,8 +310,6 @@ struct Entry {
     restart: bool,
     /// Automatic restarts since the tunnel last ran stably.
     attempt: u32,
-    /// When the current run reached `Running`.
-    running_since: Option<Instant>,
     /// When the pending automatic restart is due.
     due: Option<Instant>,
 }
@@ -524,11 +527,11 @@ impl Worker {
                     pid: None,
                     failure: None,
                     reconnect: None,
+                    running_since: None,
                 },
                 process: None,
                 restart: false,
                 attempt: 0,
-                running_since: None,
                 due: None,
             });
             entry.status.owners.insert(owner.clone());
@@ -654,7 +657,7 @@ impl Worker {
         };
         if entry.status.state == TunnelState::Starting && text.contains(READY_MARKER) {
             entry.status.state = TunnelState::Running;
-            entry.running_since = Some(Instant::now());
+            entry.status.running_since = Some(Instant::now());
         }
         push_log(&mut entry.status.log, text);
         self.changed = true;
@@ -666,6 +669,8 @@ impl Worker {
         };
         entry.process = None;
         entry.status.pid = None;
+        // Not running any more: no uptime (the backoff below still reads it).
+        let running_since = entry.status.running_since.take();
         if entry.status.state == TunnelState::Stopping {
             entry.status.state = TunnelState::Stopped;
             push_log(&mut entry.status.log, "stopped".to_string());
@@ -695,11 +700,7 @@ impl Worker {
         entry.status.state = TunnelState::Failed(reason);
         entry.status.failure = Some(failure);
         // A drop after a stable run starts the backoff over.
-        if entry
-            .running_since
-            .take()
-            .is_some_and(|since| since.elapsed() >= RECONNECT_STABLE)
-        {
+        if running_since.is_some_and(|since| since.elapsed() >= RECONNECT_STABLE) {
             entry.attempt = 0;
         }
         // Auth and host key failures need the user; retrying cannot help.
@@ -741,7 +742,11 @@ impl Worker {
 
 fn push_log(log: &mut VecDeque<LogLine>, text: String) {
     let debug = text.starts_with("debug");
-    log.push_back(LogLine { text, debug });
+    log.push_back(LogLine {
+        text,
+        debug,
+        at: SystemTime::now(),
+    });
     while log.len() > LOG_LINES {
         log.pop_front();
     }
@@ -775,6 +780,7 @@ mod tests {
             pid: None,
             failure: None,
             reconnect: None,
+            running_since: None,
         }
     }
 

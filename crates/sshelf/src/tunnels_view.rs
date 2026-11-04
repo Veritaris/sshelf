@@ -588,15 +588,18 @@ mod tests {
                 LogLine {
                     text: "debug1: hidden".into(),
                     debug: true,
+                    at: std::time::SystemTime::UNIX_EPOCH,
                 },
                 LogLine {
                     text: "Authenticated to bastion".into(),
                     debug: false,
+                    at: std::time::SystemTime::UNIX_EPOCH,
                 },
             ]),
             pid: Some(1),
             failure: None,
             reconnect: None,
+            running_since: None,
         };
         Fixture {
             config: Arc::new(ConfigSnapshot {

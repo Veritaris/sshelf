@@ -149,6 +149,7 @@ mod tests {
             pid: None,
             failure: None,
             reconnect: None,
+            running_since: None,
         }
     }
 

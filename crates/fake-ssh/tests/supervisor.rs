@@ -162,6 +162,29 @@ fn starting_twice_shares_one_process() {
 }
 
 #[test]
+fn a_running_tunnel_has_an_uptime_and_its_log_lines_a_time() {
+    let mut h = Harness::new();
+    let before = std::time::SystemTime::now();
+    h.send(Request::Start {
+        tunnel: tunnel("a", "ok", free_port()),
+        owner: Owner::Manual,
+    });
+    let s = h.until("running", running("a"));
+    let since = s.tunnels["a"].running_since.expect("running since");
+    assert!(since.elapsed() < WAIT);
+    let log = &s.tunnels["a"].log;
+    assert!(!log.is_empty());
+    assert!(log.iter().all(|l| l.at >= before), "{log:?}");
+
+    h.send(Request::Stop {
+        tunnel_id: "a".into(),
+        owner: Owner::Manual,
+    });
+    let s = h.until("stopped", stopped("a"));
+    assert_eq!(s.tunnels["a"].running_since, None, "no uptime once stopped");
+}
+
+#[test]
 fn port_conflict_starts_nothing() {
     let mut h = Harness::new();
     let held = TcpListener::bind(("127.0.0.1", 0)).unwrap();
