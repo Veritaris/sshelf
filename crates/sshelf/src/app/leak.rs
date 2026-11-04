@@ -15,9 +15,11 @@ use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use sshelf_core::core::{ChangedKeyPrompt, HostKeyPrompt};
 use sshelf_core::health::{Health, HealthReport, HealthSnapshot};
+use sshelf_core::history::{History, Launch};
 use sshelf_core::hostkeys::{ChangedKey, KeyInfo, KeyTarget, UnknownKey};
 use sshelf_core::metadata::{HostMeta, HostsFile};
 use sshelf_core::paths::Paths;
+use sshelf_core::settings::HostListStyle;
 use sshelf_core::storage::Store;
 use sshelf_core::supervisor::{LogLine, Owner, Snapshot, TunnelState, TunnelStatus};
 use sshelf_core::tunnels::{Forward, ForwardKind, Group, Tunnel, TunnelsFile};
@@ -47,24 +49,36 @@ const MARKERS: &[&str] = &[
     "lkq-target.internal",
     "54321",
     "54123",
+    "10.77.9.9",
 ];
 
+/// Aliases and tags: shown, unless *Hide host aliases and tags* is on.
+const NAME_MARKERS: &[&str] = &["lkqa-", "lkqtag"];
+
+/// The host most screens show.
+const WEB: &str = "lkqa-web";
+
+/// An alias that is an IP address is masked whenever streamer mode is on.
 const CONFIG: &str = "\
-Host web
+Host lkqa-web
     HostName lkq-host.internal
     User lkq-user
     Port 52817
     IdentityFile ~/.ssh/lkq_key
     ProxyJump lkq-jump.example.org
 
-Host db
+Host lkqa-db
     HostName 10.77.3.41
     ProxyCommand nc lkq-proxy.example.org 22
+
+Host 10.77.9.9
+    User lkq-user
 ";
 
-/// The app over the marker config, with fake-ssh as its ssh and streamer
-/// mode as `streamer` (no tray: tests never create one).
-fn app(root: &Path, streamer: bool) -> Harness<'static, SshelfApp> {
+/// The app over the marker config, with fake-ssh as its ssh, streamer mode
+/// as `streamer` and hidden aliases as `hide` (no tray: tests never create
+/// one).
+fn app(root: &Path, streamer: bool, hide: bool) -> Harness<'static, SshelfApp> {
     let home = root.join(HOME);
     let paths = Paths::new(&home, home.join(".config").join("sshelf"));
     fs::create_dir_all(&paths.ssh_dir).unwrap();
@@ -74,7 +88,7 @@ fn app(root: &Path, streamer: bool) -> Harness<'static, SshelfApp> {
         paths.app_dir.join("settings.toml"),
         format!(
             "version = 1\nssh_path = '{}'\nreduce_motion = true\ntour = \"done\"\n\
-             streamer_mode = {streamer}\n",
+             streamer_mode = {streamer}\nstreamer_hide_aliases = {hide}\n",
             fake_ssh_binary().display()
         ),
     )
@@ -82,20 +96,30 @@ fn app(root: &Path, streamer: bool) -> Harness<'static, SshelfApp> {
     let store = Store::new(&paths.app_dir);
     let mut hosts = HostsFile::default();
     hosts.hosts.insert(
-        "web".into(),
+        WEB.into(),
         HostMeta {
-            tags: vec!["prod".into()],
+            tags: vec!["lkqtag".into()],
             notes: "Jump via lkq-jump.example.org, then 10.77.3.41.".into(),
             ..HostMeta::default()
         },
     );
     store.save(&hosts).unwrap();
+    // Launched before: the tray's recent hosts show both.
+    let launch = |alias: &str| Launch {
+        alias: alias.into(),
+        at: "2026-01-02T03:04:05Z".into(),
+    };
+    store
+        .save(&History {
+            entries: vec![launch(WEB), launch("10.77.9.9")],
+        })
+        .unwrap();
     store
         .save(&TunnelsFile {
             tunnels: vec![Tunnel {
                 id: "t-web".into(),
                 name: "web admin".into(),
-                host: "web".into(),
+                host: WEB.into(),
                 forwards: vec![Forward {
                     kind: ForwardKind::L,
                     bind: "127.0.0.1".into(),
@@ -236,7 +260,7 @@ fn tunnel_states(state: TunnelState) -> Arc<Snapshot> {
 
 fn key_target(home: &Path) -> KeyTarget {
     KeyTarget {
-        destination: "web".into(),
+        destination: WEB.into(),
         hostname: "lkq-host.internal".into(),
         port: 52817,
         lookup: "[lkq-host.internal]:52817".into(),
@@ -275,7 +299,14 @@ fn reset(harness: &mut Harness<'static, SshelfApp>) {
     app.groups.close_editor();
     app.toasts = Default::default();
     app.tunnel_states = Some(tunnel_states(TunnelState::Failed(SSH_ERROR.into())));
+    list_style(app, HostListStyle::List);
     frames(harness);
+}
+
+fn list_style(app: &mut SshelfApp, style: HostListStyle) {
+    if let Some(data) = app.data.as_mut() {
+        Arc::make_mut(data).settings.host_list_style = style;
+    }
 }
 
 /// The screens and dialogs visited, by name, each set up from a plain hosts
@@ -284,12 +315,17 @@ fn screens() -> Vec<(&'static str, Setup)> {
     vec![
         ("settings", |h| h.state_mut().view = View::Settings),
         ("hosts", |h| h.state_mut().view = View::Hosts),
-        ("host detail", |h| h.state_mut().hosts.select("web")),
+        ("host detail", |h| h.state_mut().hosts.select(WEB)),
+        ("host cards", |h| {
+            let app = h.state_mut();
+            list_style(app, HostListStyle::Cards);
+            app.hosts.select(WEB);
+        }),
         ("health", |h| {
-            h.state_mut().hosts.select("web");
+            h.state_mut().hosts.select(WEB);
             let health = HealthSnapshot {
                 reports: BTreeMap::from([(
-                    "web".to_string(),
+                    WEB.to_string(),
                     HealthReport {
                         health: Health::Unreachable(SSH_ERROR.into()),
                         checked_at: SystemTime::now(),
@@ -300,17 +336,17 @@ fn screens() -> Vec<(&'static str, Setup)> {
             h.state_mut().hosts.on_health(Arc::new(health));
         }),
         ("effective config", |h| {
-            h.state_mut().hosts.select("web");
+            h.state_mut().hosts.select(WEB);
             frames(h);
             click(h, "Effective config");
         }),
         ("host tunnels", |h| {
-            h.state_mut().hosts.select("web");
+            h.state_mut().hosts.select(WEB);
             frames(h);
             click(h, "Tunnels · 1");
         }),
         ("host editor", |h| {
-            h.state_mut().hosts.select("web");
+            h.state_mut().hosts.select(WEB);
             frames(h);
             click(h, "Edit");
         }),
@@ -318,7 +354,7 @@ fn screens() -> Vec<(&'static str, Setup)> {
         ("key dialog", |h| {
             let app = h.state_mut();
             let config = app.config.clone().unwrap();
-            app.hosts.editor.open_keys(&config, "web");
+            app.hosts.editor.open_keys(&config, WEB);
         }),
         ("tunnels", |h| {
             let app = h.state_mut();
@@ -342,7 +378,7 @@ fn screens() -> Vec<(&'static str, Setup)> {
             let home = h.state().data.as_ref().unwrap().app_dir.clone();
             let prompt = HostKeyPrompt {
                 id: 1,
-                purpose: "connecting to web".into(),
+                purpose: format!("connecting to {WEB}"),
                 unknown: UnknownKey {
                     target: key_target(&home),
                     lines: vec![format!("[lkq-host.internal]:52817 {PUBLIC_KEY}")],
@@ -356,7 +392,7 @@ fn screens() -> Vec<(&'static str, Setup)> {
             let home = h.state().data.as_ref().unwrap().app_dir.clone();
             let prompt = ChangedKeyPrompt {
                 id: 2,
-                subject: "host “web”".into(),
+                subject: format!("host “{WEB}”"),
                 changed: ChangedKey {
                     target: key_target(&home),
                     user_files: vec![home.join("known_hosts")],
@@ -377,7 +413,7 @@ fn screens() -> Vec<(&'static str, Setup)> {
         ("toast", |h| {
             h.state_mut()
                 .toasts
-                .push("Saved web: lkq-host.internal, port 52817");
+                .push(format!("Saved {WEB}: lkq-host.internal, port 52817"));
         }),
     ]
 }
@@ -398,25 +434,39 @@ fn visit(harness: &mut Harness<'static, SshelfApp>) -> Vec<(&'static str, String
     shown
 }
 
-fn markers_in(text: &str) -> Vec<&'static str> {
-    MARKERS
+fn markers_in(text: &str, markers: &[&'static str]) -> Vec<&'static str> {
+    markers
         .iter()
         .copied()
         .filter(|m| text.contains(m))
         .collect()
 }
 
-#[test]
-fn nothing_leaks_with_streamer_mode_on() {
+/// Every screen of the app (streamer mode on, aliases hidden as `hide`)
+/// that shows one of `markers`, with the ones it shows.
+fn leaks(hide: bool, markers: &[&'static str]) -> Vec<String> {
     let root = tempfile::tempdir().unwrap();
-    let mut harness = app(root.path(), true);
-    let leaks: Vec<String> = visit(&mut harness)
+    let mut harness = app(root.path(), true, hide);
+    visit(&mut harness)
         .into_iter()
         .filter_map(|(screen, text)| {
-            let found = markers_in(&text);
+            let found = markers_in(&text, markers);
             (!found.is_empty()).then(|| format!("{screen}: {found:?}"))
         })
-        .collect();
+        .collect()
+}
+
+#[test]
+fn nothing_leaks_with_streamer_mode_on() {
+    let leaks = leaks(false, MARKERS);
+    assert!(leaks.is_empty(), "leaked:\n{}", leaks.join("\n"));
+}
+
+/// *Hide host aliases and tags*: aliases and tags are hidden too.
+#[test]
+fn nothing_leaks_with_hidden_aliases() {
+    let markers: Vec<&str> = MARKERS.iter().chain(NAME_MARKERS).copied().collect();
+    let leaks = leaks(true, &markers);
     assert!(leaks.is_empty(), "leaked:\n{}", leaks.join("\n"));
 }
 
@@ -424,11 +474,10 @@ fn nothing_leaks_with_streamer_mode_on() {
 #[test]
 fn the_markers_show_with_streamer_mode_off() {
     let root = tempfile::tempdir().unwrap();
-    let mut harness = app(root.path(), false);
-    // The hosts list shows aliases only.
+    let mut harness = app(root.path(), false, false);
     let blank: Vec<&str> = visit(&mut harness)
         .into_iter()
-        .filter(|(screen, text)| *screen != "hosts" && markers_in(text).is_empty())
+        .filter(|(_, text)| markers_in(text, MARKERS).is_empty())
         .map(|(screen, _)| screen)
         .collect();
     assert!(blank.is_empty(), "no marker shown on: {blank:?}");

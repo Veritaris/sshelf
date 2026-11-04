@@ -549,7 +549,8 @@ impl GroupsView {
             flex,
         );
         x += flex + GAP;
-        cell(x, &tunnel.host, FontId::monospace(13.0), p.dim, flex);
+        let host = privacy::get(ui.ctx()).alias_text(&tunnel.host).into_owned();
+        cell(x, &host, FontId::monospace(13.0), p.dim, flex);
         x += flex + GAP;
         // A clickable row: a masked forward shows as dots, not a token.
         cell(

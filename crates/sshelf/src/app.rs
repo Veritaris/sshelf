@@ -222,8 +222,13 @@ impl SshelfApp {
         );
         // During the tour the tray mirrors the sandbox, under "Tour".
         self.tray_model.tour = self.tour_running();
-        // Streamer mode is the user's, during the tour too.
-        self.tray_model.streamer = privacy::get(ctx).on;
+        // Streamer mode is the user's, during the tour too; it masks the
+        // recent hosts' aliases as it does everywhere.
+        let privacy = privacy::get(ctx);
+        self.tray_model.streamer = privacy.on;
+        for host in &mut self.tray_model.recent {
+            host.shown = privacy.alias_text(&host.alias).into_owned();
+        }
         // The taskbar button / Dock icon carries the same status dot as the
         // tray icon. Linux: X11 taskbars read the window icon; Wayland has
         // no window icons (its docks use the desktop entry's).
@@ -458,6 +463,9 @@ impl eframe::App for SshelfApp {
             Privacy {
                 on: self.user_settings().is_some_and(|s| s.streamer_mode),
                 redactor: self.redactor.clone(),
+                hide_aliases: self
+                    .user_settings()
+                    .is_some_and(|s| s.streamer_hide_aliases),
             },
         );
         // sshelf was started again: show this window instead (also from the

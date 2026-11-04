@@ -84,15 +84,19 @@ impl HostKeyModals {
                     marks::tile(ui, icons::KEY_ROUND, p.blue_tint, p.blue);
                     ui.vertical(|ui| {
                         ui.spacing_mut().item_spacing.y = 2.0;
+                        let privacy = privacy::get(ui.ctx());
                         ui.label(
-                            RichText::new(format!("First connection to {}", target.destination))
-                                .font(fonts::semibold(17.0))
-                                .color(p.text_strong),
+                            RichText::new(format!(
+                                "First connection to {}",
+                                privacy.host(&target.destination)
+                            ))
+                            .font(fonts::semibold(17.0))
+                            .color(p.text_strong),
                         );
                         ui.label(
                             RichText::new(format!(
                                 "sshelf hasn't seen this server's key before; {} waits for it.",
-                                prompt.purpose
+                                privacy.plain(&prompt.purpose)
                             ))
                             .size(13.0)
                             .color(p.dim),
@@ -100,7 +104,9 @@ impl HostKeyModals {
                     });
                 });
                 if let Some(final_host) = &unknown.hop_of {
-                    jump_steps(ui, &target.destination, final_host);
+                    let privacy = privacy::get(ui.ctx());
+                    let (hop, last) = (privacy.host(&target.destination), privacy.host(final_host));
+                    jump_steps(ui, &hop, &last);
                 }
                 Frame::new()
                     .fill(p.bg)
@@ -197,6 +203,8 @@ impl HostKeyModals {
         let changed = &prompt.changed;
         let target = &changed.target;
         let name = target.destination.clone();
+        // What the dialog shows for it (typing the real name still works).
+        let shown = privacy::get(ctx).host(&name);
         let mut commands = Vec::new();
         let mut copied = false;
         let response = egui::Modal::new(Id::unique(("hostkey_changed", prompt.id)))
@@ -223,7 +231,7 @@ impl HostKeyModals {
                             ui.vertical(|ui| {
                                 ui.spacing_mut().item_spacing.y = 2.0;
                                 ui.label(
-                                    RichText::new(format!("The host key of {name} changed"))
+                                    RichText::new(format!("The host key of {shown} changed"))
                                         .font(fonts::semibold(17.0))
                                         .color(p.red),
                                 );
@@ -282,8 +290,10 @@ impl HostKeyModals {
                             ui.vertical(|ui| {
                                 ui.spacing_mut().item_spacing.y = 6.0;
                                 let label = ui.label(
-                                    RichText::new(format!("Type {name} to replace the stored key"))
-                                        .size(13.0),
+                                    RichText::new(format!(
+                                        "Type {shown} to replace the stored key"
+                                    ))
+                                    .size(13.0),
                                 );
                                 ui.add(TextField::new(&mut self.typed).mono().dialog(p.bg))
                                     .labelled_by(label.id);
@@ -326,7 +336,9 @@ impl HostKeyModals {
                                 if cancel.clicked() {
                                     commands.push(Command::CancelChangedKey(prompt.id));
                                 }
-                                let confirmed = self.typed.trim() == name;
+                                // What the dialog asks for, or the real name.
+                                let typed = self.typed.trim();
+                                let confirmed = typed == name || typed == shown;
                                 let tip = if !replaceable {
                                     "Only an administrator can replace a system-wide key"
                                 } else {

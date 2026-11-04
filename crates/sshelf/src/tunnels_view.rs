@@ -655,7 +655,8 @@ impl TunnelsView {
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
                     ui.label(RichText::new("via").size(13.0).color(p.dim));
-                    if button::link(ui, &tunnel.host, 13.0).clicked() {
+                    let host = privacy::get(ui.ctx()).alias_text(&tunnel.host).into_owned();
+                    if button::link(ui, &host, 13.0).clicked() {
                         self.open_host = Some(tunnel.host.clone());
                     }
                     if let Some(status) = status.filter(|s| !s.owners.is_empty()) {
@@ -838,11 +839,17 @@ impl TunnelsView {
                 });
                 editor_row(ui, ("Host", true, LABEL), |ui, _| {
                     let mut errors = errors_for("no host");
-                    let choices: Vec<Choice<usize>> = hosts
+                    // Hidden aliases: "host N" here too (and in the search).
+                    let privacy = privacy::get(ui.ctx());
+                    let shown: Vec<String> = hosts
                         .hosts
                         .iter()
+                        .map(|h| privacy.alias_text(h.primary()).into_owned())
+                        .collect();
+                    let choices: Vec<Choice<usize>> = shown
+                        .iter()
                         .enumerate()
-                        .map(|(i, h)| Choice::new(i, h.primary()))
+                        .map(|(i, name)| Choice::new(i, name))
                         .collect();
                     let selected = hosts
                         .hosts
@@ -852,7 +859,7 @@ impl TunnelsView {
                     let trigger = if draft.host.is_empty() {
                         "choose a host".to_string()
                     } else {
-                        draft.host.clone()
+                        privacy.alias_text(&draft.host).into_owned()
                     };
                     let picked = Dropdown::with_choices("tunnel_host", "Host", choices, trigger)
                         .field(420.0)

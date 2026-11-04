@@ -256,12 +256,14 @@ impl KeyDialog {
                 // Fields are inset: lighter than the dialog.
                 ui.visuals_mut().extreme_bg_color = p.bg;
                 ui.spacing_mut().item_spacing.y = 16.0;
+                let privacy = privacy::get(ui.ctx());
+                let alias = privacy.alias_text(&form.alias).into_owned();
                 match form.generated.clone() {
                     None => {
                         close = header(
                             ui,
                             (icons::KEY_ROUND, p.surface, p.accent),
-                            &title(&form.alias, "Generate a key"),
+                            &title(&alias, "Generate a key"),
                             "Made in sshelf; the passphrase never leaves this window.",
                             false,
                         );
@@ -271,8 +273,8 @@ impl KeyDialog {
                         close = header(
                             ui,
                             (icons::CIRCLE_CHECK, p.green_tint, p.green),
-                            &title(&form.alias, "Key created"),
-                            &key.path.display().to_string(),
+                            &title(&alias, "Key created"),
+                            &privacy.plain(&key.path.display().to_string()),
                             true,
                         );
                         let (done, picked) =
@@ -469,7 +471,9 @@ fn options(ui: &mut Ui, form: &mut Form, id: u64, commands: &mut Vec<Command>) -
                 });
             });
             row(ui, "Comment", |ui, label| {
-                ui.add(TextField::new(&mut form.comment)).labelled_by(label);
+                // "<alias> (sshelf)" at first.
+                ui.add(TextField::new(&mut form.comment).prefilled())
+                    .labelled_by(label);
             });
             row(ui, "File", |ui, label| {
                 // A path under the home folder until the user edits it.

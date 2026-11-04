@@ -11,7 +11,7 @@
 use egui::{Color32, CursorIcon, FontId, Id, Response, Role, Sense, Ui, WidgetInfo, pos2, vec2};
 use sshelf_core::redact::{DOTS, Segment};
 
-use crate::privacy;
+use crate::privacy::{self, AliasLook};
 use crate::theme::Palette;
 use crate::widgets::popup;
 
@@ -71,11 +71,11 @@ pub fn text(ui: &mut Ui, text: &str, style: &Style, wrap: bool) -> Response {
     // Where each token's text lies in the galley (chars), by segment.
     let mut tokens: Vec<(usize, std::ops::Range<usize>)> = Vec::new();
     let mut chars = 0;
-    let segments = privacy.redactor.segments(text, false);
+    let segments = privacy.redactor.segments(text, privacy.hide_aliases);
     for (index, segment) in segments.iter().enumerate() {
         let (shown, format) = match segment {
             Segment::Plain(s) => ((*s).to_string(), format.clone()),
-            Segment::Token(_, value) if held == Some(index) => (
+            Segment::Token(_, value) | Segment::Alias(value, _) if held == Some(index) => (
                 (*value).to_string(),
                 egui::TextFormat {
                     background: p.yellow_tint,
@@ -93,11 +93,17 @@ pub fn text(ui: &mut Ui, text: &str, style: &Style, wrap: bool) -> Response {
                     ..egui::TextFormat::simple(label_font.clone(), p.dim)
                 },
             ),
-            // Hidden aliases come with *Hide host aliases and tags*.
-            Segment::Alias(alias, _) => ((*alias).to_string(), format.clone()),
+            // *Hide host aliases and tags*: "host N", underlined in Blue.
+            Segment::Alias(_, n) => (
+                format!("host {n}"),
+                egui::TextFormat {
+                    underline: egui::Stroke::new(1.0, p.blue),
+                    ..format.clone()
+                },
+            ),
         };
         let count = shown.chars().count();
-        if matches!(segment, Segment::Token(..)) {
+        if !matches!(segment, Segment::Plain(_)) {
             tokens.push((index, chars..chars + count));
         }
         chars += count;
@@ -139,6 +145,70 @@ pub fn text(ui: &mut Ui, text: &str, style: &Style, wrap: bool) -> Response {
             ui.label("Hold to reveal");
         }),
         (None, None) => response,
+    }
+}
+
+/// A host alias: as it is; "host N" with a dotted Blue underline while
+/// aliases are hidden (hold to see it); the dots whenever streamer mode is
+/// on if it is an IP address or equals its HostName.
+pub fn alias(ui: &mut Ui, alias: &str, style: &Style) -> Response {
+    match privacy::get(ui.ctx()).alias_look(alias) {
+        AliasLook::Shown => ui.add(
+            egui::Label::new(
+                egui::RichText::new(alias)
+                    .font(style.font.clone())
+                    .color(style.color),
+            )
+            .selectable(false),
+        ),
+        AliasLook::Dots => token(ui, DOTS, alias, style.on_card, true),
+        AliasLook::Numbered(n) => numbered(ui, &format!("host {n}"), alias, style),
+    }
+}
+
+/// "host N" in the text's own style with a dotted Blue underline; held, the
+/// alias on the yellow tint.
+fn numbered(ui: &mut Ui, shown: &str, real: &str, style: &Style) -> Response {
+    let p = &Palette::ONE_DARK;
+    let id = ui.next_auto_id().with("masked_alias");
+    let was = held(ui, id);
+    let (text, color) = if was {
+        (real, p.yellow)
+    } else {
+        (shown, style.color)
+    };
+    let galley = ui
+        .painter()
+        .layout_no_wrap(text.to_string(), style.font.clone(), color);
+    let pad = if was { 4.0 } else { 0.0 };
+    let size = vec2(galley.size().x + pad * 2.0, galley.size().y);
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click_and_drag());
+    let name = shown.to_string();
+    response.widget_info(|| WidgetInfo::labeled(Role::Label, true, &name));
+    let painter = ui.painter();
+    if was {
+        painter.rect_filled(rect, CORNER, p.yellow_tint);
+    } else {
+        // Dotted: 1 px dots, 3 px apart, just under the text.
+        let y = rect.bottom() - 0.5;
+        let mut x = rect.left();
+        while x < rect.right() {
+            painter.rect_filled(
+                egui::Rect::from_min_size(pos2(x, y - 0.5), vec2(1.0, 1.0)),
+                0.0,
+                p.blue,
+            );
+            x += 3.0;
+        }
+    }
+    painter.galley(pos2(rect.left() + pad, rect.top()), galley, color);
+    if remember(ui, id, &response, was) {
+        response.on_hover_cursor(CursorIcon::Grabbing)
+    } else {
+        let response = response.on_hover_cursor(CursorIcon::Grab);
+        popup::tip(response, |ui| {
+            ui.label("Hold to reveal");
+        })
     }
 }
 
@@ -219,6 +289,79 @@ mod tests {
     use crate::test_util::{self, drawn_text, press, release};
 
     const LINE: &str = "connect to 10.77.3.41 port 52817 failed";
+
+    /// A redactor over a config of `web` and an IP alias.
+    fn redactor() -> std::sync::Arc<sshelf_core::redact::Redactor> {
+        use sshconf::{ConfigSet, HostList, ResolveOptions};
+        use sshelf_core::redact::{Redactor, Sources};
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config");
+        std::fs::write(
+            &path,
+            "Host web\n    HostName w.example.net\nHost 10.1.2.3\n",
+        )
+        .unwrap();
+        let set = ConfigSet::load(&path, &ResolveOptions::new(tmp.path())).unwrap();
+        let hosts = HostList::from_set(&set);
+        std::sync::Arc::new(Redactor::build(Sources {
+            set: Some(&set),
+            hosts: Some(&hosts),
+            tunnels: &Default::default(),
+            home: tmp.path(),
+            local_user: None,
+        }))
+    }
+
+    /// Hidden aliases: "host N" until held; an IP alias is dots even when
+    /// aliases are shown.
+    #[test]
+    fn aliases_show_as_host_n_and_peek_while_held() {
+        let redactor = redactor();
+        let mut harness = test_util::harness()
+            .with_size([300.0, 60.0])
+            .build_ui_state(
+                move |ui, hide: &mut bool| {
+                    let on = Privacy {
+                        on: true,
+                        redactor: redactor.clone(),
+                        hide_aliases: *hide,
+                    };
+                    privacy::set(ui.ctx(), on);
+                    let style = Style {
+                        font: FontId::proportional(13.0),
+                        color: Palette::ONE_DARK.text,
+                        on_card: false,
+                    };
+                    alias(ui, "web", &style);
+                    alias(ui, "10.1.2.3", &style);
+                },
+                false,
+            );
+        harness.run_steps(2);
+        let drawn = drawn_text(&harness);
+        assert!(
+            drawn.contains("web") && !drawn.contains("10.1.2.3"),
+            "{drawn}"
+        );
+
+        *harness.state_mut() = true;
+        harness.run_steps(2);
+        let drawn = drawn_text(&harness);
+        assert!(
+            drawn.contains("host 1") && !drawn.contains("web"),
+            "{drawn}"
+        );
+        let at = harness.get_by_label("host 1").rect().center();
+        press(&mut harness, at);
+        harness.run_steps(3);
+        assert!(
+            drawn_text(&harness).contains("web"),
+            "held: the alias shows"
+        );
+        release(&mut harness, at);
+        harness.run_steps(3);
+        assert!(!drawn_text(&harness).contains("web"));
+    }
 
     /// Free text: each match is its typed label; pressing a label shows that
     /// value until the release, and only that one.

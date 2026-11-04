@@ -422,23 +422,38 @@ impl HostDetail {
             let font = fonts::semibold(if narrow { 20.0 } else { 22.0 });
             // Room left for the star and the location chip.
             let room = (ui.available_width() - 130.0).max(40.0);
-            let (title, cut) = text::elide(ui.painter(), &alias, &font, room);
-            let title = ui.add(
-                egui::Label::new(RichText::new(title).font(font).color(p.text_strong))
-                    .selectable(false)
-                    .sense(Sense::hover()),
-            );
-            if cut {
-                let full = alias.clone();
-                popup::tip_below(title, |ui| {
-                    ui.label(full);
-                });
+            let privacy = privacy::get(ui.ctx());
+            if privacy.alias_look(&alias) == privacy::AliasLook::Shown {
+                let (title, cut) = text::elide(ui.painter(), &alias, &font, room);
+                let title = ui.add(
+                    egui::Label::new(RichText::new(title).font(font).color(p.text_strong))
+                        .selectable(false)
+                        .sense(Sense::hover()),
+                );
+                if cut {
+                    let full = alias.clone();
+                    popup::tip_below(title, |ui| {
+                        ui.label(full);
+                    });
+                }
+            } else {
+                // Streamer mode: "host N" or dots (hold to see it).
+                let style = masked::Style {
+                    font,
+                    color: p.text_strong,
+                    on_card: false,
+                };
+                masked::alias(ui, &alias, &style);
             }
             toggled = star(ui, self.base.favorite, meta_read_only.as_deref()).clicked();
             let (short, full) = util::location(set, host.at);
             location_chip(ui, &short, &full);
             if host.aliases.len() > 1 {
-                ui.label(RichText::new(host.aliases[1..].join(" ")).color(p.dim));
+                let others: Vec<String> = host.aliases[1..]
+                    .iter()
+                    .map(|a| privacy.alias_text(a).into_owned())
+                    .collect();
+                ui.label(RichText::new(others.join(" ")).color(p.dim));
             }
         });
         if toggled {
@@ -893,8 +908,11 @@ impl HostDetail {
                             let important = IMPORTANT.contains(&key.as_str());
                             // Streamer mode: option names and harmless values
                             // (`30`, `no`) stay visible.
-                            let sensitive =
-                                SENSITIVE.contains(&key.as_str()) || privacy.redactor.finds(value);
+                            // The `host` row is the alias.
+                            let sensitive = SENSITIVE.contains(&key.as_str())
+                                || privacy.redactor.finds(value)
+                                || (key == "host"
+                                    && privacy.alias_look(value) != privacy::AliasLook::Shown);
                             let row = copy::Row {
                                 name: key,
                                 key: (key, key_width, if important { p.accent } else { p.dim }),
@@ -1144,6 +1162,8 @@ fn location_chip(ui: &mut Ui, short: &str, full: &str) {
 /// removed.
 fn tag_chip(ui: &mut Ui, tag: &str) -> bool {
     let p = &Palette::ONE_DARK;
+    // Hidden tags read `tag`; removing one still works.
+    let tag = privacy::get(ui.ctx()).tag_text(tag);
     let galley = ui
         .painter()
         .layout_no_wrap(tag.to_string(), FontId::proportional(12.0), p.text);
@@ -1686,7 +1706,8 @@ fn route_line(
                     let tip = privacy.plain(&tip).into_owned();
                     match hosts.and_then(|h| h.find(&hop.destination)) {
                         Some(host) => {
-                            let link = button::link(ui, &hop.destination, 13.0);
+                            let name = privacy.alias_text(&hop.destination);
+                            let link = button::link(ui, &name, 13.0);
                             if link.clicked() {
                                 clicked = Some(host.primary().to_string());
                             }
@@ -1736,7 +1757,11 @@ fn route_line(
             );
         }
         arrow(ui);
-        ui.label(RichText::new(alias).size(13.0).color(p.text_strong));
+        ui.label(
+            RichText::new(privacy.alias_text(alias))
+                .size(13.0)
+                .color(p.text_strong),
+        );
     });
     clicked
 }

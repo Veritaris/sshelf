@@ -13,6 +13,7 @@ use sshconf::{ConfigSet, HostEntry, HostList, PatternKind, Severity};
 use sshelf_core::core::{AppData, Command, ConfigSnapshot, ConfigState, SshInfo};
 use sshelf_core::health::HealthSnapshot;
 use sshelf_core::metadata::HostMeta;
+use sshelf_core::redact::DOTS;
 use sshelf_core::settings::{CardsGroupBy, HostListStyle, Settings};
 use sshelf_core::storage::LoadStatus;
 use sshelf_core::supervisor::{Snapshot, TunnelState};
@@ -25,7 +26,7 @@ use crate::widgets::button::Button;
 use crate::widgets::dropdown::Dropdown;
 use crate::widgets::empty::empty_state;
 use crate::widgets::{marks, nav, popup, text};
-use crate::{fonts, icons, motion, util};
+use crate::{fonts, icons, motion, privacy, util};
 
 /// Width of the host list pane.
 const LIST_WIDTH: f32 = 320.0;
@@ -474,15 +475,23 @@ impl HostsView {
                     self.empty(ui, hosts, &mut action);
                     return;
                 }
+                let privacy = privacy::get(ui.ctx());
                 for (title, members) in &groups {
                     if let Some(title) = title {
+                        // Streamer mode: a tag (hidden: `tag`) or a file's path.
+                        let text = match group_by {
+                            CardsGroupBy::Tag if !title.favorites => {
+                                privacy.tag_text(&title.text).to_string()
+                            }
+                            _ => privacy.plain(&title.text).into_owned(),
+                        };
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 4.0;
                             if title.favorites {
                                 icons::show(ui, icons::STAR, 12.0, p.dim);
                             }
                             ui.label(
-                                RichText::new(title.text.to_uppercase())
+                                RichText::new(text.to_uppercase())
                                     .font(fonts::semibold(11.0))
                                     .color(p.dim),
                             );
@@ -552,11 +561,15 @@ impl HostsView {
     ) -> (egui::Response, Option<RowAction>) {
         let p = &Palette::ONE_DARK;
         let alias = host.primary();
+        // Streamer mode: a clickable card, so masked values show as text
+        // (no peeking): "host N" or dots, a `tag` label, the address dots.
+        let privacy = privacy::get(ui.ctx());
+        let shown = privacy.alias_text(alias).into_owned();
         let selected = self.selected.as_deref() == Some(alias);
         let response = ui.interact(rect, ui.scope_id().with(("card", alias)), Sense::click());
         let enabled = response.enabled();
         response.widget_info(|| {
-            egui::WidgetInfo::selected(egui::Role::Button, enabled, selected, alias)
+            egui::WidgetInfo::selected(egui::Role::Button, enabled, selected, &shown)
         });
         let hover = motion::fade(
             ui.ctx(),
@@ -600,15 +613,21 @@ impl HostsView {
                         util::health_mark(ui, self.health.as_deref(), alias, 6.0);
                         if let Some(tag) = meta.and_then(|m| m.tags.first()) {
                             let fill = if selected { p.surface } else { p.selection };
-                            marks::chip(ui, tag, fill, p.text);
+                            marks::chip(ui, privacy.tag_text(tag), fill, p.text);
                         }
                         ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                            text::truncated(ui, highlighted(alias, needle, p.text_strong), alias);
+                            let job = highlighted(&shown, needle, p.text_strong);
+                            text::truncated(ui, job, &shown);
                         });
                     });
                 },
             );
             if let Some(address) = self.detail.address(alias) {
+                let address = if privacy.on {
+                    DOTS.to_string()
+                } else {
+                    address
+                };
                 ui.add(
                     egui::Label::new(RichText::new(&address).monospace().size(12.0).color(p.dim))
                         .truncate()
@@ -803,9 +822,11 @@ impl HostsView {
                     Filter::Favorites
                 };
             }
+            let privacy = privacy::get(ui.ctx());
             for tag in tags {
                 let on = self.filter == Filter::Tag(tag.clone());
-                if marks::filter_chip(ui, None, &tag, on).clicked() {
+                // Hidden tags: each chip reads `tag`, and still filters.
+                if marks::filter_chip(ui, None, privacy.tag_text(&tag), on).clicked() {
                     self.filter = if on { Filter::All } else { Filter::Tag(tag) };
                 }
             }
@@ -875,12 +896,14 @@ impl HostsView {
     ) -> (egui::Response, Option<RowAction>) {
         let p = &Palette::ONE_DARK;
         let alias = host.primary();
+        // Streamer mode: "host N" or dots (a clickable row: no peeking).
+        let shown = privacy::get(ui.ctx()).alias_text(alias).into_owned();
         let selected = self.selected.as_deref() == Some(alias);
         let (rect, response) =
             ui.allocate_exact_size(vec2(ui.available_width(), ROW_HEIGHT), Sense::click());
         let enabled = response.enabled();
         response.widget_info(|| {
-            egui::WidgetInfo::selected(egui::Role::Button, enabled, selected, alias)
+            egui::WidgetInfo::selected(egui::Role::Button, enabled, selected, &shown)
         });
         if response.hovered() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
@@ -936,7 +959,7 @@ impl HostsView {
                     });
                 }
                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                    text::truncated(ui, highlighted(alias, needle, text_color), alias);
+                    text::truncated(ui, highlighted(&shown, needle, text_color), &shown);
                 });
             });
         });

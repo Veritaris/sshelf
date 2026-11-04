@@ -166,6 +166,23 @@ pub struct TunnelRow {
     pub used_by: Vec<String>,
 }
 
+/// A host launched from sshelf: its alias, and how both menus show it (in
+/// streamer mode "host N" or "•••••"; the app sets it).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecentHost {
+    pub alias: String,
+    pub shown: String,
+}
+
+impl RecentHost {
+    pub fn new(alias: &str) -> Self {
+        Self {
+            alias: alias.to_string(),
+            shown: alias.to_string(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrayModel {
     /// Tunnels starting or running.
@@ -177,7 +194,7 @@ pub struct TrayModel {
     pub groups: Vec<GroupRow>,
     pub tunnels: Vec<TunnelRow>,
     /// Hosts launched from sshelf that still exist, newest first.
-    pub recent: Vec<String>,
+    pub recent: Vec<RecentHost>,
     /// A host key waits for the user's answer.
     pub host_key_waiting: bool,
     /// The tour runs: this is its sandbox, under a "Tour" header.
@@ -203,13 +220,13 @@ pub fn model(
     let empty = Snapshot::default();
     let states = states.unwrap_or(&empty);
 
-    let mut recent: Vec<String> = Vec::new();
+    let mut recent: Vec<RecentHost> = Vec::new();
     if let (Some(data), Some(hosts)) = (data, hosts) {
         for launch in &data.history.entries {
             if let Some(host) = hosts.find(&launch.alias)
-                && !recent.iter().any(|r| r == host.primary())
+                && !recent.iter().any(|r| r.alias == host.primary())
             {
-                recent.push(host.primary().to_string());
+                recent.push(RecentHost::new(host.primary()));
             }
             if recent.len() == RECENT_HOSTS {
                 break;
@@ -322,7 +339,7 @@ impl TrayModel {
         } else {
             self.recent
                 .iter()
-                .map(|alias| item(alias.clone(), TrayAction::Connect(alias.clone())))
+                .map(|r| item(r.shown.clone(), TrayAction::Connect(r.alias.clone())))
                 .collect()
         };
         entries.push(Entry::Submenu {

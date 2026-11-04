@@ -494,11 +494,11 @@ fn contents_in(ui: &mut Ui, rect: egui::Rect, model: &TrayModel, actions: &mut V
     }
     let slot = ui.painter().add(egui::Shape::Noop);
     let mut hovered = None;
-    for (index, alias) in model.recent.iter().take(RECENT).enumerate() {
+    for (index, host) in model.recent.iter().take(RECENT).enumerate() {
         let response = row(ui, true, |ui| {
             ui.add_space(10.0);
             ui.label(
-                RichText::new(alias)
+                RichText::new(&host.shown)
                     .font(FontId::monospace(12.0))
                     .color(p.text),
             );
@@ -511,7 +511,7 @@ fn contents_in(ui: &mut Ui, rect: egui::Rect, model: &TrayModel, actions: &mut V
             hovered = Some((index, response.rect));
         }
         if response.clicked() {
-            actions.push(TrayAction::Connect(alias.clone()));
+            actions.push(TrayAction::Connect(host.alias.clone()));
         }
     }
     // Slides between hosts (50 ms), as in every list and menu.
@@ -771,7 +771,7 @@ mod tests {
     use egui_kittest::kittest::Queryable;
 
     use super::*;
-    use crate::tray::{GroupRow, TunnelRow};
+    use crate::tray::{GroupRow, RecentHost, TunnelRow};
 
     fn model() -> TrayModel {
         TrayModel {
@@ -792,7 +792,7 @@ mod tests {
                 reconnecting: false,
                 used_by: Vec::new(),
             }],
-            recent: vec!["web".into(), "db".into()],
+            recent: vec![RecentHost::new("web"), RecentHost::new("db")],
             host_key_waiting: true,
             ..TrayModel::default()
         }
