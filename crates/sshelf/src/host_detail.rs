@@ -1471,17 +1471,20 @@ fn health(
             marks::banner(ui, p.yellow_tint, |ui| {
                 ui.label(
                     RichText::new(
-                        "sshelf hasn't seen this server's key yet. Connect once in a terminal \
-                         to check and accept it; then tunnels and checks can use this host.",
+                        "sshelf hasn't seen this server's key yet. Review its fingerprint and \
+                         accept it; then tunnels and checks can use this host.",
                     )
                     .color(p.text_strong),
                 );
                 let tip = tools
                     .as_deref()
-                    .unwrap_or("Open a terminal running ssh for this host");
-                let connect = Button::new("Connect in terminal").small().tip(tip);
-                if ui.add_enabled(tools.is_none(), connect).clicked() {
-                    commands.push(Command::Connect(alias.to_string()));
+                    .unwrap_or("Show the server's key and ask before storing it");
+                let review = Button::new("Review host key…")
+                    .icon(icons::KEY_ROUND)
+                    .small()
+                    .tip(tip);
+                if ui.add_enabled(tools.is_none(), review).clicked() {
+                    commands.push(Command::ReviewHostKey(alias.to_string()));
                 }
             });
         }
@@ -1489,11 +1492,18 @@ fn health(
             marks::banner(ui, p.red_tint, |ui| {
                 ui.label(
                     RichText::new(
-                        "The server's host key changed since it was saved. Start a tunnel \
-                         through this host to review it.",
+                        "The server's host key changed since it was saved. Compare both keys; \
+                         the stored one is replaced only if you confirm.",
                     )
                     .color(p.text_strong),
                 );
+                let tip = tools
+                    .as_deref()
+                    .unwrap_or("Compare the stored key with the one the server presents");
+                let review = Button::new("Review changed key…").danger().small().tip(tip);
+                if ui.add_enabled(tools.is_none(), review).clicked() {
+                    commands.push(Command::ReviewHostKey(alias.to_string()));
+                }
             });
         }
         Health::Unreachable(why) => {

@@ -396,13 +396,14 @@ pub fn first_unknown(
 }
 
 /// The host on the way to `destination` whose server key differs from the
-/// stored one. Fetches a key of the stored type where the server has one.
+/// stored one; `None` when every stored key matches its server. Fetches a
+/// key of the stored type where the server has one.
 pub fn find_changed(
     tools: &SshTools,
     keygen: &Keygen,
     home: &Path,
     destination: &str,
-) -> Result<ChangedKey, String> {
+) -> Result<Option<ChangedKey>, String> {
     for (target, hop_of) in chain(tools, home, &[destination.to_string()])? {
         let known = keygen.known(&target)?;
         let Some(first) = known.first().and_then(|(_, lines)| lines.first()) else {
@@ -426,16 +427,16 @@ pub fn find_changed(
             .map(|(file, _)| file.clone())
             .filter(|file| target.user_files.contains(file))
             .collect();
-        return Ok(ChangedKey {
+        return Ok(Some(ChangedKey {
             target,
             user_files,
             old,
             new,
             new_lines,
             hop_of,
-        });
+        }));
     }
-    Err("every stored host key matches its server now; try starting again".to_string())
+    Ok(None)
 }
 
 /// The only writer for `known_hosts`: atomic appends, with a timestamped

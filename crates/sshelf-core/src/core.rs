@@ -126,7 +126,12 @@ pub enum Command {
     RejectHostKey(u64),
     /// Find whose host key changed for a failed tunnel (SPEC.md §9).
     ReviewChangedKey(String),
-    /// Replace the old key of a [`ChangedKeyPrompt`] and start the tunnel again.
+    /// Review a host's keys (the health banner): an unknown key asks like a
+    /// start, a changed one like [`Command::ReviewChangedKey`]; a notice
+    /// when everything matches.
+    ReviewHostKey(String),
+    /// Replace the old key of a [`ChangedKeyPrompt`] and start the tunnel
+    /// again (for a host review: only replace it).
     ReplaceHostKey(u64),
     CancelChangedKey(u64),
     /// Validate an edit without saving it; answered by [`Event::EditChecked`].
@@ -211,7 +216,8 @@ pub struct HostKeyPrompt {
 #[derive(Debug, Clone)]
 pub struct ChangedKeyPrompt {
     pub id: u64,
-    pub tunnel_name: String,
+    /// What the review is for, e.g. `tunnel “API”` or `host “web”`.
+    pub subject: String,
     pub changed: ChangedKey,
 }
 
@@ -220,6 +226,20 @@ pub struct ChangedKeyPrompt {
 enum StartRequest {
     Tunnel(String),
     Group(String),
+    /// Connect to a host: the terminal opens once its keys are known.
+    Connect(String),
+    /// A host review (the health banner): once no key is unknown, the
+    /// stored keys are compared with the server's.
+    Review(String),
+}
+
+/// What a changed-key review is for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum KeyFor {
+    /// A failed tunnel: it starts again once the key is replaced.
+    Tunnel(String),
+    /// A host (the health banner): the key is only replaced.
+    Host(String),
 }
 
 #[derive(Debug, Clone)]
@@ -417,8 +437,8 @@ enum Message {
         result: Result<Option<UnknownKey>, String>,
     },
     KeyReview {
-        tunnel_id: String,
-        result: Result<ChangedKey, String>,
+        review: KeyFor,
+        result: Result<Option<ChangedKey>, String>,
     },
     /// An edit was validated in the background.
     HealthChecked {
@@ -548,7 +568,7 @@ struct Worker {
     config_writer: ConfigWriter,
     next_prompt: u64,
     unknown_keys: BTreeMap<u64, (StartRequest, UnknownKey)>,
-    changed_keys: BTreeMap<u64, (String, ChangedKey)>,
+    changed_keys: BTreeMap<u64, (KeyFor, ChangedKey)>,
     health: HealthSnapshot,
     /// Aliases waiting for a free check slot, in order.
     health_queue: VecDeque<String>,
@@ -662,8 +682,8 @@ impl Worker {
                     self.key_checked(start, result);
                     continue;
                 }
-                Message::KeyReview { tunnel_id, result } => {
-                    self.key_reviewed(tunnel_id, result);
+                Message::KeyReview { review, result } => {
+                    self.key_reviewed(review, result);
                     continue;
                 }
                 Message::HealthChecked { alias, report } => {
@@ -718,6 +738,10 @@ impl Worker {
                 Command::AcceptHostKey(id) => self.accept_host_key(id),
                 Command::RejectHostKey(id) => self.reject_host_key(id),
                 Command::ReviewChangedKey(tunnel_id) => self.review_changed_key(tunnel_id),
+                Command::ReviewHostKey(alias) if self.sandbox.is_some() => {
+                    self.would_run(format!("ssh-keygen -F {alias}"));
+                }
+                Command::ReviewHostKey(alias) => self.start(StartRequest::Review(alias)),
                 Command::ReplaceHostKey(id) => self.replace_host_key(id),
                 Command::CancelChangedKey(id) => {
                     if self.changed_keys.remove(&id).is_some() {
@@ -1090,7 +1114,26 @@ impl Worker {
                 }
                 Ok(Request::StartGroup { group, tunnels })
             }
+            StartRequest::Connect(_) | StartRequest::Review(_) => {
+                Err("not a tunnel start".to_string())
+            }
         }
+    }
+
+    /// The hosts `start` connects to (jump hosts are found from them).
+    fn destinations(&self, start: &StartRequest) -> Result<Vec<String>, String> {
+        let mut destinations = match start {
+            StartRequest::Connect(alias) | StartRequest::Review(alias) => vec![alias.clone()],
+            StartRequest::Tunnel(_) | StartRequest::Group(_) => match self.launch_request(start)? {
+                Request::Start { tunnel, .. } => vec![tunnel.host],
+                Request::StartGroup { tunnels, .. } => {
+                    tunnels.into_iter().map(|t| t.host).collect()
+                }
+                _ => Vec::new(),
+            },
+        };
+        destinations.dedup();
+        Ok(destinations)
     }
 
     fn describe(&self, start: &StartRequest) -> String {
@@ -1103,6 +1146,8 @@ impl Worker {
                 || format!("group {id}"),
                 |g| format!("group \"{}\"", g.name),
             ),
+            StartRequest::Connect(alias) => format!("connecting to {alias}"),
+            StartRequest::Review(alias) => format!("host \"{alias}\""),
         }
     }
 
@@ -1117,23 +1162,17 @@ impl Worker {
     /// Checks the host keys of every host `start` connects through (jump
     /// hosts first) in the background, then starts or asks (SPEC.md §9).
     fn start(&mut self, start: StartRequest) {
-        let request = match self.launch_request(&start) {
-            Ok(request) => request,
+        let destinations = match self.destinations(&start) {
+            Ok(destinations) => destinations,
             Err(e) => return self.error(e),
         };
-        let mut destinations: Vec<String> = match &request {
-            Request::Start { tunnel, .. } => vec![tunnel.host.clone()],
-            Request::StartGroup { tunnels, .. } => tunnels.iter().map(|t| t.host.clone()).collect(),
-            _ => Vec::new(),
-        };
-        destinations.dedup();
         if self.sandbox.is_some() {
             // Fake servers: no host keys to check.
             return self.key_checked(start, Ok(None));
         }
         let (tools, keygen) = match self.keygen() {
             Ok(found) => found,
-            Err(e) => return self.error(format!("cannot start: {e}")),
+            Err(e) => return self.key_checked(start, Err(e)),
         };
         let home = self.paths.home.clone();
         let tx = self.self_tx.clone();
@@ -1144,12 +1183,16 @@ impl Worker {
     }
 
     fn key_checked(&mut self, start: StartRequest, result: Result<Option<UnknownKey>, String>) {
-        match result {
-            Ok(None) => match self.launch_request(&start) {
+        match (result, start) {
+            // Connect: a check that can't run doesn't stop it; ssh in the
+            // terminal says what is wrong.
+            (Ok(None) | Err(_), StartRequest::Connect(alias)) => self.open_terminal(&alias),
+            (Ok(None), StartRequest::Review(alias)) => self.review_changed(KeyFor::Host(alias)),
+            (Ok(None), start) => match self.launch_request(&start) {
                 Ok(request) => self.supervise(request),
                 Err(e) => self.error(e),
             },
-            Ok(Some(unknown)) => {
+            (Ok(Some(unknown)), start) => {
                 self.next_prompt += 1;
                 let prompt = HostKeyPrompt {
                     id: self.next_prompt,
@@ -1159,7 +1202,10 @@ impl Worker {
                 self.unknown_keys.insert(prompt.id, (start, unknown));
                 self.emitter.emit(Event::HostKeyPrompt(Arc::new(prompt)));
             }
-            Err(e) => self.error(format!("{} not started: {e}", self.describe(&start))),
+            (Err(e), StartRequest::Review(alias)) => {
+                self.error(format!("cannot check the host keys of {alias}: {e}"));
+            }
+            (Err(e), start) => self.error(format!("{} not started: {e}", self.describe(&start))),
         }
     }
 
@@ -1183,16 +1229,33 @@ impl Worker {
             return;
         };
         self.emitter.emit(Event::HostKeyClosed(id));
+        let what = match &start {
+            StartRequest::Connect(alias) => format!("not connected to {alias}"),
+            StartRequest::Review(alias) => format!("nothing stored for {alias}"),
+            _ => format!("{} not started", self.describe(&start)),
+        };
         self.error(format!(
-            "{} not started: the host key of {} was not accepted",
-            self.describe(&start),
+            "{what}: the host key of {} was not accepted",
             unknown.target.display()
         ));
     }
 
     fn review_changed_key(&mut self, tunnel_id: String) {
-        let Some(host) = self.data.tunnels.tunnel(&tunnel_id).map(|t| t.host.clone()) else {
+        if self.data.tunnels.tunnel(&tunnel_id).is_none() {
             return self.error(format!("no tunnel `{tunnel_id}`"));
+        }
+        self.review_changed(KeyFor::Tunnel(tunnel_id));
+    }
+
+    /// Compares the stored keys on the way to `review`'s host with the
+    /// servers' in the background (it connects).
+    fn review_changed(&mut self, review: KeyFor) {
+        let host = match &review {
+            KeyFor::Tunnel(id) => match self.data.tunnels.tunnel(id) {
+                Some(tunnel) => tunnel.host.clone(),
+                None => return self.error(format!("no tunnel `{id}`")),
+            },
+            KeyFor::Host(alias) => alias.clone(),
         };
         let (tools, keygen) = match self.keygen() {
             Ok(found) => found,
@@ -1202,34 +1265,48 @@ impl Worker {
         let tx = self.self_tx.clone();
         thread::spawn(move || {
             let result = hostkeys::find_changed(&tools, &keygen, &home, &host);
-            let _ = tx.send(Message::KeyReview { tunnel_id, result });
+            let _ = tx.send(Message::KeyReview { review, result });
         });
     }
 
-    fn key_reviewed(&mut self, tunnel_id: String, result: Result<ChangedKey, String>) {
-        match result {
-            Ok(changed) => {
+    fn key_reviewed(&mut self, review: KeyFor, result: Result<Option<ChangedKey>, String>) {
+        match (result, review) {
+            (Ok(Some(changed)), review) => {
                 self.next_prompt += 1;
+                let subject = match &review {
+                    KeyFor::Tunnel(id) => {
+                        let name = self
+                            .data
+                            .tunnels
+                            .tunnel(id)
+                            .map_or(id.as_str(), |t| &t.name);
+                        format!("tunnel \u{201c}{name}\u{201d}")
+                    }
+                    KeyFor::Host(alias) => format!("host \u{201c}{alias}\u{201d}"),
+                };
                 let prompt = ChangedKeyPrompt {
                     id: self.next_prompt,
-                    tunnel_name: self
-                        .data
-                        .tunnels
-                        .tunnel(&tunnel_id)
-                        .map_or_else(|| tunnel_id.clone(), |t| t.name.clone()),
+                    subject,
                     changed: changed.clone(),
                 };
-                self.changed_keys.insert(prompt.id, (tunnel_id, changed));
+                self.changed_keys.insert(prompt.id, (review, changed));
                 self.emitter.emit(Event::HostKeyChanged(Arc::new(prompt)));
             }
-            Err(e) => self.error(e),
+            (Ok(None), KeyFor::Tunnel(_)) => self.error(
+                "every stored host key matches its server now; try starting again".to_string(),
+            ),
+            (Ok(None), KeyFor::Host(alias)) => self.emitter.emit(Event::Notice(format!(
+                "The stored host keys of {alias} match its servers"
+            ))),
+            (Err(e), _) => self.error(e),
         }
     }
 
     /// `ssh-keygen -R` the old key from every user file holding it, store the
-    /// new one, then start the tunnel again. Never automatic (SPEC.md §9).
+    /// new one, then start the tunnel again (a host review only replaces it).
+    /// Never automatic (SPEC.md §9).
     fn replace_host_key(&mut self, id: u64) {
-        let Some((tunnel_id, changed)) = self.changed_keys.remove(&id) else {
+        let Some((review, changed)) = self.changed_keys.remove(&id) else {
             return;
         };
         self.emitter.emit(Event::HostKeyClosed(id));
@@ -1261,7 +1338,13 @@ impl Worker {
         if let Err(e) = self.writer.append(&file, &changed.new_lines) {
             return self.error(e);
         }
-        self.start(StartRequest::Tunnel(tunnel_id));
+        match review {
+            KeyFor::Tunnel(tunnel_id) => self.start(StartRequest::Tunnel(tunnel_id)),
+            KeyFor::Host(_) => self.emitter.emit(Event::Notice(format!(
+                "Replaced the host key of {}",
+                changed.target.display()
+            ))),
+        }
     }
 
     fn save_settings(&mut self, settings: Settings) {
@@ -1668,31 +1751,44 @@ impl Worker {
         terminal::spawn(&plan)
     }
 
+    /// Connect: in the sandbox only what would run; otherwise the host keys
+    /// are checked first (an unknown one asks, SPEC.md §9), then the
+    /// terminal opens ([`Self::open_terminal`]).
     fn connect(&mut self, alias: &str) {
         if self.sandbox.is_some() {
             self.would_run(format!("ssh {alias}"));
+            self.record_session(alias);
         } else {
-            let tools = match &self.tools {
-                Ok(tools) => tools,
-                Err(e) => return self.error(format!("cannot connect: {e}")),
-            };
-            let plan = match terminal::plan(
-                &self.data.settings.terminal_command,
-                &tools.ssh.program,
-                alias,
-                self.terminal.as_ref(),
-            ) {
-                Ok(plan) => plan,
-                Err(e) => return self.error(format!("cannot connect: {e}")),
-            };
-            if let Err(e) = terminal::spawn(&plan) {
-                return self.error(format!("cannot connect: {e}"));
-            }
-            self.emitter.emit(Event::Launched {
-                alias: alias.to_string(),
-            });
+            self.start(StartRequest::Connect(alias.to_string()));
         }
+    }
 
+    /// Opens the terminal running ssh for `alias`, and records the session.
+    fn open_terminal(&mut self, alias: &str) {
+        let tools = match &self.tools {
+            Ok(tools) => tools,
+            Err(e) => return self.error(format!("cannot connect: {e}")),
+        };
+        let plan = match terminal::plan(
+            &self.data.settings.terminal_command,
+            &tools.ssh.program,
+            alias,
+            self.terminal.as_ref(),
+        ) {
+            Ok(plan) => plan,
+            Err(e) => return self.error(format!("cannot connect: {e}")),
+        };
+        if let Err(e) = terminal::spawn(&plan) {
+            return self.error(format!("cannot connect: {e}"));
+        }
+        self.emitter.emit(Event::Launched {
+            alias: alias.to_string(),
+        });
+        self.record_session(alias);
+    }
+
+    /// "Last launched from sshelf" and the tray's recent hosts.
+    fn record_session(&mut self, alias: &str) {
         let mut history = self.data.history.clone();
         history.record(alias, SystemTime::now());
         match self.store.save(&history) {

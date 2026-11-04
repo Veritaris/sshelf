@@ -155,7 +155,15 @@ fn full_session_never_writes_the_ssh_config() {
     });
     assert_eq!(data.hosts.hosts["db"].notes, "for a removed host");
 
+    // Connect checks the host key first: unknown here, so it asks, and the
+    // terminal opens once the key is accepted.
     core.send(Command::Connect("web".into()));
+    let prompt = wait_for(&events, "the connect's host key prompt", |e| match e {
+        Event::HostKeyPrompt(p) => Some(p),
+        _ => None,
+    });
+    assert_eq!(prompt.purpose, "connecting to web");
+    core.send(Command::AcceptHostKey(prompt.id));
     wait_for(&events, "launch", |e| match e {
         Event::Launched { alias } => Some(alias),
         _ => None,
@@ -459,7 +467,7 @@ fn changed_host_key_is_reviewed_and_replaced() {
         Event::HostKeyChanged(p) => Some(p),
         _ => None,
     });
-    assert_eq!(review.tunnel_name, "to changed-a");
+    assert_eq!(review.subject, "tunnel \u{201c}to changed-a\u{201d}");
     assert_ne!(
         review.changed.old[0].fingerprint,
         review.changed.new[0].fingerprint
@@ -486,6 +494,53 @@ fn changed_host_key_is_reviewed_and_replaced() {
         backups.len(),
         2,
         "sshelf's backup and ssh-keygen's .old: {backups:?}"
+    );
+    drop(core);
+}
+
+/// The health banner's review: a changed key gets the same dialog as a
+/// failed tunnel's, and replacing it starts nothing.
+#[test]
+fn host_review_finds_a_changed_key_and_only_replaces_it() {
+    let old_line = format!("changed-b.example.com {OLD}\n");
+    let (_tmp, paths, core, events) = host_key_session(&["changed-b"], &old_line);
+    core.send(Command::ReviewHostKey("changed-b".into()));
+    let review = wait_for(&events, "the review", |e| match e {
+        Event::HostKeyChanged(p) => Some(p),
+        _ => None,
+    });
+    assert_eq!(review.subject, "host \u{201c}changed-b\u{201d}");
+    core.send(Command::ReplaceHostKey(review.id));
+    let notice = wait_for(&events, "the replacement", |e| match e {
+        Event::Notice(m) => Some(m),
+        Event::Tunnels(s) if s.state("t-changed-b") != TunnelState::Stopped => {
+            panic!("a host review must not start the tunnel")
+        }
+        _ => None,
+    });
+    assert_eq!(notice, "Replaced the host key of changed-b.example.com");
+    let stored = fs::read_to_string(paths.ssh_dir.join("known_hosts")).unwrap();
+    assert_eq!(stored, format!("changed-b.example.com {NEW}\n"));
+    drop(core);
+}
+
+/// An unknown key asks like a start; once stored, the review finds every
+/// key matching.
+#[test]
+fn host_review_asks_for_an_unknown_key_then_reports_a_match() {
+    let (_tmp, paths, core, events) = host_key_session(&["newkey-c"], "");
+    core.send(Command::ReviewHostKey("newkey-c".into()));
+    let p = prompt(&events);
+    assert_eq!(p.purpose, "host \"newkey-c\"");
+    core.send(Command::AcceptHostKey(p.id));
+    let notice = wait_for(&events, "the match", |e| match e {
+        Event::Notice(m) => Some(m),
+        _ => None,
+    });
+    assert_eq!(notice, "The stored host keys of newkey-c match its servers");
+    assert_eq!(
+        fs::read_to_string(paths.ssh_dir.join("known_hosts")).unwrap(),
+        format!("newkey-c.example.com {NEW}\n")
     );
     drop(core);
 }

@@ -275,6 +275,8 @@ Before starting a tunnel, determine the host key state using values from `ssh -G
 ### How sshelf applies this
 
 - Every tunnel or group start first checks, without connecting, each host on the way (jump hosts first, then the destination): `ssh -G` for the lookup name and known-hosts files, `ssh-keygen -F` in each user and global file. The first unknown key is fetched and shown; *Accept* stores it and continues with the next host, *Reject* starts nothing (for a group: none of its tunnels). The fetch runs the command above, which logs in and runs `exit` if the key is accepted for authentication.
+- *Connect* runs the same check first: an unknown key shows the same dialog ("connecting to web waits for it"), and the terminal opens once it is accepted (*Reject*: no terminal). If the check itself can't run, the terminal opens anyway and ssh reports the problem. A *changed* key can't be seen without contacting the server, so Connect leaves that to ssh in the terminal.
+- The host detail's health banner offers *Review host key…* (key not known yet) and *Review changed key…* (key changed). Both run a host review: the unknown-key check above (dialog as for a start), then, if every key is known, the changed-key comparison below (it connects, like the fetch). A changed key shows the same changed-key dialog ("host “web”"); *Replace key* only replaces it. When everything matches, a notice says so.
 - A changed key can only be seen when ssh connects: the tunnel fails, and its failure is classified from ssh's messages (host key changed / unknown, authentication, other). *Review changed key…* walks the same chain, fetches each host's key (of the stored key's type when the server offers it) and shows the first host whose key no longer matches.
 - `known_hosts` files are written only by these flows: appends are atomic (temp file + rename), and each file gets a timestamped backup (`known_hosts.sshelf-<time>.bak`) before its first change in a session; `ssh-keygen -R` additionally keeps `.old`. The global (system) files are never written; a key stored only there cannot be replaced from the app.
 - Interactive sessions (Connect) are not checked: ssh asks about host keys in the terminal itself.
@@ -676,7 +678,6 @@ A small, trustworthy desktop tool where:
   - Raw editor: syntax highlighting, error marks in the gutter, "Did you mean …?" (Host-Edit-Raw).
   - A *Browse…* file picker for the generated key's file (Dialog-KeyGen); `IdentityFile` has one now (§10 *Host editor*).
   - Health: *Cancel* for a single running check (Host-Health).
-  - Health: *Review host key…* from the health banner; the health check never prompts today (Host-Health).
   - Toasts with *Undo* (Feedback).
   - An error queue ("+1 more") and action links in errors such as "Change in Settings" (Feedback).
   - Tunnels: *Duplicate* and *Add to group ›* in the tunnel menu (Tunnel-States).

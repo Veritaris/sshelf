@@ -234,10 +234,9 @@ impl HostKeyModals {
                         ui.set_width(ui.available_width());
                         ui.spacing_mut().item_spacing.y = 16.0;
                         let mut context = format!(
-                            "{} presents a different key than the one stored for it \
-                             (tunnel \u{201c}{}\u{201d}).",
+                            "{} presents a different key than the one stored for it ({}).",
                             target.display(),
-                            prompt.tunnel_name
+                            prompt.subject
                         );
                         if let Some(final_host) = &changed.hop_of {
                             context.push_str(&format!(
@@ -562,7 +561,7 @@ mod tests {
         let mut modals = HostKeyModals::default();
         modals.on_changed(Arc::new(ChangedKeyPrompt {
             id: 3,
-            tunnel_name: "API".into(),
+            subject: "tunnel \u{201c}API\u{201d}".into(),
             changed: ChangedKey {
                 target: target(),
                 user_files: vec![PathBuf::from("known_hosts")],
@@ -603,7 +602,7 @@ mod tests {
         let mut modals = HostKeyModals::default();
         modals.on_changed(Arc::new(ChangedKeyPrompt {
             id: 4,
-            tunnel_name: "API".into(),
+            subject: "tunnel \u{201c}API\u{201d}".into(),
             changed: ChangedKey {
                 target: target(),
                 user_files: Vec::new(),

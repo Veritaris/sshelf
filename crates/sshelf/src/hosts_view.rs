@@ -1483,13 +1483,32 @@ mod tests {
         harness.state_mut().0.on_health(Arc::new(health));
         harness.step();
         harness.get_by_label("Reachable, host key not known yet");
-        harness.get_by_label_contains("Connect once in a terminal");
-        // The fix: ssh asks about the key in a terminal.
-        harness.get_by_label("Connect in terminal").click();
+        harness.get_by_label_contains("Review its fingerprint");
+        // The fix: sshelf's own host key dialog.
+        harness.get_by_label("Review host key…").click();
         harness.step();
         assert_eq!(
             harness.state().1.last(),
-            Some(&Command::Connect("web".into()))
+            Some(&Command::ReviewHostKey("web".into()))
+        );
+
+        // A changed key: the same review, which finds the change.
+        let mut health = HealthSnapshot::default();
+        health.reports.insert(
+            "web".into(),
+            HealthReport {
+                health: Health::HostKeyChanged,
+                checked_at: SystemTime::now(),
+            },
+        );
+        harness.state_mut().0.on_health(Arc::new(health));
+        harness.step();
+        harness.get_by_label("Reachable, but the host key changed");
+        harness.get_by_label("Review changed key…").click();
+        harness.step();
+        assert_eq!(
+            harness.state().1.last(),
+            Some(&Command::ReviewHostKey("web".into()))
         );
     }
 
