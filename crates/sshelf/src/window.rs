@@ -404,16 +404,22 @@ pub mod native {
 #[cfg(target_os = "macos")]
 pub mod macos {
     use objc2::{AnyThread, MainThreadMarker};
-    use objc2_app_kit::{NSApplication, NSImage};
+    use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSImage};
     use objc2_foundation::NSData;
 
     use crate::icon::Status;
     use crate::icon_shape;
 
-    /// The Dock icon's canvas, in pixels (the Dock shows up to 128 pt @2x).
-    const CANVAS: u32 = 256;
+    /// The Dock icon's canvas, in pixels (Cmd+Tab shows it up to 128 pt @2x
+    /// and more; 512 stays sharp).
+    const CANVAS: u32 = 512;
     /// The shape inside it: Apple's icon grid leaves ~10 % around the body.
-    const BODY: u32 = 208;
+    const BODY: u32 = 416;
+
+    thread_local! {
+        /// The status the Dock icon shows (the main thread's).
+        static SHOWN: std::cell::Cell<Status> = const { std::cell::Cell::new(Status::Idle) };
+    }
 
     /// Sets the Dock icon to the app icon with `status`'s dot. Call on the
     /// main thread (`App::logic` is); elsewhere it does nothing.
@@ -421,6 +427,7 @@ pub mod macos {
         let Some(mtm) = MainThreadMarker::new() else {
             return;
         };
+        SHOWN.set(status);
         let Some(png) = png(&dock_rgba(status), CANVAS) else {
             return;
         };
@@ -431,6 +438,26 @@ pub mod macos {
         let app = NSApplication::sharedApplication(mtm);
         // SAFETY: on the main thread, with a valid image.
         unsafe { app.setApplicationIconImage(Some(&image)) };
+    }
+
+    /// Shows or hides the Dock icon: hidden while the window sits in the
+    /// menu bar (an "accessory" app: no Dock icon, no app menu), back when
+    /// the window shows (the caller then focuses it, which activates the
+    /// app). Call on the main thread.
+    pub fn set_dock_visible(visible: bool) {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        let policy = if visible {
+            NSApplicationActivationPolicy::Regular
+        } else {
+            NSApplicationActivationPolicy::Accessory
+        };
+        NSApplication::sharedApplication(mtm).setActivationPolicy(policy);
+        if visible {
+            // A Dock tile made again starts from the bundle's icon.
+            set_dock_icon(SHOWN.get());
+        }
     }
 
     /// The icon body centred on the transparent canvas.

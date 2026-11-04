@@ -97,10 +97,15 @@ pub fn decide(running: usize, behavior: CloseBehavior, tray: bool) -> Decision {
 /// Hides the window; the app keeps running in the tray.
 pub fn hide(ctx: &egui::Context) {
     ctx.send_viewport_cmd(ViewportCommand::Visible(false));
+    // macOS: no Dock icon while only the menu bar item is left.
+    #[cfg(target_os = "macos")]
+    crate::window::macos::set_dock_visible(false);
 }
 
 /// Shows the window (from the tray, or to ask).
 pub fn show(ctx: &egui::Context) {
+    #[cfg(target_os = "macos")]
+    crate::window::macos::set_dock_visible(true);
     ctx.send_viewport_cmd(ViewportCommand::Visible(true));
     ctx.send_viewport_cmd(ViewportCommand::Minimized(false));
     ctx.send_viewport_cmd(ViewportCommand::Focus);

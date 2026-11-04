@@ -354,9 +354,10 @@ impl TrayModel {
 /// What the platform tray reports.
 enum TrayEvent {
     Menu(String),
-    /// The icon itself was clicked.
-    Clicked,
-    RightClicked(IconRect),
+    /// The icon was clicked with the button that shows the window.
+    ShowClicked,
+    /// The icon was clicked with the menu's button (right; left on macOS).
+    MenuClicked(IconRect),
 }
 
 /// The platform tray icon.
@@ -386,15 +387,23 @@ impl Tray {
                 ..
             } = event
             {
+                // The menu's button: right, but left on macOS, where menu
+                // bar items open their menu on a left click; the other one
+                // shows the window.
+                let menu_button = if cfg!(target_os = "macos") {
+                    MouseButton::Left
+                } else {
+                    MouseButton::Right
+                };
                 let event = match button {
-                    MouseButton::Left => TrayEvent::Clicked,
-                    MouseButton::Right => TrayEvent::RightClicked(IconRect {
+                    MouseButton::Middle => return,
+                    b if b == menu_button => TrayEvent::MenuClicked(IconRect {
                         x: rect.position.x,
                         y: rect.position.y,
                         width: f64::from(rect.size.width),
                         height: f64::from(rect.size.height),
                     }),
-                    MouseButton::Middle => return,
+                    _ => TrayEvent::ShowClicked,
                 };
                 let _ = tx.send(event);
                 icon_ctx.request_repaint();
@@ -403,7 +412,8 @@ impl Tray {
         let icon = TrayIconBuilder::new()
             .with_icon(tray_icon(Status::Idle)?)
             .with_tooltip("sshelf")
-            .with_menu_on_left_click(false)
+            // The system menu (when chosen) on the same button as ours.
+            .with_menu_on_left_click(cfg!(target_os = "macos"))
             .build()
             .map_err(|e| e.to_string())?;
         Ok(Self {
@@ -415,8 +425,8 @@ impl Tray {
     }
 
     /// Shows `model`, rebuilding what changed. `native`: the system menu
-    /// opens on right click; otherwise there is none, and right clicks come
-    /// back as [`TrayAction::OpenMenu`].
+    /// opens on the menu's button (right; left on macOS); otherwise there is
+    /// none, and those clicks come back as [`TrayAction::OpenMenu`].
     pub fn update(&mut self, model: TrayModel, native: bool) {
         if self.shown.as_ref() == Some(&model) && self.native == Some(native) {
             return;
@@ -454,8 +464,8 @@ impl Tray {
             .try_iter()
             .filter_map(|event| match event {
                 TrayEvent::Menu(id) => TrayAction::parse(&id),
-                TrayEvent::Clicked => Some(TrayAction::Show),
-                TrayEvent::RightClicked(rect) => (!native).then_some(TrayAction::OpenMenu(rect)),
+                TrayEvent::ShowClicked => Some(TrayAction::Show),
+                TrayEvent::MenuClicked(rect) => (!native).then_some(TrayAction::OpenMenu(rect)),
             })
             .collect()
     }

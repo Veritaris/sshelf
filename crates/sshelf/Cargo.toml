@@ -60,6 +60,7 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "NSApplication",
     "NSImage",
     "NSResponder",
+    "NSRunningApplication",
 ] }
 # The Dock icon goes to AppKit as PNG data.
 png = { version = "0.18.1" }

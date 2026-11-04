@@ -325,7 +325,7 @@ Before starting a tunnel, determine the host key state using values from `ssh -G
   - *Connect* submenu: the last 8 distinct hosts launched from sshelf that still exist (any alias counts for its host), newest first.
   - *Groups*: "Start X", or "Stop X" with "(starting)" / "(2/3 running)" while not fully up.
   - *Active tunnels*: "Stop X" for a tunnel started by hand (it releases that start, §7); a tunnel only groups hold is shown disabled, "X (used by Work)".
-  - Clicking the icon itself shows the window; the menu opens on right click. The tooltip counts running tunnels, and the icon gets a green dot while any run.
+  - Clicking the icon itself shows the window; the menu opens on right click (on macOS the other way round, see below). The tooltip counts running tunnels, and the icon gets a green dot while any run.
 - **Tray menu (redesign):** left click on the icon shows and focuses the window; right click opens the **sshelf menu**, a small borderless, always-on-top viewport docked above the icon (16 px corners, same widgets and states as the window: group switches, active tunnels with stop, Connect list, *Show window*, *Quit*). It closes on focus loss or `Esc`.
   - The native `tray-icon` menu with the same items stays as the fallback: used when the icon's position isn't known (`TrayIconEvent` gives no rect, e.g. some KSNI hosts) and when *Settings › Window & tray › Tray menu* is set to *System menu* (`tray_menu = "sshelf" | "system"`, default `"sshelf"`).
   - The flyout must work while the main window is hidden, so it is driven from `App::logic` like the rest of the tray. Verify during implementation that eframe renders a secondary viewport while the root viewport is hidden; if it can't, the fallback menu is used while hidden.
@@ -333,7 +333,11 @@ Before starting a tunnel, determine the host key state using values from `ssh -G
 - The tray works from `App::logic`, which eframe keeps calling while the window is hidden (core events and tray clicks request a repaint): the menu stays current and actions run without the window.
 - Backends (`tray-icon` crate): native on Windows and macOS; on Linux the KSNI backend (StatusNotifierItem over D-Bus, no GTK).
 - If the platform has no tray (e.g. GNOME without an extension), don't offer *Minimize to tray*. On Linux a tray exists when `org.kde.StatusNotifierWatcher` has an owner on the session bus; this is checked at startup and with *Refresh* in Settings, which shows the result.
-- macOS: create on the main thread; consider hiding the Dock icon while minimized.
+- macOS: create on the main thread.
+  - As built: the buttons are swapped, as menu bar items behave there: a left click opens the menu (the sshelf menu, or the system menu when chosen), a right click shows the window.
+  - While the window sits in the menu bar (closed with *Minimize to tray*), sshelf has no Dock icon: the activation policy is *accessory* (no Dock icon, no app menu), and *regular* again when the window shows, with the Dock icon's status dot reapplied.
+- Windows: the sshelf menu never takes the foreground, so the taskbar's overflow flyout it may have been opened from stays open; a click outside it or `Esc` (seen by low-level mouse and keyboard hooks on their own thread while it is open) closes it. Its window gets the same frameless fix as the main window (no accent-colour border).
+- The taskbar button (Windows, X11) and the Dock icon (macOS) carry the same status dot as the tray icon. Windows: the big icon is set with `WM_SETICON` (winit's `set_window_icon` only sets the small one). macOS: `NSApplication.applicationIconImage` (winit ignores window icons there). Wayland has no window icons: docks show the desktop entry's (`assets/linux/`, matched by the app id `sshelf`).
 
 ### Visual design
 
@@ -660,7 +664,6 @@ A small, trustworthy desktop tool where:
 - `kubectl port-forward` profiles alongside SSH tunnels (k3s workflows).
 - Embedded terminal.
 - Support for alternative ssh distributions on Windows.
-- macOS: hide the Dock icon while minimized to the tray (activation policy *accessory*), and show the window again from the Dock (needs Objective-C calls; not done in M6).
 - Re-detect a tray host appearing or disappearing on Linux without *Refresh* (watch `NameOwnerChanged` for `org.kde.StatusNotifierWatcher`).
 - From the M9 design boards (`docs/design/`), not built yet:
   - Hosts: *Delete host…* and *Show in config file* in the host menu (Hosts-Interactions).
