@@ -11,6 +11,14 @@
 //! (`ViewportCommand::RequestPaintWhileHidden`); from then on the visible
 //! flyout keeps the root's passes running, so [`TrayMenu::show`] is called
 //! from `App::ui` like every other window.
+//!
+//! The menu is a deferred viewport: eframe creates its window from the event
+//! loop and runs its passes on their own. (An immediate viewport is created
+//! inside the root's pass, which a tray click can start where no window can
+//! be made; egui then panics.) Its clicks go back to the root through
+//! [`Shared`].
+
+use std::sync::{Arc, Mutex};
 
 use egui::{
     Align, Align2, CursorIcon, FontId, Id, Layout, RichText, Sense, Stroke, StrokeKind, Ui,
@@ -45,8 +53,25 @@ const GAP: f32 = 8.0;
 pub struct TrayMenu {
     /// Open, by this icon.
     open: Option<IconRect>,
+    /// Shared with the menu's own window, which runs its passes apart from
+    /// the root's (a deferred viewport).
+    shared: Arc<Mutex<Shared>>,
+}
+
+#[derive(Default)]
+struct Shared {
+    /// What to show; the root keeps it current.
+    model: TrayModel,
+    /// Clicked in the menu, for the root to carry out.
+    actions: Vec<TrayAction>,
+    /// The menu asked to close.
+    close: bool,
     /// It had the focus once: losing it closes the menu.
     had_focus: bool,
+}
+
+fn lock(shared: &Mutex<Shared>) -> std::sync::MutexGuard<'_, Shared> {
+    shared.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 fn viewport_id() -> ViewportId {
@@ -94,16 +119,37 @@ impl TrayMenu {
     /// hidden, so it asks for a pass anyway).
     pub fn open(&mut self, ctx: &egui::Context, icon: IconRect) {
         self.open = Some(icon);
-        self.had_focus = false;
+        {
+            let mut shared = lock(&self.shared);
+            shared.close = false;
+            shared.had_focus = false;
+            shared.actions.clear();
+        }
         ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::RequestPaintWhileHidden);
         ctx.request_repaint();
     }
 
-    /// The menu while open; returns what was clicked. Call from `App::ui`.
+    /// The menu while open; returns what was clicked in it since the last
+    /// call. Call from `App::ui` on every pass: the menu's window lives as
+    /// long as it is shown each pass.
     pub fn show(&mut self, ctx: &egui::Context, model: &TrayModel) -> Vec<TrayAction> {
         let Some(icon) = self.open else {
             return Vec::new();
         };
+        let (actions, close) = {
+            let mut shared = lock(&self.shared);
+            if shared.model != *model {
+                shared.model = model.clone();
+                ctx.request_repaint_of(viewport_id());
+            }
+            (std::mem::take(&mut shared.actions), shared.close)
+        };
+        if close {
+            self.open = None;
+            // One more pass without it removes its window.
+            ctx.request_repaint();
+            return actions;
+        }
         let size = vec2(WIDTH, height(model));
         let (ppp, screen) = ctx.input(|i| {
             let viewport = i.viewport();
@@ -122,15 +168,12 @@ impl TrayMenu {
             .with_active(true)
             .with_position(placement(icon, ppp, screen, size))
             .with_inner_size(size);
-        let mut actions = Vec::new();
-        let mut close = false;
-        let had_focus = &mut self.had_focus;
-        ctx.show_viewport_immediate(viewport_id(), builder, |ui, class| {
-            if class == ViewportClass::EmbeddedWindow {
-                // No native windows (tests): nothing to dock.
-                close = true;
-                return;
-            }
+        let shared = self.shared.clone();
+        ctx.show_viewport_deferred(viewport_id(), builder, move |ui, class| {
+            let (model, had_focus) = {
+                let shared = lock(&shared);
+                (shared.model.clone(), shared.had_focus)
+            };
             let (focused, escape, close_requested) = ui.input(|i| {
                 (
                     i.viewport().focused,
@@ -138,29 +181,35 @@ impl TrayMenu {
                     i.viewport().close_requested(),
                 )
             });
-            if focused == Some(true) {
-                *had_focus = true;
-            } else if !*had_focus {
+            // No native windows (tests): nothing to dock.
+            let mut close = class == ViewportClass::EmbeddedWindow;
+            if focused != Some(true) && !had_focus {
                 ui.ctx().send_viewport_cmd(ViewportCommand::Focus);
             }
-            close |= escape || close_requested || (*had_focus && focused == Some(false));
-            contents(ui, model, &mut actions);
+            close |= escape || close_requested || (had_focus && focused == Some(false));
+            let mut actions = Vec::new();
+            if !close {
+                contents(ui, &model, &mut actions);
+            }
+            // Anything that opens or quits closes the menu; switches don't.
+            close |= actions.iter().any(|a| {
+                matches!(
+                    a,
+                    TrayAction::Show
+                        | TrayAction::Quit
+                        | TrayAction::ShowTunnel(_)
+                        | TrayAction::Connect(_)
+                )
+            });
+            let mut shared = lock(&shared);
+            shared.had_focus |= focused == Some(true);
+            if close || !actions.is_empty() {
+                shared.close |= close;
+                shared.actions.extend(actions);
+                // The root carries them out (and drops the window).
+                ui.ctx().request_repaint_of(ViewportId::ROOT);
+            }
         });
-        // Anything that opens or quits closes the menu; switches don't.
-        close |= actions.iter().any(|a| {
-            matches!(
-                a,
-                TrayAction::Show
-                    | TrayAction::Quit
-                    | TrayAction::ShowTunnel(_)
-                    | TrayAction::Connect(_)
-            )
-        });
-        if close {
-            self.open = None;
-            // One more pass without it removes its window.
-            ctx.request_repaint();
-        }
         actions
     }
 }
