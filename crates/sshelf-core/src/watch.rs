@@ -165,6 +165,14 @@ mod tests {
         WatchDir { path, recursive }
     }
 
+    /// Lets the OS watcher start, then drops what it reports from before:
+    /// macOS (FSEvents) can deliver the setup's own writes (even the temp
+    /// dir's creation) after the watch began.
+    fn settle(rx: &Receiver<()>) {
+        thread::sleep(SETTLE);
+        while rx.recv_timeout(DEBOUNCE * 3).is_ok() {}
+    }
+
     fn expect_change(rx: &Receiver<()>, what: &str) {
         rx.recv_timeout(WAIT)
             .unwrap_or_else(|_| panic!("no change reported after {what}"));
@@ -188,7 +196,7 @@ mod tests {
         let (mut watcher, rx) = watcher();
         let errors = watcher.set_dirs(&[dir(ssh.clone(), false), dir(ssh.join("conf.d"), false)]);
         assert!(errors.is_empty(), "{errors:?}");
-        thread::sleep(SETTLE);
+        settle(&rx);
 
         fs::write(ssh.join("config"), "Host a b\n").unwrap();
         expect_change(&rx, "modifying config");
@@ -202,10 +210,7 @@ mod tests {
         fs::write(tmp.path().join("config"), "Host a\n").unwrap();
         let (mut watcher, rx) = watcher();
         watcher.set_dirs(&[dir(tmp.path().to_path_buf(), false)]);
-        thread::sleep(SETTLE);
-        // macOS (FSEvents) may still deliver the write above, from before
-        // the watch began: let it pass first.
-        while rx.recv_timeout(DEBOUNCE * 3).is_ok() {}
+        settle(&rx);
         for _ in 0..3 {
             fs::read_to_string(tmp.path().join("config")).unwrap();
         }
@@ -219,7 +224,7 @@ mod tests {
         let target = home.join("ssh").join("conf.d");
         let (mut watcher, rx) = watcher();
         watcher.set_dirs(&[dir(target.clone(), false)]);
-        thread::sleep(SETTLE);
+        settle(&rx);
 
         fs::write(home.join("unrelated.txt"), "x").unwrap();
         expect_quiet(&rx, "an unrelated file in the ancestor");
@@ -228,7 +233,7 @@ mod tests {
         expect_change(&rx, "creating the parent of the missing dir");
         // The core reloads and re-applies the dirs; the parent is now watched.
         watcher.set_dirs(&[dir(target.clone(), false)]);
-        thread::sleep(SETTLE);
+        settle(&rx);
         fs::create_dir(&target).unwrap();
         expect_change(&rx, "creating the missing dir");
     }
@@ -240,7 +245,7 @@ mod tests {
         fs::create_dir_all(hosts.join("team")).unwrap();
         let (mut watcher, rx) = watcher();
         watcher.set_dirs(&[dir(hosts.clone(), true)]);
-        thread::sleep(SETTLE);
+        settle(&rx);
         fs::write(hosts.join("team").join("x.conf"), "Host x\n").unwrap();
         expect_change(&rx, "a file in a nested dir");
     }
@@ -260,7 +265,7 @@ mod tests {
             targets.contains(&fs::canonicalize(&real).unwrap().join("ssh")),
             "{targets:?}"
         );
-        thread::sleep(SETTLE);
+        settle(&rx);
         fs::create_dir(real.join("ssh")).unwrap();
         expect_change(&rx, "creating the dir through its real path");
     }
