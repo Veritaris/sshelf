@@ -203,6 +203,9 @@ mod tests {
         let (mut watcher, rx) = watcher();
         watcher.set_dirs(&[dir(tmp.path().to_path_buf(), false)]);
         thread::sleep(SETTLE);
+        // macOS (FSEvents) may still deliver the write above, from before
+        // the watch began: let it pass first.
+        while rx.recv_timeout(DEBOUNCE * 3).is_ok() {}
         for _ in 0..3 {
             fs::read_to_string(tmp.path().join("config")).unwrap();
         }
