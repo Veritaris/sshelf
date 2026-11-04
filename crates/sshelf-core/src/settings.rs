@@ -29,6 +29,8 @@ pub struct Settings {
     pub reduce_motion: bool,
     /// What a right click on the tray icon opens (SPEC.md §10 *Tray*).
     pub tray_menu: TrayMenu,
+    /// How the tray / menu bar icon is drawn (SPEC.md §10 *Tray*).
+    pub tray_icon: TrayIconStyle,
     /// The onboarding tour (SPEC.md §10 *Onboarding tour*); missing until the
     /// welcome screen was answered, which shows it.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -88,6 +90,19 @@ pub enum TrayMenu {
     System,
 }
 
+/// The tray / menu bar icon's look.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TrayIconStyle {
+    /// The app icon: Magenta, the status dot in its colour.
+    #[default]
+    Colored,
+    /// One colour that suits the bar (macOS: a template image the system
+    /// tints; elsewhere white or black for the taskbar's theme), the bars
+    /// cut out. The status dot keeps its colour except on macOS.
+    Monochrome,
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -98,6 +113,7 @@ impl Default for Settings {
             cards_group_by: CardsGroupBy::Tag,
             reduce_motion: false,
             tray_menu: TrayMenu::Sshelf,
+            tray_icon: TrayIconStyle::Colored,
             tour: None,
         }
     }
@@ -125,6 +141,7 @@ mod tests {
             cards_group_by: CardsGroupBy::None,
             reduce_motion: true,
             tray_menu: TrayMenu::System,
+            tray_icon: TrayIconStyle::Monochrome,
             tour: Some(TourState::Done),
         };
         store.save(&settings).unwrap();
@@ -135,6 +152,7 @@ mod tests {
             "cards_group_by = \"none\"",
             "reduce_motion = true",
             "tray_menu = \"system\"",
+            "tray_icon = \"monochrome\"",
             "tour = \"done\"",
         ] {
             assert!(text.contains(line), "{line}: {text}");
@@ -175,6 +193,7 @@ mod tests {
         assert_eq!(loaded.data.cards_group_by, CardsGroupBy::Tag);
         assert!(!loaded.data.reduce_motion);
         assert_eq!(loaded.data.tray_menu, TrayMenu::Sshelf);
+        assert_eq!(loaded.data.tray_icon, TrayIconStyle::Colored);
         // No `tour` key: the welcome screen is due.
         assert_eq!(loaded.data.tour, None);
     }

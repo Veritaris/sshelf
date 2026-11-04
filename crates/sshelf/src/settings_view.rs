@@ -10,7 +10,8 @@ use egui::{Align, Align2, Color32, FontId, Frame, Id, Layout, Margin, RichText, 
 use sshelf_core::agent_service::{self, AgentService};
 use sshelf_core::core::{AppData, Command, SshInfo};
 use sshelf_core::settings::{
-    CardsGroupBy, CloseBehavior, DEFAULT_TERMINAL_COMMAND, HostListStyle, Settings, TrayMenu,
+    CardsGroupBy, CloseBehavior, DEFAULT_TERMINAL_COMMAND, HostListStyle, Settings, TrayIconStyle,
+    TrayMenu,
 };
 use sshelf_core::ssh::{AgentStatus, ToolSource};
 use sshelf_core::storage::LoadStatus;
@@ -41,6 +42,7 @@ pub struct SettingsView {
     cards_group_by: CardsGroupBy,
     reduce_motion: bool,
     tray_menu: TrayMenu,
+    tray_icon: TrayIconStyle,
     /// Toasts for the app ("Copied command").
     notices: Vec<String>,
     /// The tour asked for from Help: the chapter to start at.
@@ -59,6 +61,7 @@ impl SettingsView {
             cards_group_by: self.cards_group_by,
             reduce_motion: self.reduce_motion,
             tray_menu: self.tray_menu,
+            tray_icon: self.tray_icon,
             tour: self.base.as_ref().and_then(|b| b.tour),
         }
     }
@@ -79,6 +82,7 @@ impl SettingsView {
             self.cards_group_by = saved.cards_group_by;
             self.reduce_motion = saved.reduce_motion;
             self.tray_menu = saved.tray_menu;
+            self.tray_icon = saved.tray_icon;
             self.base = Some(saved.clone());
         }
     }
@@ -328,6 +332,26 @@ impl SettingsView {
                     self.tray_menu = menus[i];
                 }
             });
+            row(ui, "Tray icon", |ui| {
+                let styles = [TrayIconStyle::Colored, TrayIconStyle::Monochrome];
+                let at = styles.iter().position(|s| *s == self.tray_icon);
+                if let Some(i) = nav::segmented(
+                    ui,
+                    Id::unique("settings_tray_icon"),
+                    &["Colored", "Monochrome"],
+                    at.unwrap_or(0),
+                ) {
+                    self.tray_icon = styles[i];
+                }
+            });
+            if self.tray_icon == TrayIconStyle::Monochrome {
+                let note = if cfg!(target_os = "macos") {
+                    "Tinted by the menu bar; the status dot shows in the same colour."
+                } else {
+                    "White or black for the taskbar; the status dot keeps its colour."
+                };
+                ui.label(RichText::new(note).size(12.0).color(p.dim));
+            }
             row(ui, "Tray", |ui| {
                 let (text, color) = match tray {
                     Some(Ok(true)) => ("available".to_string(), p.green),
@@ -770,6 +794,8 @@ mod tests {
         harness.step();
         harness.get_by_label("System menu").click();
         harness.step();
+        harness.get_by_label("Monochrome").click();
+        harness.step();
         harness.step();
         harness.get_by_label("Save").click();
         harness.step();
@@ -779,6 +805,7 @@ mod tests {
             cards_group_by: CardsGroupBy::File,
             reduce_motion: true,
             tray_menu: TrayMenu::System,
+            tray_icon: TrayIconStyle::Monochrome,
             ..Settings::default()
         };
         assert_eq!(harness.state().1, [Command::SaveSettings(expected)]);

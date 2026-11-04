@@ -213,8 +213,13 @@ impl SshelfApp {
                 .data
                 .as_ref()
                 .is_some_and(|d| d.settings.tray_menu == settings::TrayMenu::System);
+        let style = self
+            .data
+            .as_ref()
+            .map(|d| d.settings.tray_icon)
+            .unwrap_or_default();
         if let Some(tray) = &mut self.tray {
-            tray.update(self.tray_model.clone(), native);
+            tray.update(self.tray_model.clone(), native, style);
         }
     }
 

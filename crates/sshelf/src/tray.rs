@@ -13,12 +13,14 @@ use std::sync::mpsc::{self, Receiver};
 
 use sshconf::HostList;
 use sshelf_core::core::{AppData, Command};
+use sshelf_core::settings::TrayIconStyle;
 use sshelf_core::supervisor::{GroupState, Owner, Snapshot, TunnelState};
 use tray_icon::menu::{IsMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 use tray_icon::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
 use crate::close_guard;
 use crate::icon::{self, Status};
+use crate::icon_shape;
 
 /// Recent hosts in the menu.
 pub const RECENT_HOSTS: usize = 8;
@@ -366,6 +368,8 @@ pub struct Tray {
     shown: Option<TrayModel>,
     /// The native menu is attached (not the sshelf menu).
     native: Option<bool>,
+    /// How the icon is drawn now.
+    look: Option<Look>,
     events: Receiver<TrayEvent>,
 }
 
@@ -410,7 +414,7 @@ impl Tray {
             }
         }));
         let icon = TrayIconBuilder::new()
-            .with_icon(tray_icon(Status::Idle)?)
+            .with_icon(tray_icon(Status::Idle, Look::of(TrayIconStyle::Colored))?)
             .with_tooltip("sshelf")
             // The system menu (when chosen) on the same button as ours.
             .with_menu_on_left_click(cfg!(target_os = "macos"))
@@ -420,6 +424,7 @@ impl Tray {
             icon,
             shown: None,
             native: None,
+            look: None,
             events,
         })
     }
@@ -427,15 +432,27 @@ impl Tray {
     /// Shows `model`, rebuilding what changed. `native`: the system menu
     /// opens on the menu's button (right; left on macOS); otherwise there is
     /// none, and those clicks come back as [`TrayAction::OpenMenu`].
-    pub fn update(&mut self, model: TrayModel, native: bool) {
-        if self.shown.as_ref() == Some(&model) && self.native == Some(native) {
+    pub fn update(&mut self, model: TrayModel, native: bool, style: TrayIconStyle) {
+        let look = Look::of(style);
+        if self.shown.as_ref() == Some(&model)
+            && self.native == Some(native)
+            && self.look == Some(look)
+        {
             return;
         }
         let previous = self.shown.as_ref();
-        if previous.is_none_or(|p| p.status != model.status)
-            && let Ok(icon) = tray_icon(model.status)
+        if (previous.is_none_or(|p| p.status != model.status) || self.look != Some(look))
+            && let Ok(icon) = tray_icon(model.status, look)
         {
+            #[cfg(target_os = "macos")]
+            let _ = if look.template {
+                self.icon.set_icon_templated(Some(icon))
+            } else {
+                self.icon.set_icon(Some(icon))
+            };
+            #[cfg(not(target_os = "macos"))]
             let _ = self.icon.set_icon(Some(icon));
+            self.look = Some(look);
         }
         if previous.is_none_or(|p| p.tooltip != model.tooltip) {
             let _ = self.icon.set_tooltip(Some(&model.tooltip));
@@ -471,9 +488,76 @@ impl Tray {
     }
 }
 
-fn tray_icon(status: Status) -> Result<tray_icon::Icon, String> {
-    tray_icon::Icon::from_rgba(icon::rgba(status), icon::SIZE, icon::SIZE)
-        .map_err(|e| e.to_string())
+fn tray_icon(status: Status, look: Look) -> Result<tray_icon::Icon, String> {
+    let rgba = icon::rgba(status, look.colors, look.template);
+    tray_icon::Icon::from_rgba(rgba, icon::SIZE, icon::SIZE).map_err(|e| e.to_string())
+}
+
+/// How the tray icon is drawn for a [`TrayIconStyle`] here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Look {
+    colors: icon_shape::Look,
+    /// A macOS template image (the system tints it; colours are dropped).
+    template: bool,
+}
+
+impl Look {
+    fn of(style: TrayIconStyle) -> Self {
+        let colors = match style {
+            TrayIconStyle::Colored => icon_shape::COLORED,
+            TrayIconStyle::Monochrome => icon_shape::Look {
+                body: mono_ink(),
+                cut: None,
+            },
+        };
+        Self {
+            colors,
+            template: cfg!(target_os = "macos") && style == TrayIconStyle::Monochrome,
+        }
+    }
+}
+
+/// The monochrome icon's colour: black on macOS (a template, tinted by the
+/// system); on Windows white or black for the taskbar's theme; white on
+/// Linux, whose panels are dark by default.
+fn mono_ink() -> [u8; 3] {
+    const WHITE: [u8; 3] = [255, 255, 255];
+    const BLACK: [u8; 3] = [0, 0, 0];
+    if cfg!(target_os = "macos") {
+        return BLACK;
+    }
+    #[cfg(target_os = "windows")]
+    if windows_taskbar_is_light() {
+        return BLACK;
+    }
+    WHITE
+}
+
+/// Windows: whether the taskbar is light ("Choose your default Windows
+/// mode": `SystemUsesLightTheme`; apps have their own setting). Read each
+/// time the icon is drawn, so a theme change shows with the next update.
+#[cfg(target_os = "windows")]
+fn windows_taskbar_is_light() -> bool {
+    use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
+    let wide = |s: &str| s.encode_utf16().chain([0]).collect::<Vec<u16>>();
+    let key = wide(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
+    let name = wide("SystemUsesLightTheme");
+    let mut value: u32 = 0;
+    let mut size = size_of::<u32>() as u32;
+    // SAFETY: the strings are NUL-terminated UTF-16; `value` and `size`
+    // describe a 4-byte buffer, which a REG_DWORD fits.
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            key.as_ptr(),
+            name.as_ptr(),
+            RRF_RT_REG_DWORD,
+            std::ptr::null_mut(),
+            (&mut value as *mut u32).cast(),
+            &mut size,
+        )
+    };
+    status == 0 && value == 1
 }
 
 /// Menu items for `entries`.

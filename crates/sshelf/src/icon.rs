@@ -69,8 +69,17 @@ pub const SIZE: u32 = 32;
 
 /// RGBA pixels, row by row, with `status`'s dot (the shape is shared with
 /// the `.exe` icon that `build.rs` writes).
-pub fn rgba(status: Status) -> Vec<u8> {
-    icon_shape::draw(SIZE, status.color().map(|c| [c.r(), c.g(), c.b()]))
+/// `look`: the colours; `ink_dot`: the dot in the body's colour (a macOS
+/// template image keeps only the alpha, so a coloured dot would be lost).
+pub fn rgba(status: Status, look: icon_shape::Look, ink_dot: bool) -> Vec<u8> {
+    let dot = status.color().map(|c| {
+        if ink_dot {
+            look.body
+        } else {
+            [c.r(), c.g(), c.b()]
+        }
+    });
+    icon_shape::draw(SIZE, look, dot)
 }
 
 /// The window's icon (taskbar button, Alt+Tab): drawn larger than the tray's
@@ -80,7 +89,11 @@ const WINDOW_SIZE: u32 = 64;
 /// The window icon with `status`'s dot, as the tray icon has it.
 pub fn egui_icon(status: Status) -> egui::IconData {
     egui::IconData {
-        rgba: icon_shape::draw(WINDOW_SIZE, status.color().map(|c| [c.r(), c.g(), c.b()])),
+        rgba: icon_shape::draw(
+            WINDOW_SIZE,
+            icon_shape::COLORED,
+            status.color().map(|c| [c.r(), c.g(), c.b()]),
+        ),
         width: WINDOW_SIZE,
         height: WINDOW_SIZE,
     }
@@ -117,7 +130,7 @@ mod tests {
 
     #[test]
     fn large_sizes_have_smooth_edges() {
-        let big = icon_shape::draw(256, None);
+        let big = icon_shape::draw(256, icon_shape::COLORED, None);
         assert_eq!(big.len(), 256 * 256 * 4);
         // Some pixel on the rounded corner is partly covered.
         let partial = (0..256 * 256).any(|i| {
@@ -135,15 +148,33 @@ mod tests {
     #[test]
     fn icon_has_corners_bars_and_a_status_dot() {
         let p = &Palette::ONE_DARK;
-        let idle = rgba(Status::Idle);
+        let colored = |s| rgba(s, icon_shape::COLORED, false);
+        let idle = colored(Status::Idle);
         assert_eq!(idle.len(), (SIZE * SIZE * 4) as usize);
         assert_eq!(pixel(&idle, 0, 0)[3], 0, "transparent corner");
         assert_eq!(pixel(&idle, 4, 16), rgb(p.accent));
         assert_eq!(pixel(&idle, 12, 9), rgb(p.bg_dark));
-        assert_eq!(pixel(&rgba(Status::Running), 25, 25), rgb(p.green));
-        assert_eq!(pixel(&rgba(Status::Busy), 25, 25), rgb(p.yellow));
-        assert_eq!(pixel(&rgba(Status::Failed), 25, 25), rgb(p.red));
+        assert_eq!(pixel(&colored(Status::Running), 25, 25), rgb(p.green));
+        assert_eq!(pixel(&colored(Status::Busy), 25, 25), rgb(p.yellow));
+        assert_eq!(pixel(&colored(Status::Failed), 25, 25), rgb(p.red));
         assert_ne!(pixel(&idle, 25, 25), rgb(p.green));
+    }
+
+    /// Monochrome: one colour, the bars and the dot's ring see-through; the
+    /// dot coloured, or in the ink for a template image.
+    #[test]
+    fn monochrome_cuts_out_the_bars() {
+        let p = &Palette::ONE_DARK;
+        let white = icon_shape::Look {
+            body: [255, 255, 255],
+            cut: None,
+        };
+        let mono = rgba(Status::Running, white, false);
+        assert_eq!(pixel(&mono, 4, 16), [255, 255, 255, 255]);
+        assert_eq!(pixel(&mono, 12, 9)[3], 0, "bar cut out");
+        assert_eq!(pixel(&mono, 25, 25), rgb(p.green));
+        let template = rgba(Status::Running, white, true);
+        assert_eq!(pixel(&template, 25, 25), [255, 255, 255, 255]);
     }
 
     fn status(state: TunnelState) -> sshelf_core::supervisor::TunnelStatus {

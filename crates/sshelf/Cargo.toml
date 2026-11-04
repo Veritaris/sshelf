@@ -37,11 +37,13 @@ raw-window-handle = { version = "0.6.2" }
 # The frameless window's Windows fix (src/window.rs, `native`): DWM
 # attributes and a subclass on the root window. The tray menu
 # (src/tray_menu.rs, `native`): a window that never activates, closed by
-# low-level mouse/keyboard hooks on their own thread.
+# low-level mouse/keyboard hooks on their own thread. The registry: whether
+# the taskbar is light (the monochrome tray icon, src/tray.rs).
 windows-sys = { version = "0.61.2", features = [
     "Win32_Foundation",
     "Win32_Graphics_Dwm",
     "Win32_System_LibraryLoader",
+    "Win32_System_Registry",
     "Win32_System_Threading",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",

@@ -46,7 +46,7 @@ fn main() {
 fn ico(sizes: &[u32]) -> Vec<u8> {
     let images: Vec<Vec<u8>> = sizes
         .iter()
-        .map(|&size| dib(size, &icon_shape::draw(size, None)))
+        .map(|&size| dib(size, &icon_shape::draw(size, icon_shape::COLORED, None)))
         .collect();
     let mut out = Vec::new();
     // ICONDIR: reserved, type 1 (icon), count.

@@ -463,7 +463,7 @@ pub mod macos {
     /// The icon body centred on the transparent canvas.
     fn dock_rgba(status: Status) -> Vec<u8> {
         let dot = status.color().map(|c| [c.r(), c.g(), c.b()]);
-        let body = icon_shape::draw(BODY, dot);
+        let body = icon_shape::draw(BODY, icon_shape::COLORED, dot);
         let margin = (CANVAS - BODY) / 2;
         let mut canvas = vec![0u8; (CANVAS * CANVAS * 4) as usize];
         for y in 0..BODY {
