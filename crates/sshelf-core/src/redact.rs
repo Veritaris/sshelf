@@ -194,6 +194,13 @@ impl Redactor {
         out
     }
 
+    /// Whether `text` holds anything sensitive (a token).
+    pub fn finds(&self, text: &str) -> bool {
+        self.segments(text, false)
+            .iter()
+            .any(|s| matches!(s, Segment::Token(..)))
+    }
+
     /// `text` with every token replaced by [`DOTS`] and every hidden alias
     /// by "host N": for places that can't draw tokens (the native tray menu,
     /// window titles).
@@ -812,6 +819,17 @@ Host same\n    HostName same\n";
             format!("{DOTS}@{DOTS} :22")
         );
         assert_eq!(r.mask_plain("web is up", true), "host 1 is up");
+    }
+
+    #[test]
+    fn finds_tells_harmless_values_apart() {
+        let (r, _) = redactor(CONFIG, &[], false);
+        assert!(r.finds("10.0.4.12"));
+        assert!(r.finds("ssh to deploy@x"));
+        assert!(!r.finds("30"));
+        assert!(!r.finds("no"));
+        // Aliases are not sensitive by themselves.
+        assert!(!r.finds("web"));
     }
 
     #[test]
