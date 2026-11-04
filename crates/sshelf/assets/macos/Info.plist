@@ -12,7 +12,7 @@
     <key>CFBundleIconFile</key>
     <string>sshelf</string>
     <key>CFBundleIdentifier</key>
-    <string>io.github.veritaris.sshelf</string>
+    <string>me.veritaris.sshelf</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>

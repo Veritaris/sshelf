@@ -6,7 +6,7 @@ sshelf is a cross-platform desktop app (Windows, macOS, Linux) that puts a visua
 - GUI: egui / eframe
 - License: MIT
 - Signing: none for now (unsigned builds for all platforms; the macOS `.app` is signed ad hoc, which Apple Silicon needs, not with a Developer ID)
-- Release packages: Windows `.7z` (the `.exe` carries its icon and version information); Linux `.tar.gz` with a desktop entry and icon under `share/`; macOS a `.dmg` with `sshelf.app` (the full icon set as `sshelf.icns`, drawn by `examples/iconset.rs`; `Info.plist` from `assets/macos/`, bundle id `io.github.veritaris.sshelf`) and an Applications shortcut
+- Release packages: Windows `.7z` (the `.exe` carries its icon and version information); Linux `.tar.gz` with a desktop entry and icon under `share/`; macOS a `.dmg` with `sshelf.app` (the full icon set as `sshelf.icns`, drawn by `examples/iconset.rs`; `Info.plist` from `assets/macos/`, bundle id `me.veritaris.sshelf`) and an Applications shortcut
 
 This document is the source of truth for scope and design. It describes the **MVP**, the **iterations** after it, and the **final shape**. Implement milestone by milestone; do not pull later-milestone features forward unless this document is updated first.
 
