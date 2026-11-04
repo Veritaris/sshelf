@@ -90,6 +90,12 @@ pub enum Command {
         key: String,
     },
     SaveSettings(Settings),
+    /// Streamer mode's two switches (SPEC.md §10 *Streamer mode*): applied
+    /// at once to the saved settings, outside any Settings draft.
+    SetStreamer {
+        on: bool,
+        hide_aliases: bool,
+    },
     /// Re-detect the ssh binary, version, agent and service.
     RefreshSsh,
     /// Open a terminal session for an alias.
@@ -718,6 +724,7 @@ impl Worker {
                     }
                 }),
                 Command::SaveSettings(settings) => self.save_settings(settings),
+                Command::SetStreamer { on, hide_aliases } => self.set_streamer(on, hide_aliases),
                 Command::RefreshSsh => self.refresh_ssh(),
                 Command::Connect(alias) => self.connect(&alias),
                 Command::SaveTunnel(tunnel) => self.save_tunnel(tunnel),
@@ -1382,6 +1389,21 @@ impl Worker {
                 self.refresh_ssh();
             }
             Err(e) => self.error(e.to_string()),
+        }
+    }
+
+    /// Streamer mode takes effect even when `settings.toml` can't be
+    /// written: masking matters more than remembering it, and the error says
+    /// it won't survive a restart. The app shows its own toast.
+    fn set_streamer(&mut self, on: bool, hide_aliases: bool) {
+        let mut settings = self.data.settings.clone();
+        settings.streamer_mode = on;
+        settings.streamer_hide_aliases = hide_aliases;
+        let saved = self.store.save(&settings);
+        self.data.settings = settings;
+        self.publish_data();
+        if let Err(e) = saved {
+            self.error(e.to_string());
         }
     }
 

@@ -669,6 +669,43 @@ fn saving_settings_publishes_them_and_says_so() {
 }
 
 #[test]
+fn streamer_mode_applies_at_once_and_keeps_the_other_settings() {
+    let tmp = tempfile::tempdir().unwrap();
+    let paths = Paths::new(&tmp.path().join("home"), tmp.path().join("app"));
+    let saved = Settings {
+        ssh_path: Some(fake_ssh()),
+        reduce_motion: true,
+        ..Settings::default()
+    };
+    Store::new(&paths.app_dir).save(&saved).unwrap();
+    let (core, events) = Core::start(paths.clone(), Arc::new(|| {}));
+    core.send(Command::SetStreamer {
+        on: true,
+        hide_aliases: true,
+    });
+    let expected = Settings {
+        streamer_mode: true,
+        streamer_hide_aliases: true,
+        ..saved
+    };
+    let mut notices = Vec::new();
+    wait_for(&events, "streamer mode on", |e| match e {
+        Event::Data(data) if data.settings == expected => Some(()),
+        Event::Notice(text) => {
+            notices.push(text);
+            None
+        }
+        _ => None,
+    });
+    assert!(
+        notices.is_empty(),
+        "the app shows its own toast: {notices:?}"
+    );
+    assert_eq!(Store::new(&paths.app_dir).load::<Settings>().data, expected);
+    drop(core);
+}
+
+#[test]
 fn missing_config_is_not_an_error_and_is_watched() {
     let tmp = tempfile::tempdir().unwrap();
     let home = tmp.path().join("home");
