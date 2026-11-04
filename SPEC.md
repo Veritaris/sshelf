@@ -42,7 +42,7 @@ Cargo workspace with UI-independent core crates:
 | `sshconf` | Lossless `ssh_config` parser/editor (CST), `Include` resolution, write-back | No |
 | `sshelf-core` | App data model (metadata, tunnels, groups, settings, history), storage + migrations, ssh binary discovery, `ssh -G` resolution, host key checks, tunnel supervisor | No |
 | `sshelf` (app) | egui/eframe frontend; renders state, sends commands to core | Yes |
-| `fake-ssh` (test bin) | Scriptable stand-in for `ssh` used by supervisor tests | No |
+| `fake-ssh` (lib + test bin) | Scriptable stand-in for `ssh`: used by supervisor tests, and (M10) by the onboarding tour, embedded in the app as `sshelf --fake-ssh` | No |
 
 Rules:
 - The UI never spawns processes or touches files directly; it sends commands to core and renders state/events from core.
@@ -61,7 +61,7 @@ Location: the platform config directory for `sshelf` (via `directories`). Human-
 
 | File | Contents |
 |---|---|
-| `settings.toml` | ssh binary override, terminal template, close behavior choice, UI prefs |
+| `settings.toml` | ssh binary override, terminal template, close behavior choice, UI prefs, onboarding tour state (`tour`, M10) |
 | `hosts.toml` | Per-host metadata keyed by alias: tags, notes, favorite, color, display order |
 | `tunnels.toml` | Tunnel definitions and groups |
 | `history.toml` | Recent connections launched from the app (for the tray menu) |
@@ -243,6 +243,7 @@ ssh -v -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o BatchMode=yes
 - Settings allow overriding the path on all platforms. Companion tools are taken from the overridden binary's directory; if one is missing there, the system's is used (Windows' built-in OpenSSH, else `PATH`).
 - Settings show: selected binary, `ssh -V` output, agent reachability and number of loaded keys (`ssh-add -l`).
 - **Windows agent:** detect when the `ssh-agent` Windows service is stopped or disabled and explain how to enable it (requires admin; the app does not do it itself).
+- **Tour sandbox (M10):** an ssh tool is a program plus prefix arguments and environment, not just a path; companions are found the same way. Only the onboarding tour's sandbox Core sets one: `[<sshelf executable>, "--fake-ssh"]` with `FAKE_SSH_SCENARIOS` pointing at the sample, and `--as ssh-add` for the agent tool. It never comes from `settings.toml` and Settings can't select it. The tour's toasts and fake servers are the only place §1 rule 4 does not apply, since nothing connects (§10 *Onboarding tour*).
 - **Auth under `BatchMode`:** when a tunnel fails because a key is not available in the agent, show a clear message ("key not loaded in agent") with a hint, not a raw error.
 
 ---
@@ -410,6 +411,104 @@ One dropdown component is used for every select. The playable reference is the c
 - **Key generation:** *Generate key…* (Lucide `key-round`) sits next to the *Form / Raw text* tabs in the host editor. The dialog uses the standard dropdown for the algorithm (Ed25519 marked "recommended"; security keys in their own group, noted as opening a terminal), password fields with a show/hide eye, a stepper for KDF rounds, a file field (typed path; no file picker), and a yellow banner while the passphrase is empty. It stays a window, not a modal (§11), styled like the dialogs (640 px, 16 px corners, an icon tile and *Close* in the header, the footer under a line). The KDF stepper is − / a typed number / +. *Copy* (fingerprint, public key) shows the usual toast; "How to start it" next to a stopped agent opens *Settings*. The result dialog shows fingerprint, type and passphrase state, the public key with a copy icon, and *Next steps* as rows (button + one-line explanation): *Use in this host*, *Add to agent* (disabled with the reason when the agent isn't available), *Install on server*.
 - **Switches, not checkboxes:** the tunnel's *Reconnect automatically* and the group's *Start with sshelf* are Magenta switches. A group's tunnels are picked with the multi-select dropdown (rows show tunnel name and host). Groups that start with sshelf show a "starts with sshelf" chip (Lucide `power`) in their detail.
 
+### Onboarding tour (milestone 10)
+
+A first-run tour of every main feature, played on the real UI against sample data. Reference boards: `Tour-Welcome` (first-launch screen), `Tour-Step` (playable: the welcome screen and all 27 steps), `Tour-Steps` (storyboard: every step's text and the glossary, which are final). The views under the overlay on `Tour-Step` are simplified sketches. The tour runs on the real screens; only the overlay, popover, glint and welcome screen come from the boards. Implementation notes: `docs/onboarding-tour.md`.
+
+- **Welcome screen:**
+  - **When:** shown instead of the main UI while `settings.toml` has no `tour` key. That means new installs, and existing installs once.
+  - **Layout:** the app logo (64 px), "Welcome to sshelf", one line about what sshelf is, then two 16 px-cornered cards side by side:
+    - *Take the tour*, with a Magenta outline and the primary button *Start the tour*.
+    - *Start with my config*, showing the main config path and its host count, with *Open my hosts*. With no config: "No `~/.ssh/config` yet — your first host creates it", and its button is *New host*.
+  - **Below the cards:** "You can take the tour again any time from Settings › Help."
+  - **State:** either choice writes `tour = "offered"`; ending the tour in any way writes `tour = "done"`. A missing key is a default, so the file version stays the same.
+- **Sandbox (hard rules):**
+  - **Isolation:** while the tour runs, nothing reads or writes the user's ssh config, `known_hosts`, keys, agent or app data. Nothing connects anywhere, and no terminal opens.
+  - **The sandbox Core:** the tour runs a second `Core` with its own temporary home and app data dir (`<temp>/sshelf-tour-<pid>`). It holds a sample `ssh_config`, an empty `known_hosts` and the sample `hosts.toml` / `tunnels.toml`. It is deleted when the tour ends or the app quits; leftovers from a crashed run are deleted at the next start. The user's own `Core` is left alone and takes over again afterwards.
+  - **Its ssh is sshelf itself:** the binary plus the prefix argument `--fake-ssh` (§8), for ssh and every companion tool (`ssh-add`), scripted per sample host. Only the sandbox Core can use it; Settings can't select it.
+  - **Real code where safe:** key generation uses the real generator (§11) into the temporary `.ssh`.
+  - **Toasts instead of side effects:** *Connect*, *Load key into agent*, the security-key terminal, *Stop and quit* and *Minimize to tray* don't run. A toast says what would happen ("Tour: would run `ssh web-01` in your terminal").
+  - **Install on server** runs against the fake server, not in a terminal. After it, the tour starts the failed tunnel again.
+  - **Groups:** *Start with sshelf* has no effect for sandbox groups.
+  - **Ports:** sample tunnels listen on high local ports (15432, 18080, 19090, 12049, 18443). When the sandbox is built, a port that is busy on this computer is moved to a free one, so the tour never fails because of the user's own services.
+- **Sample world** (all names made up, `*.example.com`). The tour starts with no tunnels running, so every change is visible.
+
+  | Item | Contents |
+  |---|---|
+  | Hosts | `web-01`, `web-02`, `db-primary` (via `bastion`), `bastion`, `staging-api`, `ci-runner`, `backup-nas`; a `Host *` block with `IdentityFile ~/.ssh/id_ed25519` and `ServerAliveInterval 30` |
+  | fake-ssh scenarios | `web-01`…`bastion`: ok. `staging-api`: no key accepted. `ci-runner`: unreachable. `backup-nas`: no key accepted until a key is installed, then ok. |
+  | Tunnels | `db tunnel` 15432 → db-primary:5432 via bastion. `staging api` 18080 → staging-api:80. `ci metrics` 19090 → ci-runner:9090. `backup` 12049 → backup-nas:2049. The tour adds `web admin` 18443 → localhost:443 on staging-api. |
+  | Groups | `Work on staging` (staging api, ci metrics), `Databases` (db tunnel) |
+- **While the tour runs:**
+  - **Drag strip:** a Magenta "Tour · sample data" chip, "nothing here touches your files" and *Exit tour*.
+  - **Status bar:** shows the fake ssh version.
+  - **Settings:** the rail item is disabled with the tooltip "Not available during the tour".
+  - **Tray:** mirrors the sandbox under a "Tour" header.
+  - **Closing the window** outside step 23 ends the tour first. The normal close behaviour then applies to the user's own Core.
+- **Steps:** 27 in 6 chapters, titles and texts exactly as on `Tour-Steps`.
+  - *Watch* steps only explain. *Do it* steps wait for the action.
+  - "Done" means the Core state the step asks for, not a click, so the user's own click and *Show me* both work.
+  - "Busy" means the action is still running; Next is disabled meanwhile.
+
+  | # | Chapter | Step | Kind | Spotlight | Done when |
+  |---|---|---|---|---|---|
+  | 1 | Hosts | Your hosts | watch | host rows | — |
+  | 2 | Hosts | Connect | do it | *Connect* | clicked (toast) |
+  | 3 | Hosts | Health check | watch | Health line | — |
+  | 4 | Hosts | Check all hosts | do it | host list with *Check all* | all 7 checked (busy while running) |
+  | 5 | Hosts | What ssh really uses | do it | detail tabs and table | *Effective config* tab open |
+  | 6 | Editing | Edit safely | do it | *Edit* | editor open |
+  | 7 | Editing | Form or raw text | do it | editor tabs and form | *Raw text* open. The tour has changed `User` to `admin` on entering the editor. |
+  | 8 | Editing | Review, then save | do it | *Changes to write* and *Save* | saved (sample file) |
+  | 9 | Tunnels | Tunnels | do it | Tunnels rail item | Tunnels view open |
+  | 10 | Tunnels | Start a tunnel | do it | db tunnel row | Running (busy while Starting) |
+  | 11 | Tunnels | Running shows everywhere | watch | status bar count, plus the logo and Tunnels rail item as extra holes | — |
+  | 12 | Tunnels | Make your own | do it | *New tunnel* | tunnel editor open |
+  | 13 | Tunnels | Three fields per forward | watch | the forward row (pre-filled: web admin, staging-api, 18443 → localhost:443) | — |
+  | 14 | Tunnels | Save it | do it | editor footer | saved |
+  | 15 | Fixing problems | When it fails | do it | backup row and its failure banner | backup Failed (busy while Starting) |
+  | 16 | Fixing problems | Fix it | do it | *Generate key…* in the banner | key window open |
+  | 17 | Fixing problems | Generate key | do it | the key window (Ed25519, passphrase pre-filled) | key created |
+  | 18 | Fixing problems | Put it to use | do it | the result window | *Install on server* done, backup restarts and reaches Running |
+  | 19 | Groups | Groups | do it | Groups rail item | Groups view open |
+  | 20 | Groups | One switch | do it | Work on staging row | group running (busy while starting) |
+  | 21 | Groups | Edit a group | do it | its *Edit* | group editor open |
+  | 22 | Groups | Group editor | do it | the editor (tour adds web admin, turns on Start with sshelf) | saved |
+  | 23 | Window & tray | Closing the window | do it | window *Close* | close dialog open |
+  | 24 | Window & tray | Quit or keep running | do it | the close dialog | *Minimize to tray* clicked (toast; the window stays) |
+  | 25 | Window & tray | From the tray | watch | none; the popover shows a picture of the sshelf tray menu with the sandbox's live state | — |
+  | 26 | Window & tray | Status bar | watch | status bar, showing backup's earlier error | — |
+  | 27 | Done | You're set | — | none | *Open my hosts* ends the tour |
+
+- **Moving through the tour:**
+  - **Entering a step** switches to the view, editor, tab or dialog it needs, also when entered with Back.
+  - **Back** never undoes an action. On step 1, Back returns to the welcome screen.
+  - **Advancing:** an action that completes at once (a click that opens something) advances by itself. One that takes time (start, check) stays on its step until done.
+  - **Ending:** *Skip tour*, *Exit tour*, `Esc`, finishing or quitting ends the tour. That drops the sandbox, writes `tour = "done"` and opens the user's hosts.
+- **Overlay:**
+  - **Dimming:** the window is dimmed with `rgba(24,26,31,.72)` except one or more holes around the targets: their union plus 6 px, 8 px corners, a 2 px Magenta ring.
+  - **Input:** clicks and hovers inside a hole reach the real UI; outside they are ignored.
+  - **Glide:** the hole glides between steps (240 ms, in-out, through `motion::tween_rect`).
+  - **No-target steps:** keep the dimming with the ring faded out. Never swap the shape mid-glide, or the ring colour smears over the window.
+  - **Late targets:** a target that isn't drawn yet (just switched screens) is waited for. After 30 frames without it, the step falls back to no spotlight and logs a warning.
+- **Popover:**
+  - **Size and placement:** 340 px wide, `#21252B`, 16 px corners, 1 px `#3E4451` outline, no shadow. It is placed right of the spotlight, else below, else left, else above (16 px gap, 12 px from the window edge), and glides with it.
+  - **Header:** "*Chapter* · N of 27" with the chapter in Magenta, and *Skip tour*.
+  - **Body:** the title (16/600) and the text (13).
+  - **Do-it hint:** on *do it* steps, a Magenta hint (12, Lucide `mouse-pointer-click`).
+  - **Footer:** a 4 px progress bar (width tweened 240 ms), *Back*, and the primary button. It reads *Show me* while the action is pending (it performs the action), *Next* once done, disabled while busy, and *Open my hosts* on the last step.
+- **Glint:** on a *do it* step, the element to click gets a light sweep while the action is pending (not while busy).
+  - **Shape:** a diagonal white band, peak alpha 0.32, crossing in about 1 s and repeating every 2.4 s (in-out). It is clipped to the element's rounded shape: egui clips only to rectangles, so the band is built from the rounded outline.
+  - **Reduce motion:** a static faint highlight instead.
+- **Glossary terms:** words in brackets in step text (13 terms, texts on `Tour-Steps`) get a dotted Magenta underline. Hovering one shows the standard tooltip (§10 *Interaction and motion*) at the popover's full width: below the popover when it sits in the upper part of the window, above otherwise. It never leaves the window.
+- **Reduce motion:** no glides (the spotlight and popover jump) and a static glint.
+- **Settings › Help:** a new section with two items, both disabled with a reason while one of the user's own tunnels runs (the tour would swap Cores):
+  - *Take the tour again*;
+  - *Start a chapter…* (dropdown of the 6 chapters). Before the chapter's first step, the sandbox replays the earlier chapters' actions without UI.
+- **Small additions to the normal app, used by the tour:**
+  - The Tunnels rail item carries the same green status dot as the app icon while any tunnel runs.
+  - A tunnel failure banner for "no key accepted" offers the same fixes as the health banner (*Generate key…* for the tunnel's host, *Load key into agent*).
+
 ---
 
 ## 11. Key generation (milestone 7)
@@ -513,6 +612,37 @@ Each milestone ends with its acceptance criteria met, tests green on all three O
   - Tray: a status header, *Retry* on degraded groups, a failed tunnel opens the window on that tunnel, a banner while a host key waits; tooltip "sshelf · N tunnels running".
   - *Check all* stops when clicked again (above) through a new `CancelHealth` command: queued checks are dropped, running ones finish.
 - **Done when:** every screen matches its board (layout, colours, radii, icons, timings); *Reduce motion* turns all animation off; the sshelf tray menu works with the window hidden or falls back to the system menu; UI tests and CI pass on all three OSes.
+
+### M10 — Onboarding tour
+- Everything in §10 *Onboarding tour*, with the §8 sandbox ssh and the `fake-ssh` changes below. Reference boards: `docs/design/Tour-*.dc.html`; how-to and authoring guide: `docs/onboarding-tour.md`.
+- Order:
+  1. `fake-ssh` becomes a library (`fake_ssh::run(args) -> ExitCode`) plus its thin test binary. The existing tests pass unchanged. It gains:
+     - a scenario file (`FAKE_SSH_SCENARIOS`: alias → scenario, with `after_install`);
+     - per-host `-G` output from the sample bundle;
+     - a fake `authorized_keys` per sample server;
+     - `--as ssh-add`.
+  2. `sshelf --fake-ssh …` in `main.rs`, before any window, tray or lock. Check it early on a Windows release build (GUI subsystem, piped stdio, exit codes).
+  3. Core:
+     - the ssh tool becomes program + prefix args + env, and so do companions (§8);
+     - the sandbox options on `Core::start` (paths, ssh, no terminals, `TourWouldRun` events, install through fake-ssh, no start-on-launch groups);
+     - the `tour` settings key.
+  4. UI:
+     - the `tour/` module (state machine, steps and glossary as data, target registry, overlay and popover, glint, the sandbox builder and the sample bundle, the welcome screen);
+     - target registration in the views;
+     - the drag strip chip, the disabled Settings rail item and the tray header;
+     - then the chapters one by one.
+  5. Settings › Help, and *Start a chapter…* with prerequisite replay.
+  6. The two small additions (Tunnels rail dot; key fixes in the "no key accepted" tunnel banner).
+- Tests:
+  - **Isolation:** the whole tour is run headless (`egui_kittest`, *Reduce motion*) with *Show me* on every step. It asserts every step's target is registered, and that nothing outside the sandbox dir was opened: point `Paths` for the user's Core at a dir that fails on access, and put an `ssh` that panics on `PATH`.
+  - **fake-ssh:** unit tests for the scenarios, `after_install` and `--as`.
+  - **Glossary:** a test fails when a `[term]` has no glossary entry, or an entry is unused.
+- **Done when:**
+  - a first launch shows the welcome screen;
+  - the tour plays all 27 steps on the real screens with the overlay as on `Tour-Step`;
+  - nothing outside the sandbox is touched, and it is deleted afterwards;
+  - the tour and each chapter can be replayed from Settings;
+  - CI passes on all three OSes.
 
 ---
 
