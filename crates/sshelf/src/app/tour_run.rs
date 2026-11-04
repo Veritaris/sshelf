@@ -761,6 +761,7 @@ mod tests {
             }),
             temp: temp.clone(),
             user_paths: Some(paths.clone()),
+            show: None,
         };
         let mut harness = test_util::harness()
             .with_size([1280.0, 800.0])
@@ -814,6 +815,7 @@ mod tests {
             }),
             temp,
             user_paths: Some(paths),
+            show: None,
         };
         let mut harness = test_util::harness()
             .with_size([1280.0, 800.0])

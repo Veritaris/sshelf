@@ -2,8 +2,9 @@
 //! current view, the status bar (errors) and toasts (successes). All side
 //! effects go through the core.
 
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
+use std::sync::{Arc, OnceLock};
 use std::time::SystemTime;
 
 use sshelf_core::core::{AppData, Command, ConfigSnapshot, Core, Event, ParentWindow, SshInfo};
@@ -41,16 +42,44 @@ pub struct Startup {
     pub temp: std::path::PathBuf,
     /// The user's Core runs on these paths; `None`: detected.
     pub user_paths: Option<Paths>,
+    /// "Show the window" requests from later starts (single instance);
+    /// `None` in tests, which never take the instance lock.
+    pub show: Option<Arc<ShowRequests>>,
 }
 
 impl Startup {
-    pub fn real() -> Self {
+    pub fn real(show: Arc<ShowRequests>) -> Self {
         Self {
             tray: true,
             fake_ssh: None,
             temp: std::env::temp_dir(),
             user_paths: None,
+            show: Some(show),
         }
+    }
+}
+
+/// Requests to show the window, from later starts of sshelf
+/// (`sshelf_core::instance`): set on the instance's listener thread, carried
+/// out in `logic`, which also runs while the window is hidden in the tray.
+#[derive(Default)]
+pub struct ShowRequests {
+    pending: AtomicBool,
+    /// Set once the app exists; a request before that waits in `pending`.
+    ctx: OnceLock<egui::Context>,
+}
+
+impl ShowRequests {
+    /// Called from the listener thread.
+    pub fn request(&self) {
+        self.pending.store(true, Ordering::SeqCst);
+        if let Some(ctx) = self.ctx.get() {
+            ctx.request_repaint();
+        }
+    }
+
+    fn take(&self) -> bool {
+        self.pending.swap(false, Ordering::SeqCst)
     }
 }
 
@@ -103,8 +132,8 @@ fn parent_window(cc: &eframe::CreationContext<'_>) -> Option<ParentWindow> {
 }
 
 impl SshelfApp {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        Self::with(cc, Startup::real())
+    pub fn new(cc: &eframe::CreationContext<'_>, show: Arc<ShowRequests>) -> Self {
+        Self::with(cc, Startup::real(show))
     }
 
     pub fn with(cc: &eframe::CreationContext<'_>, startup: Startup) -> Self {
@@ -113,6 +142,10 @@ impl SshelfApp {
         #[cfg(target_os = "windows")]
         window::native::prepare(cc);
         let ctx = cc.egui_ctx.clone();
+        if let Some(show) = &startup.show {
+            // From now on a later start's request wakes the app.
+            let _ = show.ctx.set(ctx.clone());
+        }
         // A crashed run's tour sandbox goes now.
         sandbox::clean_leftovers(&startup.temp);
         // The event loop runs by now, as macOS requires for tray icons.
@@ -392,6 +425,11 @@ impl eframe::App for SshelfApp {
     /// the tray are handled here, the drawing in [`Self::ui`].
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.apply_events(ctx);
+        // sshelf was started again: show this window instead (also from the
+        // tray, where only `logic` runs).
+        if self.startup.show.as_ref().is_some_and(|s| s.take()) {
+            close_guard::show(ctx);
+        }
         motion::set_reduce_motion(
             ctx,
             self.data.as_ref().is_some_and(|d| d.settings.reduce_motion),

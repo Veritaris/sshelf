@@ -15,6 +15,7 @@ pub mod health;
 pub mod hints;
 pub mod history;
 pub mod hostkeys;
+pub mod instance;
 pub mod keygen;
 pub mod metadata;
 pub mod orphans;
