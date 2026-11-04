@@ -1,9 +1,11 @@
-//! The app icon, drawn in code (no image assets yet): a rounded One Dark
-//! square with three shelf bars, plus the [`Status`] dot (tray).
+//! The app icon, drawn in code ([`icon_shape`], also the `.exe` icon): a
+//! rounded Magenta square with three shelf bars, plus the [`Status`] dot
+//! (tray).
 
 use sshelf_core::supervisor::{GroupState, Snapshot, TunnelState};
 use sshelf_core::tunnels::Group;
 
+use crate::icon_shape;
 use crate::theme::Palette;
 
 /// The app's one status dot (SPEC.md §10 *Status marks*): green while
@@ -65,37 +67,10 @@ impl Status {
 /// Width and height in pixels.
 pub const SIZE: u32 = 32;
 
-/// RGBA pixels, row by row, with `status`'s dot.
+/// RGBA pixels, row by row, with `status`'s dot (the shape is shared with
+/// the `.exe` icon that `build.rs` writes).
 pub fn rgba(status: Status) -> Vec<u8> {
-    let p = &Palette::ONE_DARK;
-    let size = SIZE as f32;
-    let mut pixels = Vec::with_capacity((SIZE * SIZE * 4) as usize);
-    for y in 0..SIZE {
-        for x in 0..SIZE {
-            let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
-            let mut color = [0, 0, 0, 0];
-            // Rounded square, 1 px margin, 6 px corner radius.
-            if inside_rounded(fx, fy, 1.0, size - 1.0, 6.0) {
-                color = rgb(p.accent);
-            }
-            // Three shelf bars.
-            let bar = (8.0..24.0).contains(&fx)
-                && [8.5, 14.5, 20.5]
-                    .iter()
-                    .any(|top| (*top..top + 3.0).contains(&fy));
-            if bar {
-                color = rgb(p.bg_dark);
-            }
-            if let Some(dot) = status.color() {
-                let d = ((fx - 25.0).powi(2) + (fy - 25.0).powi(2)).sqrt();
-                if d <= 6.5 {
-                    color = rgb(if d <= 5.0 { dot } else { p.bg_dark });
-                }
-            }
-            pixels.extend_from_slice(&color);
-        }
-    }
-    pixels
+    icon_shape::draw(SIZE, status.color().map(|c| [c.r(), c.g(), c.b()]))
 }
 
 pub fn egui_icon() -> egui::IconData {
@@ -106,22 +81,32 @@ pub fn egui_icon() -> egui::IconData {
     }
 }
 
-fn rgb(c: egui::Color32) -> [u8; 4] {
-    [c.r(), c.g(), c.b(), 255]
-}
-
-fn inside_rounded(x: f32, y: f32, min: f32, max: f32, radius: f32) -> bool {
-    if !(min..max).contains(&x) || !(min..max).contains(&y) {
-        return false;
-    }
-    let cx = x.clamp(min + radius, max - radius);
-    let cy = y.clamp(min + radius, max - radius);
-    (x - cx).powi(2) + (y - cy).powi(2) <= radius * radius
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn rgb(c: egui::Color32) -> [u8; 4] {
+        [c.r(), c.g(), c.b(), 255]
+    }
+
+    #[test]
+    fn the_shape_uses_the_palette() {
+        let p = &Palette::ONE_DARK;
+        assert_eq!(rgb(p.accent)[..3], icon_shape::ACCENT);
+        assert_eq!(rgb(p.bg_dark)[..3], icon_shape::BG_DARK);
+    }
+
+    #[test]
+    fn large_sizes_have_smooth_edges() {
+        let big = icon_shape::draw(256, None);
+        assert_eq!(big.len(), 256 * 256 * 4);
+        // Some pixel on the rounded corner is partly covered.
+        let partial = (0..256 * 256).any(|i| {
+            let a = big[i * 4 + 3];
+            a > 0 && a < 255
+        });
+        assert!(partial);
+    }
 
     fn pixel(pixels: &[u8], x: u32, y: u32) -> [u8; 4] {
         let i = ((y * SIZE + x) * 4) as usize;

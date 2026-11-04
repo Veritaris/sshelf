@@ -10,6 +10,7 @@ mod host_editor;
 mod hostkey_modal;
 mod hosts_view;
 mod icon;
+mod icon_shape;
 mod icons;
 mod key_dialog;
 mod motion;
