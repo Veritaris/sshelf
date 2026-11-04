@@ -16,6 +16,8 @@ notify = { version = "8.2.1" }
 # on the main thread's event loop; `pollster` waits for it on a worker.
 pollster = { version = "1.0.1" }
 rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] }
+# The app window a file dialog belongs to (it is modal to it).
+raw-window-handle = { version = "0.6.2" }
 serde = { version = "1.0.229", features = ["derive"] }
 # Key generation (SPEC.md §11): standard encrypted OpenSSH key files.
 # 0.7 is still a release candidate.

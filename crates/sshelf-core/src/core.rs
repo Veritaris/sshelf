@@ -12,6 +12,10 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::SystemTime;
 
+use raw_window_handle::{
+    DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle,
+    RawWindowHandle, WindowHandle,
+};
 use sshconf::{ConfigSet, HostList, WatchDir};
 
 use crate::agent_service::{self, AgentService};
@@ -36,6 +40,35 @@ use crate::watch::ConfigWatcher;
 
 /// Called after every event; the UI passes `ctx.request_repaint()`.
 pub type Repaint = Arc<dyn Fn() + Send + Sync>;
+
+/// The app window a system dialog belongs to: the dialog is modal to it
+/// (Windows disables the window, macOS shows a sheet, the Linux portal
+/// gets the parent).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ParentWindow {
+    pub window: RawWindowHandle,
+    pub display: RawDisplayHandle,
+}
+
+// SAFETY: these are plain window ids, used only while the app (and its one
+// window) lives, which outlasts every dialog it opens; the platform dialog
+// APIs take them from any thread.
+unsafe impl Send for ParentWindow {}
+unsafe impl Sync for ParentWindow {}
+
+impl HasWindowHandle for ParentWindow {
+    fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
+        // SAFETY: see above; the window outlives the dialog.
+        Ok(unsafe { WindowHandle::borrow_raw(self.window) })
+    }
+}
+
+impl HasDisplayHandle for ParentWindow {
+    fn display_handle(&self) -> Result<DisplayHandle<'_>, HandleError> {
+        // SAFETY: see above.
+        Ok(unsafe { DisplayHandle::borrow_raw(self.display) })
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
@@ -146,10 +179,11 @@ pub enum Command {
     /// List the key pairs in `~/.ssh` (their `.pub` files only); answered by
     /// [`Event::Keys`].
     FindKeys,
-    /// Open the system file dialog to choose a key file; answered by
-    /// [`Event::KeyFilePicked`] under `id`.
+    /// Open the system file dialog to choose a key file, modal to `parent`;
+    /// answered by [`Event::KeyFilePicked`] under `id`.
     PickKeyFile {
         id: u64,
+        parent: Option<ParentWindow>,
     },
     Shutdown,
 }
@@ -703,16 +737,19 @@ impl Worker {
                         emitter.emit(Event::Keys(Arc::new(keygen::find_keys(&dir))));
                     });
                 }
-                Command::PickKeyFile { id } => {
+                Command::PickKeyFile { id, parent } => {
                     let (dir, emitter) = (self.paths.ssh_dir.clone(), self.emitter.clone());
                     // The dialog stays open as long as the user likes: off
                     // the core thread. Async, so on macOS it runs on the
                     // main thread's event loop.
                     thread::spawn(move || {
-                        let dialog = rfd::AsyncFileDialog::new()
+                        let mut dialog = rfd::AsyncFileDialog::new()
                             .set_title("Choose a key file")
-                            .set_directory(&dir)
-                            .pick_file();
+                            .set_directory(&dir);
+                        if let Some(parent) = &parent {
+                            dialog = dialog.set_parent(parent);
+                        }
+                        let dialog = dialog.pick_file();
                         let path = pollster::block_on(dialog).map(|f| f.path().to_path_buf());
                         emitter.emit(Event::KeyFilePicked { id, path });
                     });

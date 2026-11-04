@@ -3744,6 +3744,7 @@ dependencies = [
  "libc",
  "notify",
  "pollster 1.0.1",
+ "raw-window-handle",
  "rfd",
  "serde",
  "ssh-key",

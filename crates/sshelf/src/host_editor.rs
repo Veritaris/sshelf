@@ -766,7 +766,11 @@ impl HostEditor {
             });
         if std::mem::take(&mut session.browse) {
             session.picking = Some(id);
-            commands.push(Command::PickKeyFile { id });
+            // The app adds its window: the dialog is modal to it.
+            commands.push(Command::PickKeyFile { id, parent: None });
+        }
+        if session.picking.is_some() {
+            picking_overlay(ui.ctx());
         }
         if !commands.is_empty() {
             self.next_id = id;
@@ -1456,6 +1460,38 @@ fn add_key_menu(
         Some(i) => keys.get(i).map(|k| tilde(&k.path, &session.ssh_dir)),
         None => None,
     }
+}
+
+/// While the system file dialog is open, the app waits behind an overlay:
+/// nothing in it can be used until the dialog closes (it is modal to the
+/// window too, where the platform supports that).
+fn picking_overlay(ctx: &egui::Context) {
+    let p = &Palette::ONE_DARK;
+    egui::Modal::new(Id::unique("picking_key_file"))
+        .backdrop_color(p.overlay)
+        .frame(
+            Frame::new()
+                .fill(p.bg_dark)
+                .stroke(Stroke::new(1.0, p.selection))
+                .corner_radius(radius::LARGE)
+                .inner_margin(Margin::same(24)),
+        )
+        .show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 10.0;
+                icons::show(ui, icons::FOLDER, 16.0, p.text_strong);
+                ui.label(
+                    RichText::new("Choose a key file in the system dialog")
+                        .font(fonts::semibold(13.0))
+                        .color(p.text_strong),
+                );
+            });
+            ui.label(
+                RichText::new("sshelf continues once it is closed.")
+                    .size(12.0)
+                    .color(p.dim),
+            );
+        });
 }
 
 /// `path` as `~/.ssh/…` when it is in the ssh directory (as keys are
@@ -2564,9 +2600,13 @@ mod tests {
         // Browse… asks core for the system dialog; its answer is added.
         harness.get_by_label("Browse…").click();
         steps(&mut harness);
-        let Some(Command::PickKeyFile { id }) = harness.state().commands.last().cloned() else {
+        let Some(Command::PickKeyFile { id, parent: None }) =
+            harness.state().commands.last().cloned()
+        else {
             panic!("no file dialog asked for");
         };
+        // The app waits behind an overlay until the dialog closes.
+        harness.get_by_label("Choose a key file in the system dialog");
         let elsewhere = PathBuf::from("keys").join("work_key");
         harness
             .state_mut()
@@ -2574,6 +2614,11 @@ mod tests {
             .on_key_file(id, Some(elsewhere.clone()));
         steps(&mut harness);
         assert!(text(&harness).contains(&format!("    IdentityFile {}", elsewhere.display())));
+        assert!(
+            harness
+                .query_by_label("Choose a key file in the system dialog")
+                .is_none()
+        );
     }
 
     #[test]

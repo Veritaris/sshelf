@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 use std::time::SystemTime;
 
-use sshelf_core::core::{AppData, Command, ConfigSnapshot, Core, Event, SshInfo};
+use sshelf_core::core::{AppData, Command, ConfigSnapshot, Core, Event, ParentWindow, SshInfo};
 use sshelf_core::paths::Paths;
 use sshelf_core::supervisor::Snapshot;
 
@@ -48,6 +48,17 @@ pub struct SshelfApp {
     toasts: Toasts,
     /// When the last config snapshot arrived (the status bar shows it).
     config_loaded: Option<SystemTime>,
+    /// The window system dialogs belong to (modal to it).
+    parent: Option<ParentWindow>,
+}
+
+/// The root window's raw handles, for dialogs that must be modal to it.
+fn parent_window(cc: &eframe::CreationContext<'_>) -> Option<ParentWindow> {
+    use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
+    Some(ParentWindow {
+        window: cc.window_handle().ok()?.as_raw(),
+        display: cc.display_handle().ok()?.as_raw(),
+    })
 }
 
 impl SshelfApp {
@@ -91,6 +102,7 @@ impl SshelfApp {
             error: tray_error,
             toasts: Toasts::default(),
             config_loaded: None,
+            parent: parent_window(cc),
         }
     }
 
@@ -179,6 +191,14 @@ impl SshelfApp {
     fn send(&self, commands: Vec<Command>) {
         if let Some((core, _)) = &self.core {
             for command in commands {
+                // Views don't know the window; a file dialog is modal to it.
+                let command = match command {
+                    Command::PickKeyFile { id, parent: None } => Command::PickKeyFile {
+                        id,
+                        parent: self.parent,
+                    },
+                    other => other,
+                };
                 core.send(command);
             }
         }

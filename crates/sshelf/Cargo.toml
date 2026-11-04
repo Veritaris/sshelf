@@ -27,11 +27,13 @@ zeroize = { version = "1.9.1" }
 # Tray icon and menu (SPEC.md §10). Native on Windows/macOS; on Linux the
 # pure-Rust KSNI (StatusNotifierItem over D-Bus) backend, without GTK.
 tray-icon = { version = "0.26.1", default-features = false }
+# The root window's raw handle: the Windows frameless fix (src/window.rs,
+# `native`) and the parent of system file dialogs (core's `ParentWindow`).
+raw-window-handle = { version = "0.6.2" }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-# The frameless window's Windows fix (src/window.rs, `native`): DWM attributes
-# and a subclass on the root window, reached through its raw handle.
-raw-window-handle = { version = "0.6.2" }
+# The frameless window's Windows fix (src/window.rs, `native`): DWM
+# attributes and a subclass on the root window.
 windows-sys = { version = "0.61.2", features = [
     "Win32_Foundation",
     "Win32_Graphics_Dwm",
