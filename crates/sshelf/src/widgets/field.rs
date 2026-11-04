@@ -14,6 +14,8 @@ pub struct TextField<'a> {
     hint: &'a str,
     mono: bool,
     error: bool,
+    /// Allowed but risky (a non-loopback bind): a Light Yellow outline.
+    warning: bool,
     width: Option<f32>,
     height: f32,
     /// `None`: the style's inset colour (`extreme_bg_color`), which a pane
@@ -31,12 +33,19 @@ impl<'a> TextField<'a> {
             hint: "",
             mono: false,
             error: false,
+            warning: false,
             width: None,
             height: 32.0,
             fill: None,
             password: false,
             inset_right: 0.0,
         }
+    }
+
+    /// The value is allowed but risky: a Light Yellow outline.
+    pub fn warning(mut self, warning: bool) -> Self {
+        self.warning = warning;
+        self
     }
 
     /// Hides the text (passphrases).
@@ -97,8 +106,15 @@ impl Widget for TextField<'_> {
         // The text sits 12 px in; the edit fills the rest of the field.
         let mut text_rect = rect.shrink2(vec2(12.0, 0.0));
         text_rect.max.x -= self.inset_right;
-        let response = ui.put(
-            text_rect,
+        // In a child: `ui.put` would move the layout cursor to the end of
+        // the text area, inside the field, and the next widget would start
+        // over the field's right padding.
+        let mut child = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(text_rect)
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        );
+        let response = child.add(
             TextEdit::singleline(self.text)
                 .password(self.password)
                 .frame(egui::Frame::NONE)
@@ -119,6 +135,8 @@ impl Widget for TextField<'_> {
         );
         let outline = if self.error {
             Some(p.red)
+        } else if self.warning {
+            Some(p.yellow)
         } else if focus > 0.0 {
             Some(p.accent.gamma_multiply(focus))
         } else {

@@ -10,4 +10,5 @@ pub mod field;
 pub mod marks;
 pub mod nav;
 pub mod popup;
+pub mod switch;
 pub mod text;

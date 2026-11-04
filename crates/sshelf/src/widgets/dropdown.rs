@@ -24,12 +24,19 @@ const CLOSE: f32 = 0.140;
 /// The check mark's fade.
 const CHECK: f32 = 0.120;
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 struct State {
     open: bool,
-    /// The keyboard / pointer highlight.
+    /// The keyboard / pointer highlight (an index into the choices).
     highlight: usize,
+    /// The search field's text (searchable dropdowns).
+    query: String,
+    /// The search field takes focus on the next frame (just opened).
+    focus_search: bool,
 }
+
+/// Height of the search field's row.
+const SEARCH: f32 = 40.0;
 
 /// One option: its value, label, an optional second line, and why it
 /// can't be picked (a disabled row shows a lock and the reason instead).
@@ -86,6 +93,8 @@ pub struct Dropdown<'a, T> {
     max_visible: usize,
     /// The panel's least width (it is never narrower than the trigger).
     panel_width: f32,
+    /// Searchable: what the options are, for "No hosts match".
+    search: Option<&'a str>,
 }
 
 impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
@@ -119,7 +128,33 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
             mono: false,
             max_visible: 10,
             panel_width: 180.0,
+            search: None,
         }
+    }
+
+    /// A search field at the top, focused on open; typing filters by
+    /// case-insensitive substring of the label or second line. `what` the
+    /// options are, for "No <what> match".
+    pub fn searchable(mut self, what: &'a str) -> Self {
+        self.search = Some(what);
+        self
+    }
+
+    /// The choices the search leaves (all without a search).
+    fn visible(&self, query: &str) -> Vec<usize> {
+        let needle = query.trim().to_lowercase();
+        self.choices
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| {
+                needle.is_empty()
+                    || c.label.to_lowercase().contains(&needle)
+                    || c.detail
+                        .as_ref()
+                        .is_some_and(|d| d.to_lowercase().contains(&needle))
+            })
+            .map(|(i, _)| i)
+            .collect()
     }
 
     /// A wider panel than the default 180 px (long labels).
@@ -179,19 +214,26 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
         if (trigger.clicked() || keyboard_open) && !state.open {
             state.open = true;
             state.highlight = selected_index.unwrap_or(0);
+            state.query.clear();
+            state.focus_search = self.search.is_some();
         } else if trigger.clicked() {
             state.open = false;
         }
+        let visible = self.visible(&state.query);
         if state.open {
-            let last = self.choices.len().saturating_sub(1);
+            // ↑↓ move through what the search leaves.
+            let at = visible.iter().position(|&i| i == state.highlight);
             ctx.input_mut(|i| {
                 if i.consume_key(Modifiers::NONE, Key::ArrowDown) {
-                    state.highlight = (state.highlight + 1).min(last);
+                    let next = at.map_or(0, |at| (at + 1).min(visible.len().saturating_sub(1)));
+                    state.highlight = visible.get(next).copied().unwrap_or(state.highlight);
                 }
                 if i.consume_key(Modifiers::NONE, Key::ArrowUp) {
-                    state.highlight = state.highlight.saturating_sub(1);
+                    let next = at.map_or(0, |at| at.saturating_sub(1));
+                    state.highlight = visible.get(next).copied().unwrap_or(state.highlight);
                 }
                 if i.consume_key(Modifiers::NONE, Key::Enter)
+                    && visible.contains(&state.highlight)
                     && self
                         .choices
                         .get(state.highlight)
@@ -218,9 +260,16 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
         );
         if shown > 0.0 {
             let row = self.row_height();
-            let rows = self.choices.len().min(self.max_visible);
-            let groups = self.choices.iter().filter(|c| c.group.is_some()).count();
-            let height = rows as f32 * row + groups as f32 * GROUP + 8.0;
+            let searching = !state.query.trim().is_empty();
+            // At least one row: "No … match".
+            let rows = visible.len().clamp(1, self.max_visible);
+            let groups = if searching {
+                0
+            } else {
+                self.choices.iter().filter(|c| c.group.is_some()).count()
+            };
+            let search = if self.search.is_some() { SEARCH } else { 0.0 };
+            let height = rows as f32 * row + groups as f32 * GROUP + search + 8.0;
             let width = trigger.rect.width().max(self.panel_width);
             let below = trigger.rect.bottom() + GAP;
             let room_below = ctx.content_rect().bottom() - below;
@@ -232,11 +281,11 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
             };
             let panel = Rect::from_min_size(pos2(trigger.rect.left(), top), vec2(width, height));
             // Revealed from the trigger's side by clipping.
-            let visible = height * shown;
+            let revealed = height * shown;
             let clip = if upward {
-                Rect::from_min_max(pos2(panel.left(), panel.bottom() - visible), panel.max)
+                Rect::from_min_max(pos2(panel.left(), panel.bottom() - revealed), panel.max)
             } else {
-                Rect::from_min_max(panel.min, pos2(panel.right(), panel.top() + visible))
+                Rect::from_min_max(panel.min, pos2(panel.right(), panel.top() + revealed))
             };
             let area = Area::new(self.id.with("panel"))
                 .order(Order::Foreground)
@@ -251,8 +300,12 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
                         .inner_margin(Margin::symmetric(4, 4))
                         .show(ui, |ui| {
                             ui.set_width(width - 8.0);
+                            if self.search.is_some() {
+                                self.search_field(ui, &mut state);
+                            }
+                            let rows_height = height - 8.0 - search;
                             if let Some(index) =
-                                self.rows(ui, &mut state, selected_index, height - 8.0)
+                                self.rows(ui, &mut state, (selected_index, &visible), rows_height)
                             {
                                 picked = Some(index);
                             }
@@ -272,8 +325,55 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
         if picked.is_some() {
             state.open = false;
         }
+        let value = picked.map(|i| self.choices[i].value);
         ctx.data_mut(|d| d.insert_temp(self.id, state));
-        picked.map(|i| self.choices[i].value)
+        value
+    }
+
+    /// The search field at the top of the panel, with a clear button while
+    /// it has text; the highlight moves to the first match as it changes.
+    fn search_field(&self, ui: &mut Ui, state: &mut State) {
+        let p = &Palette::ONE_DARK;
+        ui.visuals_mut().extreme_bg_color = p.bg;
+        let response = ui.add(
+            crate::widgets::field::TextField::new(&mut state.query)
+                .hint("Search")
+                .inset_right(24.0),
+        );
+        let field = response.rect;
+        if std::mem::take(&mut state.focus_search) {
+            response.request_focus();
+        }
+        if response.changed()
+            && let Some(first) = self.visible(&state.query).first()
+        {
+            state.highlight = *first;
+        }
+        if !state.query.is_empty() {
+            let center = pos2(field.right() + 18.0, field.center().y);
+            let clear = ui.interact(
+                Rect::from_center_size(center, vec2(20.0, 20.0)),
+                self.id.with("clear"),
+                Sense::click(),
+            );
+            clear.widget_info(|| WidgetInfo::labeled(Role::Button, true, "Clear search"));
+            ui.painter().text(
+                center,
+                Align2::CENTER_CENTER,
+                icons::X,
+                icons::font(12.0),
+                if clear.hovered() {
+                    p.text_strong
+                } else {
+                    p.dim
+                },
+            );
+            if clear.on_hover_cursor(CursorIcon::PointingHand).clicked() {
+                state.query.clear();
+                state.focus_search = true;
+            }
+        }
+        ui.add_space(SEARCH - 32.0 - ui.spacing().item_spacing.y);
     }
 
     /// The closed control, with a chevron that turns while the panel is
@@ -364,7 +464,7 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
         &self,
         ui: &mut Ui,
         state: &mut State,
-        selected: Option<usize>,
+        (selected, visible): (Option<usize>, &[usize]),
         max_height: f32,
     ) -> Option<usize> {
         let p = &Palette::ONE_DARK;
@@ -377,8 +477,22 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 let slot = ui.painter().add(Shape::Noop);
                 let mut highlighted = None;
-                for (index, choice) in self.choices.iter().enumerate() {
-                    if let Some(group) = &choice.group {
+                let searching = !state.query.trim().is_empty();
+                if visible.is_empty() {
+                    let (rect, _) =
+                        ui.allocate_exact_size(vec2(ui.available_width(), row), Sense::hover());
+                    let what = self.search.unwrap_or("options");
+                    ui.painter().text(
+                        pos2(rect.left() + 10.0, rect.center().y),
+                        Align2::LEFT_CENTER,
+                        format!("No {what} match"),
+                        FontId::proportional(13.0),
+                        p.dim,
+                    );
+                }
+                for &index in visible {
+                    let choice = &self.choices[index];
+                    if let Some(group) = choice.group.as_ref().filter(|_| !searching) {
                         let (rect, _) = ui
                             .allocate_exact_size(vec2(ui.available_width(), GROUP), Sense::hover());
                         if index > 0 {

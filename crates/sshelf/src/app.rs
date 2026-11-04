@@ -379,6 +379,11 @@ impl eframe::App for SshelfApp {
             close_guard::running_count(self.tunnel_states.as_deref()),
             self.data.as_deref().map(|d| &d.settings),
         ));
+        // A tunnel's "via" link shows its host.
+        if let Some(alias) = self.tunnels.take_open_host() {
+            self.view = View::Hosts;
+            self.hosts.select(&alias);
+        }
         match self.hosts.take_navigation() {
             Some(Navigate::Settings) => self.view = View::Settings,
             Some(Navigate::Tunnel(id)) => {

@@ -97,6 +97,11 @@ impl HostsView {
         self.navigate.take()
     }
 
+    /// Shows `alias` (e.g. a tunnel's "via" link).
+    pub fn select(&mut self, alias: &str) {
+        self.selected = Some(alias.to_string());
+    }
+
     pub fn on_health(&mut self, health: Arc<HealthSnapshot>) {
         if self.check_run.iter().all(|a| !health.checking.contains(a)) {
             self.check_run.clear();
