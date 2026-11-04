@@ -103,6 +103,8 @@ impl Palette {
 pub mod radius {
     /// Table rows; the inner side of joined pieces.
     pub const ROW: u8 = 1;
+    /// Checkboxes (multi-select dropdowns only).
+    pub const CHECKBOX: u8 = 4;
     /// Controls, cards, menus, chips.
     pub const CONTROL: u8 = 8;
     /// The window, dialogs, the tray flyout, large panels.
@@ -134,6 +136,12 @@ pub mod timing {
     pub const PULSE: f32 = 1.0;
     /// The favourite star's colour fade.
     pub const STAR: f32 = 0.120;
+    /// A multi-select checkbox filling and its tick drawing in.
+    pub const TICK: f32 = 0.100;
+    /// A chip added to a multi-select dropdown scaling in.
+    pub const CHIP_IN: f32 = 0.120;
+    /// Hover time before the "+N" chip shows the values it hides.
+    pub const CHIP_TIP: f32 = 0.300;
 }
 
 /// Forces the dark theme and installs the One Dark visuals on `ctx`.

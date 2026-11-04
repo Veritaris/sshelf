@@ -39,15 +39,29 @@ enum Side {
 /// A tooltip to the right of `response`'s widget (the rail's), built by
 /// `add_contents` while it shows.
 pub fn tip(response: Response, add_contents: impl FnOnce(&mut Ui)) -> Response {
-    tooltip(response, Side::Right, add_contents)
+    tooltip(response, (Side::Right, timing::TOOLTIP_DELAY), add_contents)
 }
 
 /// A tooltip below `response`'s widget.
 pub fn tip_below(response: Response, add_contents: impl FnOnce(&mut Ui)) -> Response {
-    tooltip(response, Side::Below, add_contents)
+    tooltip(response, (Side::Below, timing::TOOLTIP_DELAY), add_contents)
 }
 
-fn tooltip(response: Response, side: Side, add_contents: impl FnOnce(&mut Ui)) -> Response {
+/// A tooltip below `response`'s widget after `delay` seconds of hover
+/// (the dropdown's "+N" chip waits 300 ms).
+pub fn tip_below_after(
+    response: Response,
+    delay: f32,
+    add_contents: impl FnOnce(&mut Ui),
+) -> Response {
+    tooltip(response, (Side::Below, delay), add_contents)
+}
+
+fn tooltip(
+    response: Response,
+    (side, delay): (Side, f32),
+    add_contents: impl FnOnce(&mut Ui),
+) -> Response {
     let ctx = response.ctx.clone();
     let id = response.id.with("tooltip");
     let now = ctx.input(|i| i.time);
@@ -76,13 +90,12 @@ fn tooltip(response: Response, side: Side, add_contents: impl FnOnce(&mut Ui)) -
         .data(|d| d.get_temp::<f64>(last_visible_id()))
         .unwrap_or(f64::NEG_INFINITY);
     let ready = since.is_some_and(|since| {
-        now - since >= f64::from(timing::TOOLTIP_DELAY)
-            || now - last_visible <= f64::from(timing::TOOLTIP_GRACE)
+        now - since >= f64::from(delay) || now - last_visible <= f64::from(timing::TOOLTIP_GRACE)
     });
     if let Some(since) = since
         && !ready
     {
-        let wait = f64::from(timing::TOOLTIP_DELAY) - (now - since);
+        let wait = f64::from(delay) - (now - since);
         ctx.request_repaint_after_secs(wait as f32);
     }
     // "out" while appearing, "in" while disappearing.

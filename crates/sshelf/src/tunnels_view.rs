@@ -249,7 +249,7 @@ impl Action {
 }
 
 /// The status mark: filled when settled, a pulsing ring in transition.
-fn mark(ui: &mut Ui, state: &TunnelState) {
+pub fn mark(ui: &mut Ui, state: &TunnelState) {
     let p = &Palette::ONE_DARK;
     match state {
         TunnelState::Running => marks::dot(ui, p.green),
@@ -782,7 +782,7 @@ impl TunnelsView {
                         .map(|p| capitalized(p))
                         .collect()
                 };
-                editor_row(ui, ("Name", false), |ui, label| {
+                editor_row(ui, ("Name", false, LABEL), |ui, label| {
                     let errors = errors_for("the name");
                     ui.add(
                         TextField::new(&mut draft.name)
@@ -793,7 +793,7 @@ impl TunnelsView {
                     .labelled_by(label);
                     field_errors(ui, &errors);
                 });
-                editor_row(ui, ("Host", true), |ui, _| {
+                editor_row(ui, ("Host", true, LABEL), |ui, _| {
                     let mut errors = errors_for("no host");
                     let choices: Vec<Choice<usize>> = hosts
                         .hosts
@@ -822,7 +822,7 @@ impl TunnelsView {
                     }
                     field_errors(ui, &errors);
                 });
-                editor_row(ui, ("Reconnect", true), |ui, _| {
+                editor_row(ui, ("Reconnect", true, LABEL), |ui, _| {
                     // As tall as a field, so it lines up with its label.
                     let size = vec2(ui.available_width(), 32.0);
                     ui.allocate_ui_with_layout(size, Layout::left_to_right(Align::Center), |ui| {
@@ -977,7 +977,7 @@ impl TunnelsView {
 }
 
 /// "the name is empty" as a sentence.
-fn capitalized(text: &str) -> String {
+pub fn capitalized(text: &str) -> String {
     let mut chars = text.chars();
     match chars.next() {
         Some(first) => first.to_uppercase().chain(chars).collect(),
@@ -986,21 +986,27 @@ fn capitalized(text: &str) -> String {
 }
 
 /// Red lines under a field.
-fn field_errors(ui: &mut Ui, errors: &[String]) {
+pub fn field_errors(ui: &mut Ui, errors: &[String]) {
     for error in errors {
         ui.label(RichText::new(error).size(12.0).color(Palette::ONE_DARK.red));
     }
 }
 
-/// An editor row: the label (110 px), then `add`, given the label's id.
-/// `named_by_field`: the field (a dropdown, a switch) carries the name
-/// itself, so the label is only painted.
-fn editor_row(ui: &mut Ui, (label, named_by_field): (&str, bool), add: impl FnOnce(&mut Ui, Id)) {
+/// Label width of the tunnel editor's rows.
+const LABEL: f32 = 110.0;
+
+/// An editor row: the label (`label_width` wide), then `add`, given the
+/// label's id. `named_by_field`: the field (a dropdown, a switch) carries
+/// the name itself, so the label is only painted.
+pub fn editor_row(
+    ui: &mut Ui,
+    (label, named_by_field, label_width): (&str, bool, f32),
+    add: impl FnOnce(&mut Ui, Id),
+) {
     let p = &Palette::ONE_DARK;
-    const LABEL: f32 = 110.0;
     ui.horizontal_top(|ui| {
         ui.spacing_mut().item_spacing.x = 12.0;
-        let (rect, _) = ui.allocate_exact_size(vec2(LABEL, 32.0), Sense::hover());
+        let (rect, _) = ui.allocate_exact_size(vec2(label_width, 32.0), Sense::hover());
         let label_id = if named_by_field {
             ui.painter().text(
                 pos2(rect.left(), rect.center().y),

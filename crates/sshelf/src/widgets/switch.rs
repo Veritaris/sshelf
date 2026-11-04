@@ -15,6 +15,16 @@ const TIME: f32 = 0.200;
 
 /// A switch for `on`, named `name` (its accessible name); flips on click.
 pub fn switch(ui: &mut Ui, on: &mut bool, name: &str) -> Response {
+    track(ui, on, name, Palette::ONE_DARK.selection)
+}
+
+/// A switch on a selected (`#3E4451`) row: the off track is the outline
+/// colour, so it stays visible.
+pub fn switch_raised(ui: &mut Ui, on: &mut bool, name: &str) -> Response {
+    track(ui, on, name, Palette::ONE_DARK.border)
+}
+
+fn track(ui: &mut Ui, on: &mut bool, name: &str, off: egui::Color32) -> Response {
     let p = &Palette::ONE_DARK;
     let (rect, mut response) = ui.allocate_exact_size(vec2(WIDTH, HEIGHT), Sense::click());
     if response.clicked() {
@@ -36,7 +46,7 @@ pub fn switch(ui: &mut Ui, on: &mut bool, name: &str) -> Response {
     painter.rect_filled(
         rect,
         HEIGHT / 2.0,
-        p.selection.lerp_to_gamma(p.accent, t).gamma_multiply(alpha),
+        off.lerp_to_gamma(p.accent, t).gamma_multiply(alpha),
     );
     let x = rect.left() + 2.0 + (WIDTH - KNOB - 4.0) * t;
     let knob = Rect::from_min_size(pos2(x, rect.top() + 2.0), vec2(KNOB, KNOB));

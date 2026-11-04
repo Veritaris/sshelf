@@ -33,6 +33,7 @@ pub const MINUS: char = '\u{e11c}';
 pub const PENCIL: char = '\u{e1f9}';
 pub const PLAY: char = '\u{e13c}';
 pub const PLUS: char = '\u{e13d}';
+pub const POWER: char = '\u{e140}';
 pub const REFRESH_CW: char = '\u{e145}';
 pub const ROTATE_CW: char = '\u{e149}';
 pub const SEARCH: char = '\u{e151}';
@@ -70,6 +71,7 @@ pub const ALL: &[char] = &[
     PENCIL,
     PLAY,
     PLUS,
+    POWER,
     REFRESH_CW,
     ROTATE_CW,
     SEARCH,

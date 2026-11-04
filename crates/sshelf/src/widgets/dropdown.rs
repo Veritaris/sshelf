@@ -1,9 +1,10 @@
-//! The dropdown (SPEC.md §10 *Dropdown*), single-select so far: the panel
-//! rolls open from the trigger by clipping (200 ms "out", closing 140 ms
-//! "in"), upward when there is no room below; 30 px rows (36 px with a
-//! second line, as *Save to* has) with the sliding hover highlight; a
-//! Magenta check on the selected row; disabled rows with their reason;
-//! ↑↓ Enter Esc.
+//! The dropdown (SPEC.md §10 *Dropdown*): the panel rolls open from the
+//! trigger by clipping (200 ms "out", closing 140 ms "in"), upward when there
+//! is no room below; 30 px rows (36 px with a second line, as *Save to* has)
+//! with the sliding hover highlight; disabled rows with their reason; ↑↓
+//! Enter Esc. Single-select shows a Magenta check on the selected row and
+//! closes on a pick; multi-select has checkboxes, stays open, a footer
+//! ("N selected", *Clear*, *Done*) and shows the selection as chips.
 
 use egui::{
     Align2, Area, CursorIcon, FontId, Frame, Id, Key, Margin, Modifiers, Order, Rect, Response,
@@ -11,8 +12,9 @@ use egui::{
 };
 
 use crate::theme::{Palette, radius, timing};
-use crate::widgets::{nav, text};
-use crate::{icons, motion};
+use crate::widgets::button::Button;
+use crate::widgets::{nav, popup, text};
+use crate::{fonts, icons, motion};
 
 const ROW: f32 = 30.0;
 /// A row with a second line.
@@ -23,6 +25,12 @@ const OPEN: f32 = 0.200;
 const CLOSE: f32 = 0.140;
 /// The check mark's fade.
 const CHECK: f32 = 0.120;
+/// The multi-select footer under its line.
+const FOOTER: f32 = 41.0;
+/// A checkbox (multi-select rows).
+const CHECKBOX: f32 = 16.0;
+/// A chip in the closed multi-select control.
+const CHIP: f32 = 22.0;
 
 #[derive(Debug, Clone, Default)]
 struct State {
@@ -81,20 +89,34 @@ enum Trigger {
     Field(f32),
 }
 
-/// A single-select dropdown over `options`, showing `selected`.
+/// What happened in the open panel this frame.
+#[derive(Default)]
+struct Outcome {
+    /// A row was picked (single) or toggled (multi).
+    picked: Option<usize>,
+    /// *Clear* (multi).
+    clear: bool,
+}
+
+/// A dropdown over `options`; [`Dropdown::show`] for single-select,
+/// [`Dropdown::show_multi`] for multi-select.
 pub struct Dropdown<'a, T> {
     id: Id,
     name: &'a str,
     choices: Vec<Choice<T>>,
-    /// The closed control's text, e.g. "Group by tag".
+    /// The closed control's text, e.g. "Group by tag"; for multi-select the
+    /// placeholder while nothing is selected.
     trigger: String,
     look: Trigger,
     mono: bool,
+    /// Notes in mono (aliases, as the group editor's tunnel hosts).
+    mono_notes: bool,
     max_visible: usize,
     /// The panel's least width (it is never narrower than the trigger).
     panel_width: f32,
     /// Searchable: what the options are, for "No hosts match".
     search: Option<&'a str>,
+    multi: bool,
 }
 
 impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
@@ -126,9 +148,11 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
             trigger: trigger.into(),
             look: Trigger::Button,
             mono: false,
+            mono_notes: false,
             max_visible: 10,
             panel_width: 180.0,
             search: None,
+            multi: false,
         }
     }
 
@@ -175,6 +199,12 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
         self
     }
 
+    /// Notes in mono (aliases).
+    pub fn mono_notes(mut self) -> Self {
+        self.mono_notes = true;
+        self
+    }
+
     fn row_height(&self) -> f32 {
         let tall = self
             .choices
@@ -191,19 +221,60 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
         }
     }
 
-    /// Shows the closed control and, while open, the panel. Returns the
-    /// option picked this frame.
+    /// Single-select: shows the closed control and, while open, the panel.
+    /// Returns the option picked this frame.
     pub fn show(self, ui: &mut Ui, selected: T) -> Option<T> {
+        // None of them may be the current one (an "add" menu): no check.
+        let selected: Vec<usize> = self
+            .choices
+            .iter()
+            .position(|c| c.value == selected)
+            .into_iter()
+            .collect();
+        let outcome = self.run(ui, &selected, &[]);
+        outcome.picked.map(|i| self.choices[i].value)
+    }
+
+    /// Multi-select: rows with checkboxes; toggling keeps the panel open.
+    /// The closed control shows `selected` as chips (the rest as "+N").
+    /// Returns whether `selected` changed.
+    pub fn show_multi(mut self, ui: &mut Ui, selected: &mut Vec<T>) -> bool {
+        self.multi = true;
+        let indexes: Vec<usize> = selected
+            .iter()
+            .filter_map(|v| self.choices.iter().position(|c| c.value == *v))
+            .collect();
+        let labels: Vec<String> = indexes
+            .iter()
+            .map(|&i| self.choices[i].label.clone())
+            .collect();
+        let outcome = self.run(ui, &indexes, &labels);
+        if outcome.clear && !selected.is_empty() {
+            selected.clear();
+            return true;
+        }
+        if let Some(index) = outcome.picked {
+            let value = self.choices[index].value;
+            if let Some(at) = selected.iter().position(|v| *v == value) {
+                selected.remove(at);
+            } else {
+                selected.push(value);
+            }
+            return true;
+        }
+        false
+    }
+
+    /// The control and its panel; `chips` the multi-select's selection.
+    fn run(&self, ui: &mut Ui, selected: &[usize], chips: &[String]) -> Outcome {
         let p = &Palette::ONE_DARK;
         let ctx = ui.ctx().clone();
         let mut state = ctx
             .data(|d| d.get_temp::<State>(self.id))
             .unwrap_or_default();
-        let trigger = self.trigger(ui, state.open);
-        // `None`: no option is the current one (an "add" menu), so none
-        // gets the check.
-        let selected_index = self.choices.iter().position(|c| c.value == selected);
-        let mut picked = None;
+        let trigger = self.trigger(ui, state.open, chips);
+        let mut outcome = Outcome::default();
+        let mut close = false;
 
         let keyboard_open = trigger.has_focus()
             && ctx.input_mut(|i| {
@@ -213,7 +284,7 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
             });
         if (trigger.clicked() || keyboard_open) && !state.open {
             state.open = true;
-            state.highlight = selected_index.unwrap_or(0);
+            state.highlight = selected.first().copied().unwrap_or(0);
             state.query.clear();
             state.focus_search = self.search.is_some();
         } else if trigger.clicked() {
@@ -223,6 +294,11 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
         if state.open {
             // ↑↓ move through what the search leaves.
             let at = visible.iter().position(|&i| i == state.highlight);
+            let pickable = visible.contains(&state.highlight)
+                && self
+                    .choices
+                    .get(state.highlight)
+                    .is_some_and(|c| c.disabled.is_none());
             ctx.input_mut(|i| {
                 if i.consume_key(Modifiers::NONE, Key::ArrowDown) {
                     let next = at.map_or(0, |at| (at + 1).min(visible.len().saturating_sub(1)));
@@ -232,14 +308,16 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
                     let next = at.map_or(0, |at| at.saturating_sub(1));
                     state.highlight = visible.get(next).copied().unwrap_or(state.highlight);
                 }
-                if i.consume_key(Modifiers::NONE, Key::Enter)
-                    && visible.contains(&state.highlight)
-                    && self
-                        .choices
-                        .get(state.highlight)
-                        .is_some_and(|c| c.disabled.is_none())
+                if i.consume_key(Modifiers::NONE, Key::Enter) && pickable {
+                    outcome.picked = Some(state.highlight);
+                }
+                // Space toggles in a multi-select (with a search, it types).
+                if self.multi
+                    && self.search.is_none()
+                    && i.consume_key(Modifiers::NONE, Key::Space)
+                    && pickable
                 {
-                    picked = Some(state.highlight);
+                    outcome.picked = Some(state.highlight);
                 }
                 if i.consume_key(Modifiers::NONE, Key::Escape) {
                     state.open = false;
@@ -269,7 +347,8 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
                 self.choices.iter().filter(|c| c.group.is_some()).count()
             };
             let search = if self.search.is_some() { SEARCH } else { 0.0 };
-            let height = rows as f32 * row + groups as f32 * GROUP + search + 8.0;
+            let footer = if self.multi { FOOTER } else { 0.0 };
+            let height = rows as f32 * row + groups as f32 * GROUP + search + footer + 8.0;
             let width = trigger.rect.width().max(self.panel_width);
             let below = trigger.rect.bottom() + GAP;
             let room_below = ctx.content_rect().bottom() - below;
@@ -303,11 +382,17 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
                             if self.search.is_some() {
                                 self.search_field(ui, &mut state);
                             }
-                            let rows_height = height - 8.0 - search;
+                            let rows_height = height - 8.0 - search - footer;
                             if let Some(index) =
-                                self.rows(ui, &mut state, (selected_index, &visible), rows_height)
+                                self.rows(ui, &mut state, (selected, &visible), rows_height)
                             {
-                                picked = Some(index);
+                                outcome.picked = Some(index);
+                            }
+                            if self.multi {
+                                let shown_count = self.search.map(|_| visible.len());
+                                let (clear, done) = self.footer(ui, selected.len(), shown_count);
+                                outcome.clear = clear;
+                                close |= done;
                             }
                         });
                 });
@@ -322,12 +407,43 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
                 state.open = false;
             }
         }
-        if picked.is_some() {
+        if close || (outcome.picked.is_some() && !self.multi) {
             state.open = false;
         }
-        let value = picked.map(|i| self.choices[i].value);
         ctx.data_mut(|d| d.insert_temp(self.id, state));
-        value
+        outcome
+    }
+
+    /// "N selected · M shown", *Clear* and *Done*; returns whether each was
+    /// clicked.
+    fn footer(&self, ui: &mut Ui, selected: usize, shown: Option<usize>) -> (bool, bool) {
+        let p = &Palette::ONE_DARK;
+        let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), FOOTER), Sense::hover());
+        ui.painter().hline(
+            (rect.left() - 4.0)..=(rect.right() + 4.0),
+            rect.top() + 4.0,
+            Stroke::new(1.0, p.selection),
+        );
+        let inner = Rect::from_min_max(pos2(rect.left() + 8.0, rect.top() + 5.0), rect.max);
+        let mut child = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(inner)
+                .layout(egui::Layout::right_to_left(egui::Align::Center)),
+        );
+        child.spacing_mut().item_spacing.x = 4.0;
+        let done = child.add(Button::new("Done").primary().small()).clicked();
+        let clear = child.add(Button::new("Clear").ghost().small()).clicked();
+        let mut count = format!("{selected} selected");
+        if let Some(shown) = shown {
+            count.push_str(&format!(" · {shown} shown"));
+        }
+        child.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+            ui.add(
+                egui::Label::new(egui::RichText::new(count).size(12.0).color(p.dim))
+                    .selectable(false),
+            );
+        });
+        (clear, done)
     }
 
     /// The search field at the top of the panel, with a clear button while
@@ -377,8 +493,8 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
     }
 
     /// The closed control, with a chevron that turns while the panel is
-    /// open.
-    fn trigger(&self, ui: &mut Ui, open: bool) -> Response {
+    /// open; a multi-select shows `chips` (or the placeholder).
+    fn trigger(&self, ui: &mut Ui, open: bool, chips: &[String]) -> Response {
         let p = &Palette::ONE_DARK;
         let (font, size) = match self.look {
             Trigger::Button => (FontId::proportional(12.0), None),
@@ -390,7 +506,12 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
         let size = size.unwrap_or(vec2(galley.size().x + 10.0 + 6.0 + 14.0 + 8.0, 28.0));
         let (rect, response) = ui.allocate_exact_size(size, Sense::click());
         let enabled = response.enabled();
-        let (name, value) = (self.name, self.trigger.clone());
+        let name = self.name;
+        let value = if self.multi {
+            chips.join(", ")
+        } else {
+            self.trigger.clone()
+        };
         response.widget_info(|| {
             let mut info = WidgetInfo::labeled(Role::ComboBox, enabled, name);
             info.current_text_value = Some(value.clone());
@@ -428,15 +549,20 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
                 );
             }
         }
-        let left = match self.look {
-            Trigger::Button => 10.0,
-            Trigger::Field(_) => 12.0,
-        };
-        painter.galley(
-            pos2(rect.left() + left, rect.center().y - galley.size().y / 2.0),
-            galley,
-            p.text,
-        );
+        if self.multi && !chips.is_empty() {
+            self.chips(ui, rect, chips);
+        } else {
+            let left = match self.look {
+                Trigger::Button => 10.0,
+                Trigger::Field(_) => 12.0,
+            };
+            let color = if self.multi { p.dim } else { p.text };
+            ui.painter().galley(
+                pos2(rect.left() + left, rect.center().y - galley.size().y / 2.0),
+                galley,
+                color,
+            );
+        }
         let turn = motion::fade(
             ui.ctx(),
             response.id.with("chevron"),
@@ -449,7 +575,7 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
         } else {
             icons::CHEVRON_DOWN
         };
-        painter.text(
+        ui.painter().text(
             pos2(rect.right() - 8.0 - 7.0, rect.center().y),
             Align2::CENTER_CENTER,
             chevron,
@@ -459,12 +585,95 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
         response.on_hover_cursor(CursorIcon::PointingHand)
     }
 
+    /// The selection as chips in the closed control, as many as fit (only
+    /// the first one is ever cut); the rest collapse into a Magenta "+N"
+    /// whose tooltip shows them. A chip that wasn't there last frame
+    /// scales in.
+    fn chips(&self, ui: &mut Ui, rect: Rect, labels: &[String]) {
+        let p = &Palette::ONE_DARK;
+        let ctx = ui.ctx().clone();
+        let font = FontId::proportional(12.0);
+        let plus_font = fonts::semibold(12.0);
+        let painter = ui.painter().clone();
+        let known_id = self.id.with("chips_known");
+        let known: Option<Vec<String>> = ctx.data(|d| d.get_temp(known_id));
+        let right = rect.right() - 30.0;
+        let mut x = rect.left() + 6.0;
+        let plus_width = |n: usize| {
+            painter
+                .layout_no_wrap(format!("+{n}"), plus_font.clone(), p.bg_dark)
+                .size()
+                .x
+                + 16.0
+        };
+        let mut shown = 0;
+        for (index, label) in labels.iter().enumerate() {
+            let rest = labels.len() - index - 1;
+            let reserve = if rest > 0 {
+                plus_width(rest) + 4.0
+            } else {
+                0.0
+            };
+            let room = right - x - reserve;
+            let (text, cut) = text::elide(&painter, label, &font, (room - 16.0).max(0.0));
+            if shown > 0 && (cut || room < 40.0) {
+                break;
+            }
+            let galley = painter.layout_no_wrap(text, font.clone(), p.text_strong);
+            let chip = Rect::from_min_size(
+                pos2(x, rect.center().y - CHIP / 2.0),
+                vec2(galley.size().x + 16.0, CHIP),
+            );
+            let id = self.id.with(("chip", label));
+            let new = known.as_ref().is_some_and(|k| !k.contains(label));
+            if new {
+                motion::fade(&ctx, id, false, 0.0, motion::ease_out);
+            }
+            let grow = motion::fade(&ctx, id, true, timing::CHIP_IN, motion::ease_out);
+            let drawn = Rect::from_center_size(chip.center(), chip.size() * (0.6 + 0.4 * grow));
+            painter.rect_filled(drawn, radius::CONTROL, p.selection.gamma_multiply(grow));
+            painter.galley(
+                pos2(chip.left() + 8.0, chip.center().y - galley.size().y / 2.0),
+                galley,
+                p.text_strong.gamma_multiply(grow),
+            );
+            x = chip.right() + 4.0;
+            shown += 1;
+        }
+        ctx.data_mut(|d| d.insert_temp(known_id, labels.to_vec()));
+        let hidden = &labels[shown..];
+        if hidden.is_empty() {
+            return;
+        }
+        let galley = painter.layout_no_wrap(format!("+{}", hidden.len()), plus_font, p.bg_dark);
+        let chip = Rect::from_min_size(
+            pos2(x, rect.center().y - CHIP / 2.0),
+            vec2(galley.size().x + 16.0, CHIP),
+        );
+        painter.rect_filled(chip, radius::CONTROL, p.accent);
+        painter.galley(
+            pos2(chip.left() + 8.0, chip.center().y - galley.size().y / 2.0),
+            galley,
+            p.bg_dark,
+        );
+        let response = ui.interact(chip, self.id.with("more"), Sense::hover());
+        let hidden = hidden.to_vec();
+        popup::tip_below_after(response, timing::CHIP_TIP, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+                for label in &hidden {
+                    crate::widgets::marks::chip(ui, label, p.selection, p.text_strong);
+                }
+            });
+        });
+    }
+
     /// The option rows; returns the one clicked.
     fn rows(
         &self,
         ui: &mut Ui,
         state: &mut State,
-        (selected, visible): (Option<usize>, &[usize]),
+        (selected, visible): (&[usize], &[usize]),
         max_height: f32,
     ) -> Option<usize> {
         let p = &Palette::ONE_DARK;
@@ -518,14 +727,14 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
                     };
                     let (rect, response) =
                         ui.allocate_exact_size(vec2(ui.available_width(), row), sense);
-                    let is_selected = Some(index) == selected;
+                    let is_selected = selected.contains(&index);
+                    let role = if self.multi {
+                        Role::CheckBox
+                    } else {
+                        Role::ListBoxOption
+                    };
                     response.widget_info(|| {
-                        WidgetInfo::selected(
-                            Role::ListBoxOption,
-                            enabled,
-                            is_selected,
-                            &choice.label,
-                        )
+                        WidgetInfo::selected(role, enabled, is_selected, &choice.label)
                     });
                     if response.hovered() && enabled {
                         state.highlight = index;
@@ -549,6 +758,18 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
                         rect.center().y
                     };
                     let mut left = rect.left() + 10.0;
+                    let ticked = motion::fade(
+                        ui.ctx(),
+                        self.id.with(("check", index)),
+                        is_selected,
+                        if self.multi { timing::TICK } else { CHECK },
+                        motion::ease_in_out,
+                    );
+                    if self.multi {
+                        let center = pos2(left + CHECKBOX / 2.0, rect.center().y);
+                        checkbox(ui, center, ticked);
+                        left += CHECKBOX + 10.0;
+                    }
                     if let Some(icon) = choice.icon {
                         ui.painter().text(
                             pos2(left + 7.0, label_y),
@@ -561,13 +782,19 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
                     }
                     // Text stops before the check mark's column (and the
                     // note, if any).
-                    let mut right = rect.right() - 10.0 - 14.0 - 8.0;
+                    let mut right = rect.right() - 10.0;
+                    if !self.multi {
+                        right -= 14.0 + 8.0;
+                    }
                     if let Some(note) = &choice.note {
-                        let galley = ui.painter().layout_no_wrap(
-                            note.clone(),
-                            FontId::proportional(11.0),
-                            p.dim,
-                        );
+                        let font = if self.mono_notes {
+                            FontId::monospace(11.0)
+                        } else {
+                            FontId::proportional(11.0)
+                        };
+                        let (note, _) =
+                            text::elide(ui.painter(), note, &font, (right - left) * 0.45);
+                        let galley = ui.painter().layout_no_wrap(note, font, p.dim);
                         right -= galley.size().x;
                         ui.painter().galley(
                             pos2(right, label_y - galley.size().y / 2.0),
@@ -605,20 +832,13 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
                             if enabled { p.dim } else { p.disabled_text },
                         );
                     }
-                    let check = motion::fade(
-                        ui.ctx(),
-                        self.id.with(("check", index)),
-                        is_selected,
-                        CHECK,
-                        motion::ease_out,
-                    );
-                    if check > 0.0 {
+                    if !self.multi && ticked > 0.0 {
                         ui.painter().text(
                             pos2(rect.right() - 10.0 - 7.0, rect.center().y),
                             Align2::CENTER_CENTER,
                             icons::CHECK,
                             icons::font(14.0),
-                            p.accent.gamma_multiply(check),
+                            p.accent.gamma_multiply(ticked),
                         );
                     }
                     if enabled {
@@ -636,5 +856,35 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
                 );
             });
         picked
+    }
+}
+
+/// A 16 px checkbox at `center`, `ticked` 0 → 1: the outline gives way to a
+/// Magenta fill and the tick draws itself in from the left.
+fn checkbox(ui: &Ui, center: egui::Pos2, ticked: f32) {
+    let p = &Palette::ONE_DARK;
+    let rect = Rect::from_center_size(center, egui::Vec2::splat(CHECKBOX));
+    let painter = ui.painter();
+    if ticked < 1.0 {
+        painter.rect_stroke(
+            rect,
+            radius::CHECKBOX,
+            Stroke::new(1.5, p.border.gamma_multiply(1.0 - ticked)),
+            egui::StrokeKind::Inside,
+        );
+    }
+    if ticked > 0.0 {
+        painter.rect_filled(rect, radius::CHECKBOX, p.accent.gamma_multiply(ticked));
+        let mut clip = rect;
+        clip.max.x = rect.left() + rect.width() * ticked;
+        painter
+            .with_clip_rect(clip.intersect(painter.clip_rect()))
+            .text(
+                center,
+                Align2::CENTER_CENTER,
+                icons::CHECK,
+                icons::font(12.0),
+                p.bg_dark,
+            );
     }
 }

@@ -384,6 +384,11 @@ impl eframe::App for SshelfApp {
             self.view = View::Hosts;
             self.hosts.select(&alias);
         }
+        // A group's tunnel row shows that tunnel.
+        if let Some(id) = self.groups.take_open_tunnel() {
+            self.view = View::Tunnels;
+            self.tunnels.select(&id);
+        }
         match self.hosts.take_navigation() {
             Some(Navigate::Settings) => self.view = View::Settings,
             Some(Navigate::Tunnel(id)) => {
