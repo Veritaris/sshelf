@@ -791,15 +791,15 @@ mod tests {
     }
 
     /// An app on a user folder in `root` whose Core has no ssh, and the
-    /// fake-ssh binary for the sandbox.
-    fn app_in(root: &Path) -> Harness<'static, SshelfApp> {
+    /// fake-ssh binary for the sandbox. `tour`: the settings line, if any.
+    fn app_in(root: &Path, tour: &str) -> Harness<'static, SshelfApp> {
         let paths = Paths::new(&root.join("home"), root.join("app"));
         fs::create_dir_all(&paths.ssh_dir).unwrap();
         fs::create_dir_all(&paths.app_dir).unwrap();
         fs::write(
             paths.app_dir.join("settings.toml"),
             format!(
-                "version = 1\nssh_path = '{}'\nreduce_motion = true\ntour = \"done\"\n",
+                "version = 1\nssh_path = '{}'\nreduce_motion = true\n{tour}",
                 root.join("no-ssh-here").display()
             ),
         )
@@ -828,7 +828,7 @@ mod tests {
     fn every_chapter_plays_from_its_first_step() {
         let _one = one_tour();
         let root = tempfile::tempdir().unwrap();
-        let mut harness = app_in(root.path());
+        let mut harness = app_in(root.path(), "tour = \"done\"\n");
         // One through the Help card itself (tall enough to show it without
         // scrolling).
         harness.set_size(egui::vec2(1280.0, 1200.0));
@@ -857,6 +857,39 @@ mod tests {
             .flatten()
             .collect();
         assert!(left.is_empty(), "left behind: {left:?}");
+    }
+
+    /// No `tour` key: the welcome screen instead of the main UI; a choice
+    /// saves `tour = "offered"` and it doesn't come back.
+    #[test]
+    fn a_first_launch_shows_the_welcome_screen() {
+        let root = tempfile::tempdir().unwrap();
+        let ssh_dir = root.path().join("home").join(".ssh");
+        fs::create_dir_all(&ssh_dir).unwrap();
+        fs::write(
+            ssh_dir.join("config"),
+            "Host mine\n    HostName mine.example.com\n",
+        )
+        .unwrap();
+        let mut harness = app_in(root.path(), "");
+        settle(&mut harness, "the config", |app| {
+            app.config.as_ref().is_some_and(|c| c.hosts().is_some())
+        });
+        harness.run_steps(3);
+        harness.get_by_label("Welcome to sshelf");
+        harness.get_by_label_contains("with 1 host.");
+        assert!(harness.query_by_label("Settings").is_none(), "no rail");
+        harness.get_by_label("Open my hosts").click();
+        harness.run_steps(2);
+        settle(&mut harness, "tour = offered", |app| {
+            app.data
+                .as_ref()
+                .is_some_and(|d| d.settings.tour == Some(TourState::Offered))
+        });
+        harness.run_steps(2);
+        assert!(harness.query_by_label("Welcome to sshelf").is_none());
+        harness.get_by_label("Settings");
+        assert!(harness.state().tour.is_none());
     }
 
     /// Plays a started tour from step `from` to its end with *Show me* on
