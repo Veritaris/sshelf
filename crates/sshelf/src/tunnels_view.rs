@@ -4,11 +4,12 @@
 //! with times), the editor (forwards as separate fields, a searchable host,
 //! the ssh command it runs) and the delete dialog.
 
+use std::collections::HashMap;
 use std::time::{Duration, Instant, SystemTime};
 
 use egui::{
-    Align, Align2, Color32, CornerRadius, CursorIcon, FontId, Frame, Id, Layout, Margin, Rect,
-    RichText, Role, Sense, Shape, Stroke, Ui, WidgetInfo, pos2, vec2,
+    Align, Align2, Color32, CursorIcon, FontId, Frame, Id, Layout, Margin, Rect, RichText, Role,
+    Sense, Shape, Stroke, Ui, WidgetInfo, pos2, vec2,
 };
 use sshconf::HostList;
 use sshelf_core::core::{AppData, Command, ConfigSnapshot, SshInfo};
@@ -41,6 +42,9 @@ pub struct TunnelsView {
     open_host: Option<String>,
     /// *Show log* was clicked: scroll the log into view.
     show_log: bool,
+    /// Targets set aside while their forward is *D* (forward index →
+    /// `host:port`), so switching back to L or R keeps what was typed.
+    set_aside: HashMap<usize, String>,
 }
 
 /// `(label, color)` for a tunnel state.
@@ -502,11 +506,19 @@ impl TunnelsView {
                                 &FontId::proportional(14.0),
                                 text_width,
                             );
-                            ui.label(RichText::new(name).size(14.0).color(color));
+                            // Not selectable: clicks (and right clicks for
+                            // the menu) go to the row.
+                            ui.add(
+                                egui::Label::new(RichText::new(name).size(14.0).color(color))
+                                    .selectable(false),
+                            );
                             let (line, color) = sub_line(ui.ctx(), tunnel, status, &data.tunnels);
                             let font = FontId::monospace(11.0);
                             let (line, _) = text::elide(ui.painter(), &line, &font, text_width);
-                            ui.label(RichText::new(line).font(font).color(color));
+                            ui.add(
+                                egui::Label::new(RichText::new(line).font(font).color(color))
+                                    .selectable(false),
+                            );
                         },
                     );
                     if let Some(action) = action {
@@ -811,7 +823,9 @@ impl TunnelsView {
                     field_errors(ui, &errors);
                 });
                 editor_row(ui, ("Reconnect", true), |ui, _| {
-                    ui.horizontal(|ui| {
+                    // As tall as a field, so it lines up with its label.
+                    let size = vec2(ui.available_width(), 32.0);
+                    ui.allocate_ui_with_layout(size, Layout::left_to_right(Align::Center), |ui| {
                         ui.spacing_mut().item_spacing.x = 10.0;
                         switch(ui, &mut draft.auto_reconnect, "Reconnect automatically");
                         ui.label(
@@ -848,12 +862,15 @@ impl TunnelsView {
                         .filter_map(|p| p.strip_prefix(&prefix))
                         .map(capitalized)
                         .collect();
-                    if forward_card(ui, index, forward, &errors) {
+                    let aside = &mut self.set_aside;
+                    if forward_card(ui, (index, forward), &errors, aside) {
                         remove = Some(index);
                     }
                 }
                 if let Some(index) = remove {
                     draft.forwards.remove(index);
+                    // The indexes moved.
+                    self.set_aside.clear();
                 }
                 if ui
                     .add(Button::new("Add forward").icon(icons::PLUS).small())
@@ -893,11 +910,12 @@ impl TunnelsView {
         }
         if close {
             self.editor = None;
+            self.set_aside.clear();
         }
     }
 
-    /// "Delete tunnel “x”?": what else it is removed from; *Cancel* is the
-    /// main button (SPEC.md §10 *Destructive confirmations*).
+    /// "Delete tunnel “x”?": what else it is removed from; *Cancel* (grey)
+    /// has the focus (SPEC.md §10 *Destructive confirmations*).
     fn delete_dialog(&mut self, ctx: &egui::Context, data: &AppData, commands: &mut Vec<Command>) {
         let p = &Palette::ONE_DARK;
         let Some(tunnel) = self
@@ -945,7 +963,7 @@ impl TunnelsView {
                         self.selected = None;
                         close = true;
                     }
-                    let cancel = ui.add(Button::new("Cancel").primary().dialog());
+                    let cancel = ui.add(Button::new("Cancel").dialog());
                     if ui.memory(|m| m.focused().is_none()) {
                         cancel.request_focus();
                     }
@@ -1028,7 +1046,12 @@ fn forward_labels(kind: ForwardKind) -> [&'static str; 4] {
 }
 
 /// One forward as separate fields; returns whether *Remove* was clicked.
-fn forward_card(ui: &mut Ui, index: usize, forward: &mut Forward, errors: &[String]) -> bool {
+fn forward_card(
+    ui: &mut Ui,
+    (index, forward): (usize, &mut Forward),
+    errors: &[String],
+    set_aside: &mut HashMap<usize, String>,
+) -> bool {
     let p = &Palette::ONE_DARK;
     const KIND: f32 = 104.0;
     const BIND: f32 = 130.0;
@@ -1087,9 +1110,20 @@ fn forward_card(ui: &mut Ui, index: usize, forward: &mut Forward, errors: &[Stri
                 let id = Id::unique(("forward_kind", index));
                 if let Some(picked) = nav::segmented(ui, id, &["L", "R", "D"], selected) {
                     forward.kind = kinds[picked];
+                    // A SOCKS forward has no target: keep it aside, and
+                    // bring it back when the forward is L or R again.
                     forward.target = match forward.kind {
-                        ForwardKind::D => None,
-                        _ => forward.target.take().or_else(|| Some(String::new())),
+                        ForwardKind::D => {
+                            if let Some(target) = forward.target.take() {
+                                set_aside.insert(index, target);
+                            }
+                            None
+                        }
+                        _ => forward
+                            .target
+                            .take()
+                            .or_else(|| set_aside.remove(&index))
+                            .or_else(|| Some(String::new())),
                     };
                 }
                 let used = ui.min_rect().width();
@@ -1228,7 +1262,7 @@ fn tunnel_menu(
     chosen
 }
 
-/// The forwards as a table; hovering a row offers to copy where it listens.
+/// The forwards as a table; a non-loopback bind explains itself on hover.
 fn forwards_table(ui: &mut Ui, tunnel: &Tunnel) {
     let p = &Palette::ONE_DARK;
     const ROW: f32 = 32.0;
@@ -1279,25 +1313,8 @@ fn forwards_table(ui: &mut Ui, tunnel: &Tunnel) {
                     (&port.to_uppercase(), p.dim, false),
                 ],
             );
-            for (index, forward) in tunnel.forwards.iter().enumerate() {
-                let (rect, response) = ui.allocate_exact_size(vec2(width, ROW), Sense::click());
-                let address = format!("{}:{}", forward.bind, forward.listen);
-                let name = format!("Copy {address}");
-                response.widget_info(|| WidgetInfo::labeled(Role::Button, true, &name));
-                let hover = motion::fade(
-                    ui.ctx(),
-                    response.id.with("hover"),
-                    response.hovered(),
-                    timing::HOVER,
-                    motion::ease_out,
-                );
-                if hover > 0.0 {
-                    ui.painter().rect_filled(
-                        rect,
-                        CornerRadius::same(radius::ROW),
-                        p.separator.gamma_multiply(hover),
-                    );
-                }
+            for forward in &tunnel.forwards {
+                let (rect, response) = ui.allocate_exact_size(vec2(width, ROW), Sense::hover());
                 // The kind as a chip.
                 let chip = Rect::from_min_size(
                     pos2(rect.left() + 12.0, rect.center().y - 10.0),
@@ -1336,26 +1353,12 @@ fn forwards_table(ui: &mut Ui, tunnel: &Tunnel) {
                         (&port, target_color, true),
                     ],
                 );
-                if hover > 0.0 {
-                    ui.painter().text(
-                        pos2(rect.right() - 14.0, rect.center().y),
-                        Align2::CENTER_CENTER,
-                        icons::COPY,
-                        icons::font(14.0),
-                        p.accent.gamma_multiply(hover),
-                    );
-                }
-                let response = response.on_hover_cursor(CursorIcon::Copy);
                 if forward.is_exposed() {
                     let hint = exposed_hint(forward.kind);
-                    let _ = popup::tip_below(response.clone(), |ui| {
+                    popup::tip_below(response, |ui| {
                         ui.label(hint);
                     });
                 }
-                if response.clicked() {
-                    ui.ctx().copy_text(address.clone());
-                }
-                let _ = index;
             }
         });
 }
@@ -1804,6 +1807,49 @@ mod tests {
         harness.get_by_label("Delete").click();
         harness.step();
         assert_eq!(harness.state().1, [Command::DeleteTunnel("t-1".into())]);
+    }
+
+    #[test]
+    fn the_row_menu_starts_a_tunnel() {
+        let mut harness = harness(fixture(TunnelState::Stopped), TunnelsView::default());
+        harness.step();
+        // On the name itself, as people do.
+        harness
+            .get_all_by_label("Prod DB")
+            .last()
+            .unwrap()
+            .click_secondary();
+        harness.step();
+        harness.step();
+        // The row's own button is the first "Start"; the menu's is last.
+        harness.get_all_by_label("Start").last().unwrap().click();
+        harness.step();
+        harness.step();
+        assert_eq!(harness.state().1, [Command::StartTunnel("t-1".into())]);
+    }
+
+    #[test]
+    fn switching_a_forward_kind_keeps_the_target() {
+        let f = fixture(TunnelState::Stopped);
+        let view = TunnelsView {
+            editor: Some(tunnel()),
+            ..TunnelsView::default()
+        };
+        let mut harness = harness(f, view);
+        harness.step();
+        harness.get_by_label("D").click();
+        harness.step();
+        harness.step();
+        let forward = |h: &Harness<'_, (TunnelsView, Vec<Command>)>| {
+            h.state().0.editor.as_ref().unwrap().forwards[0].clone()
+        };
+        assert_eq!(forward(&harness).kind, ForwardKind::D);
+        assert_eq!(forward(&harness).target, None);
+        harness.get_by_label("L").click();
+        harness.step();
+        harness.step();
+        assert_eq!(forward(&harness).target.as_deref(), Some("db:5432"));
+        assert_eq!(forward(&harness).listen, 5432);
     }
 
     #[test]

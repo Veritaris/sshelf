@@ -2219,8 +2219,8 @@ fn conflict(
                     RichText::new("Write your version over the changes on disk?")
                         .color(p.text_strong),
                 );
-                // The safe way is the main button (SPEC.md §10).
-                if ui.add(Button::new("Keep them").primary().small()).clicked() {
+                // The safe way is the grey one (SPEC.md §10).
+                if ui.add(Button::new("Keep them").small()).clicked() {
                     session.confirm_overwrite = false;
                 }
                 if ui.add(Button::new("Overwrite").danger().small()).clicked() {
@@ -2550,7 +2550,7 @@ mod tests {
         harness.get_by_label("Discard my changes");
         harness.get_by_label("Disk vs. when you started");
         assert!(harness.get_by_label("Save").accesskit_node().is_disabled());
-        // Overwriting asks first; the safe answer is the main one.
+        // Overwriting asks first.
         harness.get_by_label("Overwrite…").click();
         steps(&mut harness);
         harness.get_by_label("Keep them").click();
