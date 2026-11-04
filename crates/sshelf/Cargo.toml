@@ -48,5 +48,5 @@ tray-icon = { version = "0.26.1", default-features = false, features = ["ksni"] 
 
 [dev-dependencies]
 # Headless UI tests: drive views through their accessibility labels.
-egui_kittest = { version = "0.37.0" }
+egui_kittest = { version = "0.37.0", features = ["eframe"] }
 tempfile = { version = "3.27.0" }

@@ -10,6 +10,7 @@ use egui::{
 
 use crate::icon::Status;
 use crate::theme::{Palette, radius, timing};
+use crate::tour::targets::{self, Target};
 use crate::widgets::{marks, nav, popup};
 use crate::{fonts, icons, motion, window};
 
@@ -36,6 +37,8 @@ pub struct Rail<'a> {
     pub running: usize,
     /// The app mark's dot.
     pub status: Status,
+    /// Settings can't be opened, and why (the tour).
+    pub settings_off: Option<&'a str>,
 }
 
 struct Item {
@@ -87,9 +90,11 @@ fn shortcut(key: Key) -> String {
 pub fn show(ui: &mut Ui, view: &mut View, rail: &Rail) -> bool {
     let p = &Palette::ONE_DARK;
     for item in &ITEMS {
-        if ui
-            .ctx()
-            .input_mut(|i| i.consume_key(Modifiers::COMMAND, item.key))
+        let off = item.view == View::Settings && rail.settings_off.is_some();
+        if !off
+            && ui
+                .ctx()
+                .input_mut(|i| i.consume_key(Modifiers::COMMAND, item.key))
         {
             *view = item.view;
         }
@@ -105,11 +110,9 @@ pub fn show(ui: &mut Ui, view: &mut View, rail: &Rail) -> bool {
     let x = rect.center().x;
     let at = |top: f32| Rect::from_min_size(pos2(x - ITEM / 2.0, top), Vec2::splat(ITEM));
     let logo_top = rect.top() + 16.0;
-    logo(
-        ui,
-        Rect::from_min_size(pos2(x - LOGO / 2.0, logo_top), Vec2::splat(LOGO)),
-        rail.status,
-    );
+    let logo_rect = Rect::from_min_size(pos2(x - LOGO / 2.0, logo_top), Vec2::splat(LOGO));
+    logo(ui, logo_rect, rail.status);
+    targets::register(ui.ctx(), Target::RailLogo, logo_rect.expand(4.0));
     let first = logo_top + LOGO + 12.0 + GAP;
     let settings = at(rect.bottom() - 12.0 - ITEM);
     let rects = [
@@ -132,13 +135,28 @@ pub fn show(ui: &mut Ui, view: &mut View, rail: &Rail) -> bool {
         if item.view == View::Tunnels && rail.running > 0 {
             tip.push_str(&format!(" · {} running", rail.running));
         }
-        let response = rail_item(ui, rect, item, &tip, item.view == *view);
+        let off = (item.view == View::Settings)
+            .then_some(rail.settings_off)
+            .flatten();
+        if let Some(why) = off {
+            tip = why.to_string();
+        }
+        let response = ui
+            .add_enabled_ui(off.is_none(), |ui| {
+                rail_item(ui, rect, item, &tip, item.view == *view)
+            })
+            .inner;
         if item.view == View::Tunnels && rail.running > 0 {
             // The activity dot: 8 px, 6 px in from the top-right corner.
             let center = rect.right_top() + vec2(-10.0, 10.0);
             marks::paint_dot(ui.painter(), center, marks::DOT, p.green);
         }
-        if response.clicked() {
+        let clicked = match item.view {
+            View::Tunnels => targets::clicked(ui.ctx(), Target::RailTunnels, &response),
+            View::Groups => targets::clicked(ui.ctx(), Target::RailGroups, &response),
+            _ => response.clicked(),
+        };
+        if clicked && off.is_none() {
             *view = item.view;
         }
     }
@@ -275,6 +293,7 @@ mod tests {
                         orphans: &state.orphans,
                         running: state.running,
                         status: Status::Running,
+                        settings_off: None,
                     };
                     if show(ui, &mut state.view, &rail) {
                         state.orphan_clicks += 1;

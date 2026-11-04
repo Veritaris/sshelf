@@ -1,0 +1,31 @@
+# fake-ssh scenarios for the tour's sample hosts (SPEC.md §10 Onboarding tour).
+# A delay makes progress visible: checks tick, tunnels show Starting first.
+
+[hosts.web-01]
+scenario = "ok"
+delay_ms = 250
+
+[hosts.web-02]
+scenario = "ok"
+delay_ms = 300
+
+[hosts.db-primary]
+scenario = "ok"
+delay_ms = 350
+
+[hosts.bastion]
+scenario = "ok"
+delay_ms = 600
+
+[hosts.staging-api]
+scenario = "fail-auth"
+delay_ms = 300
+
+[hosts.ci-runner]
+scenario = "unreachable"
+delay_ms = 700
+
+[hosts.backup-nas]
+scenario = "fail-auth"
+after_install = "ok"
+delay_ms = 600

@@ -23,6 +23,7 @@ use sshelf_core::supervisor::{Snapshot, TunnelState};
 use sshelf_core::tunnels::{DEFAULT_BIND, Forward, ForwardKind, Tunnel};
 
 use crate::theme::{Palette, SWATCHES, radius, timing};
+use crate::tour::targets::{self, Target};
 use crate::tunnels_view::state_label;
 use crate::widgets::button::{self, Button};
 use crate::widgets::color::{self, Picking};
@@ -171,6 +172,15 @@ impl HostDetail {
         Some(address)
     }
 
+    /// The host's first `identityfile` from `ssh -G`, once resolved (a
+    /// tunnel's *Load key into agent*).
+    pub fn identity_file(&self, alias: &str) -> Option<String> {
+        let (_, Ok(resolved), _) = self.resolved.get(alias)? else {
+            return None;
+        };
+        resolved.get("identityfile").map(str::to_string)
+    }
+
     /// "New tunnel…" from somewhere else (the host list's menu).
     pub fn request_new_tunnel(&mut self, alias: String) {
         self.new_tunnel = Some(alias);
@@ -289,11 +299,21 @@ impl HostDetail {
         let tunnels_label = format!("Tunnels · {}", tunnels.len());
         let labels = ["Overview", "Effective config", tunnels_label.as_str()];
         let selected = Tab::ALL.iter().position(|t| *t == self.tab).unwrap_or(0);
+        let tabs_top = ui.cursor().top();
         if let Some(index) = nav::tabs(ui, Id::unique("host_detail_tabs"), &labels, selected) {
             self.tab = Tab::ALL[index];
         }
+        // The *Effective config* tab, for the tour (its label's place).
+        let tab_rect = egui::Rect::from_min_size(
+            egui::pos2(ui.min_rect().left() + 100.0, tabs_top),
+            egui::vec2(130.0, 32.0),
+        );
+        targets::register(ui.ctx(), Target::EffectiveConfigTab, tab_rect);
+        if targets::take_click(ui.ctx(), Target::EffectiveConfigTab) {
+            self.tab = Tab::Config;
+        }
         ui.add_space(8.0);
-        egui::ScrollArea::vertical()
+        let response = egui::ScrollArea::vertical()
             .id_salt("host_detail")
             .auto_shrink([false, false])
             .show(ui, |ui| match self.tab {
@@ -301,7 +321,22 @@ impl HostDetail {
                 Tab::Config => self.effective(ui, &alias, generation, shown.inset, &mut commands),
                 Tab::Tunnels => self.tunnels(ui, &alias, &tunnels, shown.states, &mut commands),
             });
+        targets::register(
+            ui.ctx(),
+            Target::DetailTabs,
+            response.inner_rect.with_min_y(tabs_top),
+        );
         commands
+    }
+
+    /// The *Effective config* tab is open (the tour's step 5).
+    pub fn on_effective_config(&self) -> bool {
+        self.tab == Tab::Config
+    }
+
+    /// Back to *Overview* (the tour entering a step).
+    pub fn show_overview(&mut self) {
+        self.tab = Tab::Overview;
     }
 
     /// Takes the saved metadata: a new host resets the notes draft; notes
@@ -433,7 +468,8 @@ impl HostDetail {
                 .icon(icons::SQUARE_TERMINAL)
                 .primary()
                 .tip(tip);
-            if ui.add_enabled(tools.is_none(), connect).clicked() {
+            let response = ui.add_enabled(tools.is_none(), connect);
+            if targets::clicked(ui.ctx(), Target::Connect, &response) {
                 commands.push(Command::Connect(alias.to_string()));
             }
             let new_tunnel = Button::new("New tunnel")
@@ -444,7 +480,8 @@ impl HostDetail {
             }
             let edit = Button::new("Edit")
                 .tip(read_only.unwrap_or("Edit this host's block in the config"));
-            if ui.add_enabled(read_only.is_none(), edit).clicked() {
+            let response = ui.add_enabled(read_only.is_none(), edit);
+            if targets::clicked(ui.ctx(), Target::Edit, &response) {
                 self.action = Some(DetailAction::Edit(alias.to_string()));
             }
             let rename = Button::new("Rename…")
@@ -1337,6 +1374,8 @@ fn health(
     let p = &Palette::ONE_DARK;
     let checking = shown.health.is_some_and(|h| h.checking.contains(alias));
     let report = shown.health.and_then(|h| h.reports.get(alias));
+    let line = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(ui.available_width(), 28.0));
+    targets::register(ui.ctx(), Target::HealthLine, line);
     row(ui, 28.0, |ui| {
         ui.label(RichText::new("Health").size(13.0).color(p.dim));
         util::health_mark(ui, shown.health, alias, 8.0);

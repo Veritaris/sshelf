@@ -25,6 +25,7 @@ use sshelf_core::supervisor::{Snapshot, TunnelState};
 
 use crate::key_dialog::{KeyAction, KeyDialog};
 use crate::theme::{Palette, radius};
+use crate::tour::targets::{self, Target};
 use crate::widgets::button::Button;
 use crate::widgets::dropdown::{Choice, Dropdown};
 use crate::widgets::field::TextField;
@@ -793,6 +794,40 @@ impl HostEditor {
 
     /// Opens the "Generate key" window for `alias` (also from the host
     /// detail's health banner, without an editor).
+    /// The editor shows *Raw text*.
+    pub fn is_raw(&self) -> bool {
+        self.session.as_ref().is_some_and(|s| s.tab == Tab::Raw)
+    }
+
+    /// Back to *Form* (the tour entering a step).
+    pub fn show_form(&mut self) {
+        if let Some(session) = &mut self.session {
+            session.tab = Tab::Form;
+        }
+    }
+
+    /// Sets `keyword` in the edited block, as typing it into the form would
+    /// (the tour's "We changed User to admin").
+    pub fn set_value(&mut self, keyword: &str, value: &str) {
+        if let Some(session) = &mut self.session {
+            session.text = edit::set(&session.text, keyword, Some(&[value.to_string()]));
+        }
+    }
+
+    /// The key window: open (`Some`), and whether its key was created.
+    pub fn key_window(&self) -> Option<bool> {
+        self.keys.state()
+    }
+
+    /// Fills the key window's passphrase fields (the tour pre-fills them).
+    pub fn prefill_key_passphrase(&mut self, passphrase: &str) {
+        self.keys.prefill_passphrase(passphrase);
+    }
+
+    pub fn close_keys(&mut self) {
+        self.keys.close();
+    }
+
     pub fn open_keys(&mut self, snapshot: &ConfigSnapshot, alias: &str) {
         self.keys.open(alias, &ssh_dir(snapshot));
     }
@@ -1098,15 +1133,20 @@ fn header(ui: &mut Ui, session: &mut Session) -> bool {
     let mut controls = |ui: &mut Ui, right_to_left: bool| {
         let mut mode = |ui: &mut Ui| {
             let selected = usize::from(session.tab == Tab::Raw);
-            let picked = nav::segmented(
+            let (picked, rect) = nav::segmented_rect(
                 ui,
                 Id::unique("host_editor_mode"),
                 &["Form", "Raw text"],
                 selected,
             );
+            targets::register(ui.ctx(), Target::RawTextTab, rect);
+            targets::register(ui.ctx(), Target::EditorForm, rect);
             match picked {
                 Some(0) => session.tab = Tab::Form,
                 Some(_) => session.tab = Tab::Raw,
+                None if targets::take_click(ui.ctx(), Target::RawTextTab) => {
+                    session.tab = Tab::Raw;
+                }
                 None => {}
             }
         };
@@ -1154,10 +1194,13 @@ fn header(ui: &mut Ui, session: &mut Session) -> bool {
 fn body(ui: &mut Ui, session: &mut Session, snapshot: &ConfigSnapshot, inset: Color32) {
     // Fields and selects are inset: lighter than a dark pane (the cards').
     ui.visuals_mut().extreme_bg_color = inset;
+    let top = ui.cursor().top();
     match session.tab {
         Tab::Form => form(ui, session, snapshot),
         Tab::Raw => raw(ui, session, inset),
     }
+    let rect = ui.min_rect().with_min_y(top).intersect(ui.clip_rect());
+    targets::register(ui.ctx(), Target::EditorForm, rect);
 }
 
 /// A form row: the label (with a yellow dot while the value differs from
@@ -2027,6 +2070,7 @@ fn changes(ui: &mut Ui, session: &Session, inset: Color32) {
     } else {
         String::new()
     };
+    let top = ui.cursor().top();
     card(ui, inset, "Changes to write", &note, |ui| {
         if !session.dirty() {
             ui.label(RichText::new("No changes yet.").size(12.0).color(p.dim));
@@ -2039,6 +2083,8 @@ fn changes(ui: &mut Ui, session: &Session, inset: Color32) {
                 .color(p.dim),
         );
     });
+    let rect = ui.min_rect().with_min_y(top).intersect(ui.clip_rect());
+    targets::register(ui.ctx(), Target::EditorChanges, rect);
 }
 
 /// A new host: where the block goes in its file, with the lines around it.
@@ -2288,7 +2334,8 @@ fn footer(
         if busy == Some(Pending::Save) {
             save = save.busy();
         }
-        if ui.add_enabled(can_save, save).clicked() {
+        let response = ui.add_enabled(can_save, save);
+        if targets::clicked(ui.ctx(), Target::EditorSave, &response) && can_save {
             session.pending = Some((id, Pending::Save, session.text.clone()));
             commands.push(Command::SaveEdit {
                 edit: session.edit(id),

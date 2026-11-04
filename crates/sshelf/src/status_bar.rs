@@ -13,6 +13,7 @@ use sshelf_core::supervisor::{Snapshot, TunnelState};
 
 use crate::icons;
 use crate::theme::Palette;
+use crate::tour::targets::{self, Target};
 use crate::widgets::marks;
 use crate::window;
 
@@ -69,6 +70,7 @@ fn agent(ssh: &SshInfo) -> Option<(String, egui::Color32)> {
 pub fn show(ui: &mut Ui, status: &Status, error: &mut Option<String>) {
     let p = &Palette::ONE_DARK;
     let rect = ui.max_rect();
+    targets::register(ui.ctx(), Target::StatusBar, rect);
     // The window's bottom corners.
     let corner = window::corner(ui.ctx());
     let corners = CornerRadius {
@@ -118,7 +120,7 @@ pub fn show(ui: &mut Ui, status: &Status, error: &mut Option<String>) {
 fn left_items(ui: &mut Ui, status: &Status) {
     let p = &Palette::ONE_DARK;
     ui.spacing_mut().item_spacing.x = 16.0;
-    ui.horizontal(|ui| {
+    let count = ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
         let (dot, text) = if status.running == 0 {
             (p.comment, "no tunnels running".to_string())
@@ -131,6 +133,11 @@ fn left_items(ui: &mut Ui, status: &Status) {
         marks::dot(ui, dot);
         ui.label(small(text, p.dim));
     });
+    targets::register(
+        ui.ctx(),
+        Target::StatusRunning,
+        count.response.rect.expand(4.0),
+    );
     if status.failed > 0 {
         ui.label(small(format!("{} failed", status.failed), p.red));
     }

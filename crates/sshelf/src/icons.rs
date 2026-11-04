@@ -21,15 +21,18 @@ pub const CHEVRON_RIGHT: char = '\u{e06f}';
 pub const CHEVRON_UP: char = '\u{e070}';
 pub const CIRCLE_CHECK: char = '\u{e226}';
 pub const CIRCLE_X: char = '\u{e084}';
+pub const COMPASS: char = '\u{e09b}';
 pub const COPY: char = '\u{e09e}';
 pub const EYE: char = '\u{e0ba}';
 pub const EYE_OFF: char = '\u{e0bb}';
+pub const FILE_TEXT: char = '\u{e0cc}';
 pub const FOLDER: char = '\u{e0d7}';
 pub const INFO: char = '\u{e0f9}';
 pub const KEY_ROUND: char = '\u{e4a3}';
 pub const LAYERS: char = '\u{e529}';
 pub const LOCK: char = '\u{e10b}';
 pub const MINUS: char = '\u{e11c}';
+pub const MOUSE_POINTER_CLICK: char = '\u{e120}';
 pub const PENCIL: char = '\u{e1f9}';
 pub const PLAY: char = '\u{e13c}';
 pub const PLUS: char = '\u{e13d}';
@@ -40,6 +43,7 @@ pub const SEARCH: char = '\u{e151}';
 pub const SERVER: char = '\u{e153}';
 pub const SETTINGS: char = '\u{e154}';
 pub const SHIELD_ALERT: char = '\u{e1fe}';
+pub const SHIELD_CHECK: char = '\u{e1ff}';
 pub const SQUARE: char = '\u{e167}';
 pub const SQUARE_TERMINAL: char = '\u{e20a}';
 pub const STAR: char = '\u{e176}';
@@ -59,15 +63,18 @@ pub const ALL: &[char] = &[
     CHEVRON_UP,
     CIRCLE_CHECK,
     CIRCLE_X,
+    COMPASS,
     COPY,
     EYE,
     EYE_OFF,
+    FILE_TEXT,
     FOLDER,
     INFO,
     KEY_ROUND,
     LAYERS,
     LOCK,
     MINUS,
+    MOUSE_POINTER_CLICK,
     PENCIL,
     PLAY,
     PLUS,
@@ -78,6 +85,7 @@ pub const ALL: &[char] = &[
     SERVER,
     SETTINGS,
     SHIELD_ALERT,
+    SHIELD_CHECK,
     SQUARE,
     SQUARE_TERMINAL,
     STAR,

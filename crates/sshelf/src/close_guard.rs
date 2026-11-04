@@ -14,6 +14,7 @@ use sshelf_core::supervisor::{Snapshot, TunnelState};
 
 use crate::fonts;
 use crate::theme::{Palette, radius};
+use crate::tour::targets::{self, Target};
 use crate::widgets::button::Button;
 use crate::widgets::marks;
 use crate::widgets::switch::switch;
@@ -30,6 +31,11 @@ pub struct CloseGuard {
     confirmed: bool,
     /// The pending close request is Quit from the tray.
     from_tray: bool,
+    /// The tour runs: a choice is only reported ([`Self::take_tour_choice`]).
+    pub tour: bool,
+    tour_choice: Option<CloseBehavior>,
+    /// The dialog opened this frame.
+    fresh: bool,
 }
 
 /// Tunnels that would be stopped by quitting.
@@ -101,6 +107,33 @@ pub fn show(ctx: &egui::Context) {
 }
 
 impl CloseGuard {
+    /// The dialog is open.
+    pub fn is_asking(&self) -> bool {
+        self.asking
+    }
+
+    /// Opens the dialog (the tour entering its step), offering the tray.
+    pub fn ask(&mut self) {
+        if !self.asking {
+            // Opened by a click whose release is in this frame: that
+            // release is not a click on the backdrop.
+            self.fresh = true;
+        }
+        self.asking = true;
+        self.offer_tray = true;
+    }
+
+    /// Closes the dialog as *Cancel* would.
+    pub fn dismiss(&mut self) {
+        self.asking = false;
+        self.remember = false;
+    }
+
+    /// What was chosen in the dialog during the tour, once.
+    pub fn take_tour_choice(&mut self) -> Option<CloseBehavior> {
+        self.tour_choice.take()
+    }
+
     /// Quit from the tray: the same close request as the window's.
     pub fn quit_from_tray(&mut self, ctx: &egui::Context) {
         self.from_tray = true;
@@ -154,6 +187,7 @@ impl CloseGuard {
         }
         let p = &Palette::ONE_DARK;
         let running = tunnels.len();
+        let fresh = std::mem::take(&mut self.fresh);
         let plural = if running == 1 { "" } else { "s" };
         let mut commands = Vec::new();
         let mut choice = None;
@@ -201,17 +235,16 @@ impl CloseGuard {
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 8.0;
                     // Right to left: the main button ends up rightmost.
-                    if self.offer_tray
-                        && ui
-                            .add(
-                                Button::new("Minimize to tray")
-                                    .primary()
-                                    .dialog()
-                                    .tip("Hide the window; the tunnels keep running"),
-                            )
-                            .clicked()
-                    {
-                        choice = Some(CloseBehavior::MinimizeToTray);
+                    if self.offer_tray {
+                        let minimize = ui.add(
+                            Button::new("Minimize to tray")
+                                .primary()
+                                .dialog()
+                                .tip("Hide the window; the tunnels keep running"),
+                        );
+                        if targets::clicked(ui.ctx(), Target::CloseMinimize, &minimize) {
+                            choice = Some(CloseBehavior::MinimizeToTray);
+                        }
                     }
                     let mut stop =
                         Button::new(format!("Stop {running} tunnel{plural} and quit")).dialog();
@@ -224,7 +257,15 @@ impl CloseGuard {
                     cancel = ui.add(Button::new("Cancel").ghost().dialog()).clicked();
                 });
             });
-        if let Some(behavior) = choice {
+        targets::register(ctx, Target::CloseDialog, response.response.rect);
+        if let Some(behavior) = choice
+            && self.tour
+        {
+            // The tour shows what would happen instead (SPEC.md §10).
+            self.asking = false;
+            self.remember = false;
+            self.tour_choice = Some(behavior);
+        } else if let Some(behavior) = choice {
             if self.remember
                 && let Some(settings) = settings
             {
@@ -241,7 +282,8 @@ impl CloseGuard {
             } else {
                 hide(ctx);
             }
-        } else if cancel || response.should_close() {
+        // In the tour the dialog is a step: only its buttons close it.
+        } else if cancel || (response.should_close() && !fresh && !self.tour) {
             self.asking = false;
             self.remember = false;
         }

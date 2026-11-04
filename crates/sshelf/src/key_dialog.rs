@@ -18,6 +18,7 @@ use sshelf_core::keygen::{
 use zeroize::Zeroize;
 
 use crate::theme::{Palette, radius, timing};
+use crate::tour::targets::{self, Target};
 use crate::widgets::button::{self, Button};
 use crate::widgets::dropdown::{Choice, Dropdown};
 use crate::widgets::field::TextField;
@@ -236,7 +237,7 @@ impl KeyDialog {
             return (commands, action);
         };
         let mut close = false;
-        egui::Window::new("Generate key")
+        let window = egui::Window::new("Generate key")
             .id(Id::unique("generate_key"))
             .title_bar(false)
             .collapsible(false)
@@ -281,10 +282,33 @@ impl KeyDialog {
                     }
                 }
             });
+        if let Some(window) = window {
+            targets::register(ctx, Target::KeyWindow, window.response.rect);
+        }
         if close {
             self.form = None;
         }
         (commands, action)
+    }
+
+    /// Open (`Some`), and whether its key was created.
+    pub fn state(&self) -> Option<bool> {
+        self.form.as_ref().map(|f| f.generated.is_some())
+    }
+
+    pub fn close(&mut self) {
+        self.form = None;
+    }
+
+    /// Fills both passphrase fields while nothing was typed (the tour).
+    pub fn prefill_passphrase(&mut self, passphrase: &str) {
+        if let Some(form) = &mut self.form
+            && form.passphrase.is_empty()
+            && form.generated.is_none()
+        {
+            form.passphrase = passphrase.to_string();
+            form.confirm = passphrase.to_string();
+        }
     }
 }
 
@@ -513,7 +537,8 @@ fn options(ui: &mut Ui, form: &mut Form, id: u64, commands: &mut Vec<Command>) -
                 if let Some(why) = &why {
                     generate = generate.tip(why);
                 }
-                if ui.add_enabled(!blocked && !busy, generate).clicked() {
+                let response = ui.add_enabled(!blocked && !busy, generate);
+                if targets::clicked(ui.ctx(), Target::KeyGenerate, &response) && !blocked && !busy {
                     form.error = None;
                     if hardware {
                         form.in_terminal = true;
@@ -840,14 +865,14 @@ fn result(
         let explain = |ui: &mut Ui, text: &str, color: Color32| {
             ui.add(egui::Label::new(RichText::new(text).size(12.0).color(color)).wrap());
         };
-        let button_column = |ui: &mut Ui, button: Button, enabled: bool| -> bool {
+        let button_column = |ui: &mut Ui, button: Button, enabled: bool| -> egui::Response {
             let (rect, _) = ui.allocate_exact_size(vec2(170.0, 30.0), Sense::hover());
             let mut child = ui.new_child(
                 egui::UiBuilder::new()
                     .max_rect(rect)
                     .layout(Layout::left_to_right(Align::Center)),
             );
-            child.add_enabled(enabled, button).clicked()
+            child.add_enabled(enabled, button)
         };
 
         // 1. Use in this host.
@@ -859,7 +884,7 @@ fn result(
                 "Open the host in the editor first"
             };
             let use_it = Button::new("Use in this host").small().tip(tip);
-            if button_column(ui, use_it, editing) {
+            if button_column(ui, use_it, editing).clicked() {
                 action = Some(KeyAction::UseInHost {
                     identity_file: identity_file.clone(),
                 });
@@ -886,7 +911,7 @@ fn result(
                 "Runs ssh-add"
             };
             let add = Button::new("Add to agent").small().tip(tip);
-            if button_column(ui, add, !service_stopped) {
+            if button_column(ui, add, !service_stopped).clicked() {
                 commands.push(Command::AddKeyToAgent {
                     path: key.path.clone(),
                     encrypted: key.encrypted,
@@ -922,7 +947,8 @@ fn result(
                 "Save the host first"
             };
             let install = Button::new("Install on server").small().tip(tip);
-            if button_column(ui, install, saved) {
+            let response = button_column(ui, install, saved);
+            if targets::clicked(ui.ctx(), Target::KeyInstall, &response) && saved {
                 commands.push(Command::InstallKey {
                     alias: form.alias.clone(),
                     public_line: key.public_line.clone(),

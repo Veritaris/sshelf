@@ -21,6 +21,7 @@ mod status_bar;
 mod test_util;
 mod theme;
 mod toast;
+mod tour;
 mod tray;
 mod tray_menu;
 mod tunnels_view;

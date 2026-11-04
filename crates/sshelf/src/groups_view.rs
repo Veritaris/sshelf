@@ -14,6 +14,8 @@ use sshelf_core::supervisor::{GroupState, Owner, Snapshot, TunnelState};
 use sshelf_core::tunnels::{Group, Tunnel};
 
 use crate::theme::{Palette, radius, timing};
+use crate::tour::steps;
+use crate::tour::targets::{self, Target};
 use crate::tunnels_view::{
     capitalized, editor_row, field_errors, mark, owner_names, reconnect_text, state_label,
 };
@@ -95,7 +97,27 @@ impl GroupsView {
         self.open_tunnel.take()
     }
 
-    fn select(&mut self, id: &str) {
+    /// The editor is open.
+    pub fn is_editing(&self) -> bool {
+        self.editor.is_some()
+    }
+
+    pub fn close_editor(&mut self) {
+        self.editor = None;
+    }
+
+    /// Opens the editor on `group` (the tour, with its changes).
+    pub fn edit(&mut self, group: Group) {
+        self.selected = Some(group.id.clone());
+        self.editor = Some(group);
+    }
+
+    /// The draft in the editor.
+    pub fn draft_mut(&mut self) -> Option<&mut Group> {
+        self.editor.as_mut()
+    }
+
+    pub fn select(&mut self, id: &str) {
         self.selected = Some(id.to_string());
         self.editor = None;
     }
@@ -260,6 +282,10 @@ impl GroupsView {
                     if response.clicked() {
                         self.select(&group.id);
                     }
+                    let tour_id = steps::static_id(&group.id);
+                    if let Some(id) = tour_id {
+                        targets::register(ui.ctx(), Target::GroupRow(id), rect);
+                    }
                     let mut row = ui.new_child(
                         egui::UiBuilder::new()
                             .max_rect(rect.shrink2(vec2(12.0, 0.0)))
@@ -305,11 +331,16 @@ impl GroupsView {
                         } else {
                             "Start this group"
                         };
-                        if popup::tip_below(response, |ui| {
+                        let response = popup::tip_below(response, |ui| {
                             ui.label(tip);
-                        })
-                        .changed()
-                        {
+                        });
+                        let changed = match tour_id {
+                            Some(id) => {
+                                targets::changed(ui.ctx(), Target::GroupSwitch(id), &response)
+                            }
+                            None => response.changed(),
+                        };
+                        if changed {
                             commands.push(if active {
                                 Command::StopGroup(group.id.clone())
                             } else {
@@ -406,10 +437,8 @@ impl GroupsView {
                 } else {
                     "Change its name, tunnels or start"
                 };
-                if ui
-                    .add_enabled(!active, Button::new("Edit").tip(edit_tip))
-                    .clicked()
-                {
+                let response = ui.add_enabled(!active, Button::new("Edit").tip(edit_tip));
+                if targets::clicked(ui.ctx(), Target::GroupEdit, &response) && !active {
                     self.editor = Some(group.clone());
                 }
                 if matches!(state, GroupState::Degraded { .. })
@@ -600,7 +629,9 @@ impl GroupsView {
                     if let Some(why) = &why {
                         save_button = save_button.tip(why);
                     }
-                    save = ui.add_enabled(problems.is_empty(), save_button).clicked();
+                    let response = ui.add_enabled(problems.is_empty(), save_button);
+                    save = targets::clicked(ui.ctx(), Target::GroupSave, &response)
+                        && problems.is_empty();
                     close = ui.add(Button::new("Cancel").ghost()).clicked();
                     if !problems.is_empty() {
                         let count = match problems.len() {
@@ -618,6 +649,7 @@ impl GroupsView {
                 ui.add_space(16.0);
             });
 
+        targets::register(ui.ctx(), Target::GroupEditor, ui.max_rect());
         egui::ScrollArea::vertical()
             .id_salt("group_editor")
             .auto_shrink([false, false])

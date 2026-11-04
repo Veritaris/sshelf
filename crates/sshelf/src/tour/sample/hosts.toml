@@ -1,0 +1,26 @@
+version = 1
+
+[hosts.web-01]
+tags = ["web", "prod"]
+notes = "Front web server behind the load balancer."
+favorite = true
+
+[hosts.web-02]
+tags = ["web", "prod"]
+
+[hosts.db-primary]
+tags = ["db", "prod"]
+notes = "Only reachable through bastion."
+
+[hosts.bastion]
+tags = ["infra"]
+
+[hosts.staging-api]
+tags = ["staging"]
+
+[hosts.ci-runner]
+tags = ["ci"]
+
+[hosts.backup-nas]
+tags = ["infra"]
+notes = "Doesn't know your key yet."

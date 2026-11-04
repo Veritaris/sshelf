@@ -18,12 +18,14 @@ use sshelf_core::supervisor::{FailureKind, Owner, Snapshot, TunnelState, TunnelS
 use sshelf_core::tunnels::{DEFAULT_BIND, Forward, ForwardKind, Tunnel, TunnelsFile};
 
 use crate::theme::{Palette, radius, timing};
+use crate::tour::steps;
+use crate::tour::targets::Target;
 use crate::widgets::button::{self, Button};
 use crate::widgets::dropdown::{Choice, Dropdown};
 use crate::widgets::field::TextField;
 use crate::widgets::switch::switch;
 use crate::widgets::{marks, nav, popup, text};
-use crate::{fonts, icons, motion};
+use crate::{fonts, icons, motion, tour};
 
 /// Width of the tunnel list.
 const LIST_WIDTH: f32 = 340.0;
@@ -45,6 +47,8 @@ pub struct TunnelsView {
     /// Targets set aside while their forward is *D* (forward index →
     /// `host:port`), so switching back to L or R keeps what was typed.
     set_aside: HashMap<usize, String>,
+    /// A key fix the failure banner asked for, for the app.
+    key_fix: Option<KeyFix>,
 }
 
 /// `(label, color)` for a tunnel state.
@@ -319,6 +323,26 @@ impl TunnelsView {
         self.open_host.take()
     }
 
+    /// A key fix the failure banner asked for, once.
+    pub fn take_key_fix(&mut self) -> Option<KeyFix> {
+        self.key_fix.take()
+    }
+
+    /// The editor is open.
+    pub fn is_editing(&self) -> bool {
+        self.editor.is_some()
+    }
+
+    pub fn close_editor(&mut self) {
+        self.editor = None;
+        self.set_aside.clear();
+    }
+
+    /// The draft in the editor (the tour fills it in).
+    pub fn draft_mut(&mut self) -> Option<&mut Tunnel> {
+        self.editor.as_mut()
+    }
+
     /// Opens the editor for a new tunnel to `host` (host detail "New tunnel").
     pub fn new_tunnel(&mut self, host: &str, file: &TunnelsFile) {
         self.selected = None;
@@ -434,10 +458,8 @@ impl TunnelsView {
                     .color(p.dim),
             );
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui
-                    .add(Button::icon_only(icons::PLUS, "New tunnel"))
-                    .clicked()
-                {
+                let response = ui.add(Button::icon_only(icons::PLUS, "New tunnel"));
+                if tour::targets::clicked(ui.ctx(), Target::NewTunnel, &response) {
                     self.new_tunnel("", &data.tunnels);
                 }
             });
@@ -521,11 +543,24 @@ impl TunnelsView {
                             );
                         },
                     );
+                    let tour_id = steps::static_id(&tunnel.id);
+                    if let Some(id) = tour_id {
+                        tour::targets::register(ui.ctx(), Target::TunnelRow(id), rect);
+                    }
                     if let Some(action) = action {
                         row.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             let tip = (action == Action::Start && state == TunnelState::Running)
                                 .then_some("Started by a group; Start also keeps it up on its own");
-                            if ui.add(action.button(true, tip)).clicked() {
+                            let response = ui.add(action.button(true, tip));
+                            let clicked = match tour_id {
+                                Some(id) => tour::targets::clicked(
+                                    ui.ctx(),
+                                    Target::TunnelAction(id),
+                                    &response,
+                                ),
+                                None => response.clicked(),
+                            };
+                            if clicked {
                                 commands.push(action.command(&tunnel.id));
                             }
                         });
@@ -679,12 +714,10 @@ impl TunnelsView {
         if let TunnelState::Failed(reason) = &state {
             failure_banner(
                 ui,
-                tunnel,
-                status,
-                reason,
+                (tunnel, status, reason),
                 ssh,
                 commands,
-                &mut self.show_log,
+                (&mut self.show_log, &mut self.key_fix),
             );
         }
         if let Some(orphan) = data
@@ -746,7 +779,8 @@ impl TunnelsView {
                         save_button = save_button.tip(why);
                         start_button = start_button.tip(why);
                     }
-                    if ui.add_enabled(ok, save_button).clicked() {
+                    let response = ui.add_enabled(ok, save_button);
+                    if tour::targets::clicked(ui.ctx(), Target::TunnelSave, &response) && ok {
                         save = Some(false);
                     }
                     if ui.add_enabled(ok, start_button).clicked() {
@@ -762,6 +796,7 @@ impl TunnelsView {
                     }
                 });
                 ui.add_space(16.0);
+                tour::targets::register(ui.ctx(), Target::TunnelEditorFooter, ui.min_rect());
             });
 
         egui::ScrollArea::vertical()
@@ -863,8 +898,13 @@ impl TunnelsView {
                         .map(capitalized)
                         .collect();
                     let aside = &mut self.set_aside;
+                    let top = ui.cursor().top();
                     if forward_card(ui, (index, forward), &errors, aside) {
                         remove = Some(index);
+                    }
+                    if index == 0 {
+                        let card = ui.min_rect().with_min_y(top).intersect(ui.clip_rect());
+                        tour::targets::register(ui.ctx(), Target::ForwardRow, card);
                     }
                 }
                 if let Some(index) = remove {
@@ -1373,15 +1413,14 @@ fn forwards_table(ui: &mut Ui, tunnel: &Tunnel) {
 /// log*.
 fn failure_banner(
     ui: &mut Ui,
-    tunnel: &Tunnel,
-    status: Option<&TunnelStatus>,
-    reason: &str,
+    (tunnel, status, reason): (&Tunnel, Option<&TunnelStatus>, &str),
     ssh: Option<&SshInfo>,
     commands: &mut Vec<Command>,
-    show_log: &mut bool,
+    (show_log, key_fix): (&mut bool, &mut Option<KeyFix>),
 ) {
     let p = &Palette::ONE_DARK;
     let failure = status.and_then(|s| s.failure);
+    let top = ui.cursor().top();
     marks::banner(ui, p.red_tint, |ui| {
         let title = match failure {
             Some(FailureKind::HostKeyChanged) => "The server's host key changed",
@@ -1423,6 +1462,31 @@ fn failure_banner(
         }
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
+            // The health banner's fixes for "no key accepted" (SPEC.md §10).
+            if failure == Some(FailureKind::Auth) {
+                let service_stopped = ssh
+                    .and_then(|s| s.service.as_ref())
+                    .and_then(|s| s.as_ref().ok())
+                    .is_some_and(|s| !s.is_running());
+                let mut load = Button::new("Load key into agent")
+                    .small()
+                    .tip("Run ssh-add for the host's key in a terminal");
+                if service_stopped {
+                    load = load.tip("The ssh-agent service is not running");
+                }
+                if ui.add_enabled(!service_stopped, load).clicked() {
+                    *key_fix = Some(KeyFix::LoadKey(tunnel.host.clone()));
+                }
+                let generate = ui.add(
+                    Button::new("Generate key…")
+                        .icon(icons::KEY_ROUND)
+                        .small()
+                        .tip("Create a key pair for this host"),
+                );
+                if tour::targets::clicked(ui.ctx(), Target::BannerGenerateKey, &generate) {
+                    *key_fix = Some(KeyFix::GenerateKey(tunnel.host.clone()));
+                }
+            }
             if failure == Some(FailureKind::HostKeyChanged) {
                 let review = Button::new("Review changed key…")
                     .danger()
@@ -1436,6 +1500,18 @@ fn failure_banner(
             }
         });
     });
+    let rect = ui.min_rect().with_min_y(top);
+    tour::targets::register(ui.ctx(), Target::FailureBanner, rect);
+}
+
+/// A fix the failure banner asks the app for: the key window and the agent
+/// live outside this view.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeyFix {
+    /// *Generate key…* for this host.
+    GenerateKey(String),
+    /// *Load key into agent* for this host's key.
+    LoadKey(String),
 }
 
 /// The log, newest at the bottom, each line with its time; debug lines on

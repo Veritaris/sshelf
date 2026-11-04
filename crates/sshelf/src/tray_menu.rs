@@ -216,8 +216,25 @@ impl TrayMenu {
 
 /// Everything inside the window.
 fn contents(ui: &mut Ui, model: &TrayModel, actions: &mut Vec<TrayAction>) {
-    let p = &Palette::ONE_DARK;
     let rect = ui.ctx().content_rect();
+    contents_in(ui, rect, model, actions);
+}
+
+/// The menu as a picture at `rect` (the tour's popover): what it shows now,
+/// without reacting to clicks.
+pub fn picture(ui: &mut Ui, rect: egui::Rect, model: &TrayModel) {
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect));
+    child.disable();
+    contents_in(&mut child, rect, model, &mut Vec::new());
+}
+
+/// The menu's size for `model`.
+pub fn size(model: &TrayModel) -> egui::Vec2 {
+    vec2(WIDTH, height(model))
+}
+
+fn contents_in(ui: &mut Ui, rect: egui::Rect, model: &TrayModel, actions: &mut Vec<TrayAction>) {
+    let p = &Palette::ONE_DARK;
     ui.painter().rect_filled(rect, radius::LARGE, p.bg_dark);
     ui.painter().rect_stroke(
         rect,
@@ -237,9 +254,13 @@ fn contents(ui: &mut Ui, model: &TrayModel, actions: &mut Vec<TrayAction>) {
     fixed(ui, HEADER, |ui| {
         ui.add_space(6.0);
         ui.label(
-            RichText::new("sshelf")
-                .font(fonts::semibold(14.0))
-                .color(p.text_strong),
+            RichText::new(if model.tour {
+                "sshelf · Tour"
+            } else {
+                "sshelf"
+            })
+            .font(fonts::semibold(14.0))
+            .color(p.text_strong),
         );
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.add_space(6.0);

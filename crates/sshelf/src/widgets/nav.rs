@@ -68,6 +68,16 @@ pub fn hover_highlight(
 /// strip; the selected one's background slides to the next selection.
 /// Returns the segment clicked.
 pub fn segmented(ui: &mut Ui, id: Id, labels: &[&str], selected: usize) -> Option<usize> {
+    segmented_rect(ui, id, labels, selected).0
+}
+
+/// [`segmented`], and where it is.
+pub fn segmented_rect(
+    ui: &mut Ui,
+    id: Id,
+    labels: &[&str],
+    selected: usize,
+) -> (Option<usize>, Rect) {
     let p = &Palette::ONE_DARK;
     const HEIGHT: f32 = 28.0;
     const PADDING: f32 = 10.0;
@@ -122,7 +132,7 @@ pub fn segmented(ui: &mut Ui, id: Id, labels: &[&str], selected: usize) -> Optio
         }
         response.on_hover_cursor(CursorIcon::PointingHand);
     }
-    clicked
+    (clicked, outer)
 }
 
 const TAB_HEIGHT: f32 = 32.0;

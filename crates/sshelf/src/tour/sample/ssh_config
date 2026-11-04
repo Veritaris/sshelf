@@ -1,0 +1,34 @@
+# sshelf tour: a sample config. Every host is made up; nothing connects.
+
+Host web-01
+    HostName web-01.example.com
+    User deploy
+
+Host web-02
+    HostName web-02.example.com
+    User deploy
+
+Host db-primary
+    HostName db-primary.internal.example.com
+    User postgres
+    ProxyJump bastion
+
+Host bastion
+    HostName bastion.example.com
+    User jump
+
+Host staging-api
+    HostName staging-api.example.com
+    User deploy
+
+Host ci-runner
+    HostName ci-runner.example.com
+    User ci
+
+Host backup-nas
+    HostName backup-nas.example.com
+    User backup
+
+Host *
+    IdentityFile ~/.ssh/id_ed25519
+    ServerAliveInterval 30

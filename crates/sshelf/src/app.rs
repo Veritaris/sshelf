@@ -22,10 +22,37 @@ use crate::settings_view::SettingsView;
 use crate::sidebar::{self, View};
 use crate::theme::{self, Palette};
 use crate::toast::Toasts;
+use crate::tour::sandbox::{self, FakeSsh};
+use crate::tour::welcome;
 use crate::tray::{self, Tray, TrayAction, TrayModel};
 use crate::tray_menu::TrayMenu;
-use crate::tunnels_view::TunnelsView;
+use crate::tunnels_view::{KeyFix, TunnelsView};
 use crate::{motion, status_bar, window};
+
+mod tour_run;
+
+/// How the app starts: the real one, or a test's.
+pub struct Startup {
+    /// Create the tray icon.
+    pub tray: bool,
+    /// How the tour runs fake-ssh; `None`: this program (`--fake-ssh`).
+    pub fake_ssh: Option<FakeSsh>,
+    /// Where the tour's sandbox goes (`<temp>/sshelf-tour-<pid>`).
+    pub temp: std::path::PathBuf,
+    /// The user's Core runs on these paths; `None`: detected.
+    pub user_paths: Option<Paths>,
+}
+
+impl Startup {
+    pub fn real() -> Self {
+        Self {
+            tray: true,
+            fake_ssh: None,
+            temp: std::env::temp_dir(),
+            user_paths: None,
+        }
+    }
+}
 
 pub struct SshelfApp {
     core: Option<(Core, Receiver<Event>)>,
@@ -56,6 +83,12 @@ pub struct SshelfApp {
     config_loaded: Option<SystemTime>,
     /// The window system dialogs belong to (modal to it).
     parent: Option<ParentWindow>,
+    startup: Startup,
+    /// The onboarding tour while it runs.
+    tour: Option<tour_run::TourRun>,
+    /// The welcome screen shows even though `tour` is set (Back from the
+    /// tour's first step).
+    welcome: bool,
 }
 
 /// The root window's raw handles, for dialogs that must be modal to it.
@@ -69,17 +102,28 @@ fn parent_window(cc: &eframe::CreationContext<'_>) -> Option<ParentWindow> {
 
 impl SshelfApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        Self::with(cc, Startup::real())
+    }
+
+    pub fn with(cc: &eframe::CreationContext<'_>, startup: Startup) -> Self {
         fonts::install(&cc.egui_ctx);
         theme::apply(&cc.egui_ctx);
         #[cfg(target_os = "windows")]
         window::native::prepare(cc);
         let ctx = cc.egui_ctx.clone();
+        // A crashed run's tour sandbox goes now.
+        sandbox::clean_leftovers(&startup.temp);
         // The event loop runs by now, as macOS requires for tray icons.
-        let (tray, tray_error) = match Tray::create(&cc.egui_ctx) {
-            Ok(tray) => (Some(tray), None),
-            Err(e) => (None, Some(format!("No tray icon: {e}"))),
+        let (tray, tray_error) = if startup.tray {
+            match Tray::create(&cc.egui_ctx) {
+                Ok(tray) => (Some(tray), None),
+                Err(e) => (None, Some(format!("No tray icon: {e}"))),
+            }
+        } else {
+            (None, None)
         };
-        let (core, startup_error) = match Paths::detect() {
+        let paths = startup.user_paths.clone().or_else(Paths::detect);
+        let (core, startup_error) = match paths {
             Some(paths) => (
                 Some(Core::start(paths, Arc::new(move || ctx.request_repaint()))),
                 None,
@@ -111,6 +155,9 @@ impl SshelfApp {
             toasts: Toasts::default(),
             config_loaded: None,
             parent: parent_window(cc),
+            startup,
+            tour: None,
+            welcome: false,
         }
     }
 
@@ -130,6 +177,8 @@ impl SshelfApp {
             self.tunnel_states.as_deref(),
             self.hostkeys.waiting(),
         );
+        // During the tour the tray mirrors the sandbox, under "Tour".
+        self.tray_model.tour = self.tour_running();
         // Linux trays (KSNI) report no icon position: always the system menu.
         let native = cfg!(target_os = "linux")
             || self
@@ -161,7 +210,9 @@ impl SshelfApp {
         let Some((_, events)) = &self.core else {
             return;
         };
-        while let Ok(event) = events.try_recv() {
+        let events: Vec<Event> = events.try_iter().collect();
+        for event in events {
+            self.tour_event(&event);
             match event {
                 Event::Config(snapshot) => {
                     self.hosts.on_config(&snapshot);
@@ -237,7 +288,8 @@ impl SshelfApp {
     }
 
     /// The window's drag strip (SPEC.md §10), above everything but the sidebar.
-    fn drag_strip(&self, ui: &mut egui::Ui) {
+    fn drag_strip(&mut self, ui: &mut egui::Ui) {
+        let tour = self.tour_running();
         let action = egui::Panel::top("drag_strip")
             .resizable(false)
             .exact_size(window::STRIP_HEIGHT)
@@ -248,10 +300,13 @@ impl SshelfApp {
                 top: 0,
                 bottom: 0,
             }))
-            .show(ui, |ui| window::strip(ui, "sshelf"))
+            .show(ui, |ui| window::strip(ui, "sshelf", tour))
             .inner;
-        if let Some(action) = action {
-            window::apply(ui.ctx(), action);
+        match action {
+            Some(window::StripAction::ExitTour) => self.end_tour(false),
+            Some(window::StripAction::Close) if tour => self.tour_close(ui.ctx()),
+            Some(action) => window::apply(ui.ctx(), action),
+            None => {}
         }
     }
 
@@ -288,6 +343,9 @@ impl SshelfApp {
             orphans: &orphans,
             running: status_bar::tunnel_counts(self.tunnel_states.as_deref()).0,
             status: Status::of(self.tunnel_states.as_deref(), groups),
+            settings_off: self
+                .tour_running()
+                .then_some("Not available during the tour"),
         };
         egui::Panel::left("rail")
             .resizable(false)
@@ -309,6 +367,10 @@ impl eframe::App for SshelfApp {
             self.data.as_ref().is_some_and(|d| d.settings.reduce_motion),
         );
         self.run_tray(ctx);
+        self.tour_step();
+        if self.tour_close_request(ctx) {
+            return;
+        }
         // A tray exists only if one was created and the desktop shows it.
         let tray = self.tray.is_some() && self.ssh.as_ref().is_some_and(|s| s.tray == Ok(true));
         self.close.on_close_request(
@@ -317,6 +379,14 @@ impl eframe::App for SshelfApp {
             self.data.as_deref().map(|d| &d.settings),
             tray,
         );
+    }
+
+    /// While the tour runs, pointer input reaches the UI only through the
+    /// overlay's holes (and the popover, and the drag strip).
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        if let Some(run) = &self.tour {
+            tour_run::filter_input(raw_input, &run.allowed, window::STRIP_HEIGHT);
+        }
     }
 
     /// Transparent, so the window's rounded corners show what is behind it.
@@ -333,11 +403,42 @@ impl eframe::App for SshelfApp {
             self.tray_action(ui.ctx(), action);
         }
         window::background(ui.ctx());
-        if let Some(error) = &self.startup_error {
+        if let Some(error) = self.startup_error.clone() {
             self.drag_strip(ui);
             egui::CentralPanel::default().show(ui, |ui| {
                 ui.colored_label(p.red, error);
             });
+            window::resize_handles(ui);
+            return;
+        }
+
+        // First launch: the welcome screen instead of the main UI, while
+        // `settings.toml` has no `tour` key (SPEC.md §10).
+        let first_launch = self
+            .data
+            .as_ref()
+            .is_some_and(|d| d.settings.tour.is_none());
+        if !self.tour_running() && (first_launch || self.welcome) {
+            self.drag_strip(ui);
+            self.toasts.show(ui.ctx());
+            let choice = egui::CentralPanel::default()
+                .frame(egui::Frame::NONE)
+                .show(ui, |ui| welcome::show(ui, self.config.as_deref()))
+                .inner;
+            if let Some(choice) = choice {
+                self.welcome = false;
+                self.save_tour_state(settings::TourState::Offered);
+                match choice {
+                    welcome::Choice::Tour => self.start_tour(ui.ctx(), 0),
+                    welcome::Choice::MyHosts => self.view = View::Hosts,
+                    welcome::Choice::NewHost => {
+                        self.view = View::Hosts;
+                        if let Some(config) = &self.config {
+                            self.hosts.editor.open_new(config);
+                        }
+                    }
+                }
+            }
             window::resize_handles(ui);
             return;
         }
@@ -418,6 +519,36 @@ impl eframe::App for SshelfApp {
         for notice in self.hostkeys.take_notices() {
             self.toasts.push(notice);
         }
+        // The key window outlives the hosts view (a tunnel's *Generate key…*).
+        if self.view != View::Hosts
+            && let Some(config) = self.config.clone()
+        {
+            commands.extend(
+                self.hosts
+                    .editor
+                    .show_keys(ui.ctx(), &config, self.ssh.as_deref()),
+            );
+        }
+        match self.tunnels.take_key_fix() {
+            Some(KeyFix::GenerateKey(host)) => {
+                if let Some(config) = &self.config {
+                    self.hosts.editor.open_keys(config, &host);
+                }
+            }
+            Some(KeyFix::LoadKey(host)) => {
+                // The host's key from `ssh -G` when known, else ssh's default.
+                let file = self
+                    .hosts
+                    .detail
+                    .identity_file(&host)
+                    .unwrap_or_else(|| "~/.ssh/id_ed25519".to_string());
+                commands.push(Command::AddKeyToAgent {
+                    path: file.into(),
+                    encrypted: true,
+                });
+            }
+            None => {}
+        }
         let running =
             close_guard::running_tunnels(self.tunnel_states.as_deref(), self.data.as_deref());
         commands.extend(self.close.modal(
@@ -425,6 +556,7 @@ impl eframe::App for SshelfApp {
             &running,
             self.data.as_deref().map(|d| &d.settings),
         ));
+        self.tour_close_choice();
         // A tunnel's "via" link shows its host.
         if let Some(alias) = self.tunnels.take_open_host() {
             self.view = View::Hosts;
@@ -451,5 +583,6 @@ impl eframe::App for SshelfApp {
         }
         self.send(commands);
         window::resize_handles(ui);
+        self.tour_overlay(ui.ctx());
     }
 }

@@ -20,6 +20,7 @@ use sshelf_core::supervisor::{Snapshot, TunnelState};
 use crate::host_detail::{DetailAction, HostDetail, Shown};
 use crate::host_editor::HostEditor;
 use crate::theme::{Palette, radius, timing};
+use crate::tour::targets::{self, Target};
 use crate::widgets::button::Button;
 use crate::widgets::dropdown::Dropdown;
 use crate::widgets::empty::empty_state;
@@ -100,6 +101,11 @@ impl HostsView {
     /// Shows `alias` (e.g. a tunnel's "via" link).
     pub fn select(&mut self, alias: &str) {
         self.selected = Some(alias.to_string());
+    }
+
+    /// The last health results.
+    pub fn health(&self) -> Option<&HealthSnapshot> {
+        self.health.as_deref()
     }
 
     pub fn on_health(&mut self, health: Arc<HealthSnapshot>) {
@@ -629,6 +635,7 @@ impl HostsView {
     ) -> ListAction {
         let p = &Palette::ONE_DARK;
         let mut action = ListAction::default();
+        targets::register(ui.ctx(), Target::HostList, ui.max_rect());
         let check_all = self.header(ui, hosts.hosts.len(), &mut action, |_, _| {});
         ui.add_space(12.0);
         ui.add(
@@ -693,6 +700,11 @@ impl HostsView {
                             action.row = Some((host.primary().to_string(), chosen));
                         }
                     }
+                    targets::register(
+                        ui.ctx(),
+                        Target::HostRows,
+                        ui.min_rect().intersect(ui.clip_rect()),
+                    );
                     nav::hover_highlight(
                         ui,
                         egui::Id::unique("host_list_hover"),
@@ -747,10 +759,10 @@ impl HostsView {
     /// hosts shown); a stop is sent from here.
     fn check_all_button(&mut self, ui: &mut Ui, commands: &mut Vec<Command>) -> bool {
         if self.check_run.is_empty() {
-            return ui
-                .add(Button::icon_only(icons::ACTIVITY, "Check all hosts"))
-                .clicked();
+            let response = ui.add(Button::icon_only(icons::ACTIVITY, "Check all hosts"));
+            return targets::clicked(ui.ctx(), Target::CheckAll, &response);
         }
+        targets::register(ui.ctx(), Target::CheckAll, ui.min_rect());
         let total = self.check_run.len();
         let checking = self.health.as_deref().map_or(total, |h| {
             self.check_run

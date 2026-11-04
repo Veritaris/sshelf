@@ -160,6 +160,8 @@ pub struct TrayModel {
     pub recent: Vec<String>,
     /// A host key waits for the user's answer.
     pub host_key_waiting: bool,
+    /// The tour runs: this is its sandbox, under a "Tour" header.
+    pub tour: bool,
 }
 
 impl Default for TrayModel {
@@ -260,6 +262,7 @@ pub fn model(
         tunnels,
         recent,
         host_key_waiting,
+        tour: false,
     }
 }
 
@@ -276,7 +279,11 @@ impl TrayModel {
 
     /// The native menu.
     pub fn entries(&self) -> Vec<Entry> {
-        let mut entries = vec![info(format!("sshelf: {}", self.summary()))];
+        let mut entries = Vec::new();
+        if self.tour {
+            entries.push(info("Tour · sample data"));
+        }
+        entries.push(info(format!("sshelf: {}", self.summary())));
         if self.host_key_waiting {
             entries.push(item("A host key waits for you…", TrayAction::Show));
         }

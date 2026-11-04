@@ -13,6 +13,7 @@ use egui::{
 use crate::icons;
 use crate::motion;
 use crate::theme::{Palette, radius, timing};
+use crate::widgets::marks;
 
 /// Height of the drag strip at the top of the content area.
 pub const STRIP_HEIGHT: f32 = 44.0;
@@ -76,11 +77,15 @@ pub enum StripAction {
     ToggleMaximize,
     Minimize,
     Close,
+    /// *Exit tour*.
+    ExitTour,
 }
 
 /// The drag strip: `title` on the left, *Minimize* and *Close* on the right.
-/// Dragging it moves the window; a double click maximizes or restores.
-pub fn strip(ui: &mut Ui, title: &str) -> Option<StripAction> {
+/// Dragging it moves the window; a double click maximizes or restores. While
+/// the tour runs it also shows the Magenta "Tour · sample data" chip, what
+/// it promises, and *Exit tour* (SPEC.md §10 *Onboarding tour*).
+pub fn strip(ui: &mut Ui, title: &str, tour: bool) -> Option<StripAction> {
     let p = &Palette::ONE_DARK;
     // Registered first, so the buttons on top of it get their own clicks.
     let drag = ui.interact(
@@ -97,13 +102,39 @@ pub fn strip(ui: &mut Ui, title: &str) -> Option<StripAction> {
     };
     ui.horizontal_centered(|ui| {
         ui.add(Label::new(RichText::new(title).size(12.0).color(p.dim)).selectable(false));
+        if tour {
+            ui.add_space(8.0);
+            marks::chip(ui, "Tour · sample data", p.accent, p.bg_dark);
+            ui.add(
+                Label::new(
+                    RichText::new("nothing here touches your files")
+                        .size(12.0)
+                        .color(p.dim),
+                )
+                .selectable(false),
+            );
+        }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
-            if window_button(ui, icons::X, "Close", p.red).clicked() {
+            let close = window_button(ui, icons::X, "Close", p.red);
+            if crate::tour::targets::clicked(
+                ui.ctx(),
+                crate::tour::targets::Target::WindowClose,
+                &close,
+            ) {
                 action = Some(StripAction::Close);
             }
             if window_button(ui, icons::MINUS, "Minimize", p.yellow).clicked() {
                 action = Some(StripAction::Minimize);
+            }
+            if tour {
+                ui.add_space(8.0);
+                if ui
+                    .add(crate::widgets::button::Button::new("Exit tour").small())
+                    .clicked()
+                {
+                    action = Some(StripAction::ExitTour);
+                }
             }
         });
     });
@@ -118,6 +149,8 @@ pub fn apply(ctx: &egui::Context, action: StripAction) {
         StripAction::ToggleMaximize => ViewportCommand::Maximized(!maximized(ctx)),
         StripAction::Minimize => ViewportCommand::Minimized(true),
         StripAction::Close => ViewportCommand::Close,
+        // The app ends the tour itself.
+        StripAction::ExitTour => return,
     };
     ctx.send_viewport_cmd(command);
 }
@@ -341,7 +374,7 @@ mod tests {
             .with_size([800.0, 44.0])
             .build_ui_state(
                 |ui, actions: &mut Vec<StripAction>| {
-                    actions.extend(strip(ui, "sshelf"));
+                    actions.extend(strip(ui, "sshelf", false));
                 },
                 Vec::new(),
             );

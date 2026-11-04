@@ -1,0 +1,43 @@
+version = 1
+
+[[tunnel]]
+id = "t-tour-db"
+name = "db tunnel"
+host = "bastion"
+forwards = [
+  { kind = "L", bind = "127.0.0.1", listen = 15432, target = "db-primary:5432" },
+]
+
+[[tunnel]]
+id = "t-tour-staging"
+name = "staging api"
+host = "bastion"
+forwards = [
+  { kind = "L", bind = "127.0.0.1", listen = 18080, target = "staging-api:80" },
+]
+
+[[tunnel]]
+id = "t-tour-ci"
+name = "ci metrics"
+host = "bastion"
+forwards = [
+  { kind = "L", bind = "127.0.0.1", listen = 19090, target = "ci-runner:9090" },
+]
+
+[[tunnel]]
+id = "t-tour-backup"
+name = "backup"
+host = "backup-nas"
+forwards = [
+  { kind = "L", bind = "127.0.0.1", listen = 12049, target = "localhost:2049" },
+]
+
+[[group]]
+id = "g-tour-staging"
+name = "Work on staging"
+tunnels = ["t-tour-staging", "t-tour-ci"]
+
+[[group]]
+id = "g-tour-db"
+name = "Databases"
+tunnels = ["t-tour-db"]
