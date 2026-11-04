@@ -955,57 +955,105 @@ fn also_updated(snapshot: &ConfigSnapshot, data: &AppData, alias: &str) -> Vec<(
     rows
 }
 
+/// Width of *Form / Raw text* and *Generate key…* with the gap before
+/// them, and the least the title needs beside them.
+const HEADER_CONTROLS: f32 = 300.0;
+const TITLE_ROOM: f32 = 320.0;
+
+/// One line of `text` cut to `width` (paths in the middle), the full text
+/// in a tooltip when it was cut.
+fn cut_label(ui: &mut Ui, text: &str, font: FontId, color: Color32, width: f32) {
+    let (shown, cut) = crate::widgets::text::elide(ui.painter(), text, &font, width);
+    let label = ui.add(
+        egui::Label::new(RichText::new(shown).font(font).color(color))
+            .selectable(false)
+            .sense(Sense::hover()),
+    );
+    if cut {
+        let full = text.to_string();
+        popup::tip_below(label, |ui| {
+            ui.label(full);
+        });
+    }
+}
+
 /// Title, where it is, *Form* / *Raw text* and *Generate key…*; returns
 /// whether *Generate key…* was clicked.
 fn header(ui: &mut Ui, session: &mut Session) -> bool {
     let p = &Palette::ONE_DARK;
     let mut generate = false;
-    ui.horizontal(|ui| {
+    // Beside the title when there is room for both; else on a row of their
+    // own below it (the cards' narrow pane).
+    let wide = ui.available_width() >= TITLE_ROOM + HEADER_CONTROLS;
+    let text_width = if wide {
+        ui.available_width() - HEADER_CONTROLS
+    } else {
+        ui.available_width()
+    };
+    let title = match &session.new {
+        Some(_) => "New host".to_string(),
+        None => format!("Editing {}", session.alias),
+    };
+    let place = session.new.is_none().then(|| {
+        format!(
+            "{} · lines {}–{}",
+            session.file.display(),
+            session.lines.start + 1,
+            session.lines.end
+        )
+    });
+    let texts = |ui: &mut Ui| {
         ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = 4.0;
-            let title = match &session.new {
-                Some(_) => "New host".to_string(),
-                None => format!("Editing {}", session.alias),
-            };
-            ui.label(
-                RichText::new(title)
-                    .font(fonts::semibold(20.0))
-                    .color(p.text_strong),
-            );
-            if session.new.is_none() {
-                let place = format!(
-                    "{} · lines {}–{}",
-                    session.file.display(),
-                    session.lines.start + 1,
-                    session.lines.end
-                );
-                ui.label(
-                    RichText::new(place)
-                        .font(FontId::monospace(12.0))
-                        .color(p.dim),
-                );
+            cut_label(ui, &title, fonts::semibold(20.0), p.text_strong, text_width);
+            if let Some(place) = &place {
+                cut_label(ui, place, FontId::monospace(12.0), p.dim, text_width);
             }
         });
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            let key = Button::new("Generate key…")
-                .icon(icons::KEY_ROUND)
-                .small()
-                .tip("Create a new key pair for this host");
-            generate = ui.add(key).clicked();
+    };
+    // `right_to_left`: added in reverse, so they read the same either way.
+    let mut controls = |ui: &mut Ui, right_to_left: bool| {
+        let mut mode = |ui: &mut Ui| {
             let selected = usize::from(session.tab == Tab::Raw);
-            let mode = nav::segmented(
+            let picked = nav::segmented(
                 ui,
                 Id::unique("host_editor_mode"),
                 &["Form", "Raw text"],
                 selected,
             );
-            match mode {
+            match picked {
                 Some(0) => session.tab = Tab::Form,
                 Some(_) => session.tab = Tab::Raw,
                 None => {}
             }
+        };
+        let key = |ui: &mut Ui| {
+            let key = Button::new("Generate key…")
+                .icon(icons::KEY_ROUND)
+                .small()
+                .tip("Create a new key pair for this host");
+            ui.add(key).clicked()
+        };
+        if right_to_left {
+            generate = key(ui);
+            mode(ui);
+        } else {
+            mode(ui);
+            generate = key(ui);
+        }
+    };
+    if wide {
+        ui.horizontal(|ui| {
+            texts(ui);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                controls(ui, true)
+            });
         });
-    });
+    } else {
+        texts(ui);
+        ui.add_space(4.0);
+        ui.horizontal(|ui| controls(ui, false));
+    }
     if session.file_id != 0 {
         ui.label(
             RichText::new(
@@ -1021,6 +1069,8 @@ fn header(ui: &mut Ui, session: &mut Session) -> bool {
 
 /// The form or the raw text.
 fn body(ui: &mut Ui, session: &mut Session, snapshot: &ConfigSnapshot, inset: Color32) {
+    // Fields and selects are inset: lighter than a dark pane (the cards').
+    ui.visuals_mut().extreme_bg_color = inset;
     match session.tab {
         Tab::Form => form(ui, session, snapshot),
         Tab::Raw => raw(ui, session, inset),
@@ -2323,6 +2373,18 @@ mod tests {
                 "{width}: {form:?} / {problems:?}"
             );
             assert_eq!(problems.top() > form.bottom(), !beside, "{width}");
+        }
+    }
+
+    #[test]
+    fn a_narrow_pane_puts_the_header_controls_below_the_title() {
+        for (width, beside) in [(960.0, true), (520.0, false)] {
+            let mut harness = sized(CONFIG, width);
+            steps(&mut harness);
+            let title = harness.get_by_label("Editing web").rect();
+            let form = harness.get_by_label("Form").rect();
+            assert_eq!(form.top() > title.bottom(), !beside, "{width}");
+            assert!(form.right() <= width, "{width}: {form:?}");
         }
     }
 

@@ -286,7 +286,8 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
                 );
             }
             Trigger::Field(_) => {
-                painter.rect_filled(rect, radius::CONTROL, p.bg_dark);
+                // Inset like a text field (see `field::TextField`).
+                painter.rect_filled(rect, radius::CONTROL, ui.visuals().extreme_bg_color);
                 let outline = if open {
                     p.accent
                 } else {

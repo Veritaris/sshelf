@@ -16,7 +16,9 @@ pub struct TextField<'a> {
     error: bool,
     width: Option<f32>,
     height: f32,
-    fill: Color32,
+    /// `None`: the style's inset colour (`extreme_bg_color`), which a pane
+    /// whose own fill is the dark one sets lighter.
+    fill: Option<Color32>,
 }
 
 impl<'a> TextField<'a> {
@@ -28,7 +30,7 @@ impl<'a> TextField<'a> {
             error: false,
             width: None,
             height: 32.0,
-            fill: Palette::ONE_DARK.bg_dark,
+            fill: None,
         }
     }
 
@@ -58,7 +60,7 @@ impl<'a> TextField<'a> {
     /// 36 px high on `fill`, for dialogs.
     pub fn dialog(mut self, fill: Color32) -> Self {
         self.height = 36.0;
-        self.fill = fill;
+        self.fill = Some(fill);
         self
     }
 }
@@ -68,23 +70,26 @@ impl Widget for TextField<'_> {
         let p = &Palette::ONE_DARK;
         let width = self.width.unwrap_or_else(|| ui.available_width());
         let (rect, _) = ui.allocate_exact_size(vec2(width, self.height), egui::Sense::hover());
-        ui.painter().rect_filled(rect, radius::CONTROL, self.fill);
+        let fill = self.fill.unwrap_or(ui.visuals().extreme_bg_color);
+        ui.painter().rect_filled(rect, radius::CONTROL, fill);
         let font = if self.mono {
             FontId::monospace(13.0)
         } else {
             FontId::proportional(13.0)
         };
+        // The text sits 12 px in; the edit fills the rest of the field.
+        let text_rect = rect.shrink2(vec2(12.0, 0.0));
         let response = ui.put(
-            rect,
+            text_rect,
             TextEdit::singleline(self.text)
                 .frame(egui::Frame::NONE)
                 .hint_text(self.hint)
                 .font(font)
                 .text_color(p.text_strong)
-                .margin(Margin::symmetric(12, 0))
-                .min_size(rect.size())
+                .margin(Margin::ZERO)
+                .min_size(text_rect.size())
                 .align(egui::Align2::LEFT_CENTER)
-                .desired_width(width),
+                .desired_width(text_rect.width()),
         );
         let focus = motion::fade(
             ui.ctx(),
