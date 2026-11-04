@@ -112,9 +112,6 @@ impl SshelfApp {
         theme::apply(&cc.egui_ctx);
         #[cfg(target_os = "windows")]
         window::native::prepare(cc);
-        // The Dock shows our icon from the start, not a generic one.
-        #[cfg(target_os = "macos")]
-        window::macos::set_dock_icon(Status::Idle);
         let ctx = cc.egui_ctx.clone();
         // A crashed run's tour sandbox goes now.
         sandbox::clean_leftovers(&startup.temp);

@@ -53,12 +53,21 @@ fn main() -> ExitCode {
     }
 }
 
+/// The icon eframe starts with: the window icon, or on macOS the Dock icon
+/// (eframe makes it the app icon there, which Cmd+Tab shows large).
+fn startup_icon() -> egui::IconData {
+    #[cfg(target_os = "macos")]
+    return window::macos::dock_icon(icon::Status::Idle);
+    #[cfg(not(target_os = "macos"))]
+    icon::egui_icon(icon::Status::Idle)
+}
+
 fn run() -> eframe::Result<()> {
     let native_options = eframe::NativeOptions {
         viewport: window::viewport(
             egui::ViewportBuilder::default()
                 .with_title("sshelf")
-                .with_icon(Arc::new(icon::egui_icon(icon::Status::Idle))),
+                .with_icon(Arc::new(startup_icon())),
         ),
         ..Default::default()
     };

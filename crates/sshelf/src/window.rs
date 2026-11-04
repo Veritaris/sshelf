@@ -398,14 +398,23 @@ pub mod native {
     }
 }
 
-/// macOS: winit ignores window icons, and the Dock shows the app's icon. So
-/// the app sets the Dock icon itself, with the status dot, while it runs
-/// (also giving a binary outside an `.app` bundle its icon).
+/// macOS: winit ignores window icons, and the Dock and Cmd+Tab show the
+/// app's icon. eframe sets that once, on the first frame, from the window
+/// icon, so `main.rs` gives it [`dock_icon`] (512 px, not the 64 px window
+/// icon); afterwards the app sets it itself with the status dot.
+///
+/// Images are built from raw pixels (`NSBitmapImageRep`), never from PNG
+/// data: on some macOS versions an `NSImage` from PNG loads an arbitrary
+/// `libpng.dylib` and crashes (egui#7155).
 #[cfg(target_os = "macos")]
 pub mod macos {
+    use objc2::rc::Retained;
     use objc2::{AnyThread, MainThreadMarker};
-    use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSImage};
-    use objc2_foundation::NSData;
+    use objc2_app_kit::{
+        NSApplication, NSApplicationActivationPolicy, NSBitmapImageRep, NSDeviceRGBColorSpace,
+        NSImage,
+    };
+    use objc2_foundation::NSSize;
 
     use crate::icon::Status;
     use crate::icon_shape;
@@ -428,16 +437,21 @@ pub mod macos {
             return;
         };
         SHOWN.set(status);
-        let Some(png) = png(&dock_rgba(status), CANVAS) else {
-            return;
-        };
-        let data = NSData::with_bytes(&png);
-        let Some(image) = NSImage::initWithData(NSImage::alloc(), &data) else {
+        let Some(image) = ns_image(&dock_rgba(status), CANVAS) else {
             return;
         };
         let app = NSApplication::sharedApplication(mtm);
         // SAFETY: on the main thread, with a valid image.
         unsafe { app.setApplicationIconImage(Some(&image)) };
+    }
+
+    /// The Dock icon for eframe's first-frame setting (see the module docs).
+    pub fn dock_icon(status: Status) -> egui::IconData {
+        egui::IconData {
+            rgba: dock_rgba(status),
+            width: CANVAS,
+            height: CANVAS,
+        }
     }
 
     /// Shows or hides the Dock icon: hidden while the window sits in the
@@ -475,16 +489,57 @@ pub mod macos {
         canvas
     }
 
-    /// RGBA pixels as a PNG file.
-    fn png(rgba: &[u8], size: u32) -> Option<Vec<u8>> {
-        let mut out = Vec::new();
-        let mut encoder = png::Encoder::new(&mut out, size, size);
-        encoder.set_color(png::ColorType::Rgba);
-        encoder.set_depth(png::BitDepth::Eight);
-        let mut writer = encoder.write_header().ok()?;
-        writer.write_image_data(rgba).ok()?;
-        writer.finish().ok()?;
-        Some(out)
+    /// An `NSImage` of `size` × `size` straight-alpha RGBA pixels. The bitmap
+    /// owns its buffer (AppKit allocates it; the pixels are copied in,
+    /// premultiplied as it expects).
+    fn ns_image(rgba: &[u8], size: u32) -> Option<Retained<NSImage>> {
+        let side = size as isize;
+        // SAFETY: null planes make AppKit allocate a buffer of
+        // `side * 4 * side` bytes for 8-bit RGBA, meshed; the colour space
+        // name is AppKit's own constant.
+        let rep = unsafe {
+            NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(
+                NSBitmapImageRep::alloc(),
+                std::ptr::null_mut(),
+                side,
+                side,
+                8,
+                4,
+                true,
+                false,
+                NSDeviceRGBColorSpace,
+                side * 4,
+                32,
+            )
+        }?;
+        let data = rep.bitmapData();
+        if data.is_null() {
+            return None;
+        }
+        let premultiplied = premultiply(rgba);
+        // SAFETY: the buffer holds `size * size * 4` bytes (see above), as
+        // many as `premultiplied`.
+        unsafe {
+            std::ptr::copy_nonoverlapping(premultiplied.as_ptr(), data, premultiplied.len());
+        }
+        let image = NSImage::initWithSize(
+            NSImage::alloc(),
+            NSSize::new(f64::from(size), f64::from(size)),
+        );
+        image.addRepresentation(&rep);
+        Some(image)
+    }
+
+    /// Straight alpha to premultiplied, as `NSBitmapImageRep` stores it.
+    fn premultiply(rgba: &[u8]) -> Vec<u8> {
+        rgba.as_chunks::<4>()
+            .0
+            .iter()
+            .flat_map(|&[r, g, b, a]| {
+                let scale = |c: u8| ((u16::from(c) * u16::from(a) + 127) / 255) as u8;
+                [scale(r), scale(g), scale(b), a]
+            })
+            .collect()
     }
 
     #[cfg(test)]
@@ -492,15 +547,16 @@ pub mod macos {
         use super::*;
 
         #[test]
-        fn the_dock_icon_is_a_centred_png() {
+        fn the_dock_icon_is_centred_and_premultiplied() {
             let rgba = dock_rgba(Status::Running);
             assert_eq!(rgba.len(), (CANVAS * CANVAS * 4) as usize);
             // Transparent margin, opaque body.
             assert_eq!(rgba[3], 0);
             let centre = ((CANVAS / 2 * CANVAS + CANVAS / 2) * 4) as usize;
             assert_eq!(rgba[centre + 3], 255);
-            let png = png(&rgba, CANVAS).unwrap();
-            assert_eq!(&png[1..4], b"PNG");
+            assert_eq!(premultiply(&[200, 100, 50, 255]), [200, 100, 50, 255]);
+            assert_eq!(premultiply(&[200, 100, 50, 128]), [100, 50, 25, 128]);
+            assert_eq!(premultiply(&[200, 100, 50, 0]), [0, 0, 0, 0]);
         }
     }
 }
