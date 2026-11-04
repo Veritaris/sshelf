@@ -8,6 +8,8 @@ use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
+mod common;
+
 use sshelf_core::supervisor::{
     FailureKind, GroupState, LOG_LINES, Owner, Request, Snapshot, Supervisor, SupervisorEvent,
     TunnelState,
@@ -71,12 +73,9 @@ impl Harness {
     }
 }
 
+/// A free port no other test in this binary got.
 fn free_port() -> u16 {
-    TcpListener::bind(("127.0.0.1", 0))
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+    common::hold_port().1
 }
 
 fn port_is_free(port: u16) -> bool {
@@ -187,8 +186,7 @@ fn a_running_tunnel_has_an_uptime_and_its_log_lines_a_time() {
 #[test]
 fn port_conflict_starts_nothing() {
     let mut h = Harness::new();
-    let held = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-    let taken = held.local_addr().unwrap().port();
+    let (_held, taken) = common::hold_port();
     let (a, b) = (tunnel("a", "ok", free_port()), tunnel("b", "ok", taken));
     let g = group("g", &[&a, &b]);
     start_group(&h, &g, &[&a, &b]);

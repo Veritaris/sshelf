@@ -8,16 +8,15 @@ use std::time::{Duration, Instant};
 
 use sshelf_core::child::{self, KILL_GRACE};
 
+mod common;
+
 fn fake_ssh() -> Command {
     Command::new(PathBuf::from(env!("CARGO_BIN_EXE_fake-ssh")))
 }
 
+/// A free port no other test in this binary got.
 fn free_port() -> u16 {
-    TcpListener::bind(("127.0.0.1", 0))
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+    common::hold_port().1
 }
 
 fn port_is_free(port: u16) -> bool {

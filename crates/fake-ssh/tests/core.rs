@@ -8,6 +8,8 @@ use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant, SystemTime};
 
+mod common;
+
 use sshelf_core::core::{Command, ConfigState, Core, Event};
 use sshelf_core::metadata::{HostMeta, HostsFile};
 use sshelf_core::paths::Paths;
@@ -225,13 +227,7 @@ fn tunnels_and_groups_through_the_core() {
         })
         .unwrap();
 
-    let free = || {
-        std::net::TcpListener::bind(("127.0.0.1", 0))
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port()
-    };
+    let free = || common::hold_port().1;
     let port = free();
     let tunnel = Tunnel {
         id: "t-1".into(),
@@ -362,11 +358,7 @@ fn host_key_session(
             forwards: vec![Forward {
                 kind: ForwardKind::L,
                 bind: DEFAULT_BIND.into(),
-                listen: std::net::TcpListener::bind(("127.0.0.1", 0))
-                    .unwrap()
-                    .local_addr()
-                    .unwrap()
-                    .port(),
+                listen: common::hold_port().1,
                 target: Some("localhost:80".into()),
             }],
             auto_reconnect: false,
@@ -562,11 +554,7 @@ fn groups_marked_for_launch_start_with_sshelf() {
             forwards: vec![Forward {
                 kind: ForwardKind::L,
                 bind: DEFAULT_BIND.into(),
-                listen: std::net::TcpListener::bind(("127.0.0.1", 0))
-                    .unwrap()
-                    .local_addr()
-                    .unwrap()
-                    .port(),
+                listen: common::hold_port().1,
                 target: Some("localhost:80".into()),
             }],
             auto_reconnect: false,
