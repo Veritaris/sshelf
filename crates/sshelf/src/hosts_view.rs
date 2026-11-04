@@ -1482,7 +1482,7 @@ mod tests {
         );
         harness.state_mut().0.on_health(Arc::new(health));
         harness.step();
-        harness.get_by_label("Reachable, host key not known yet");
+        harness.get_by_label_contains("Reachable, host key not known yet");
         harness.get_by_label_contains("Review its fingerprint");
         // The fix: sshelf's own host key dialog.
         harness.get_by_label("Review host key…").click();
@@ -1503,7 +1503,7 @@ mod tests {
         );
         harness.state_mut().0.on_health(Arc::new(health));
         harness.step();
-        harness.get_by_label("Reachable, but the host key changed");
+        harness.get_by_label_contains("Reachable, but the host key changed");
         harness.get_by_label("Review changed key…").click();
         harness.step();
         assert_eq!(

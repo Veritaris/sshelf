@@ -1379,30 +1379,39 @@ fn health(
     row(ui, 28.0, |ui| {
         ui.label(RichText::new("Health").size(13.0).color(p.dim));
         util::health_mark(ui, shown.health, alias, 8.0);
-        if checking {
-            ui.label(RichText::new("Checking…").size(13.0).color(p.yellow));
-            return;
-        }
-        match report {
-            Some(report) => {
-                ui.label(
-                    RichText::new(health_text(&report.health))
-                        .size(13.0)
-                        .color(p.text_strong),
+        // *Check* first, from the right, so it always fits; the text gets
+        // what is left and is cut with an ellipsis (full text on hover).
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if !checking {
+                let check = Button::new("Check").icon(icons::ACTIVITY).small().tip(
+                    "Log in once without a password (ssh BatchMode, 3 s connect timeout) \
+                     and run `true`",
                 );
-                let when = format!("checked {}", util::ago(report.checked_at));
-                ui.label(RichText::new(when).size(12.0).color(p.dim));
+                if ui.add(check).clicked() {
+                    commands.push(Command::CheckHealth(vec![alias.to_string()]));
+                }
             }
-            None => {
-                ui.label(RichText::new("Not checked yet").size(13.0).color(p.dim));
-            }
-        }
-        let check = Button::new("Check").icon(icons::ACTIVITY).small().tip(
-            "Log in once without a password (ssh BatchMode, 3 s connect timeout) and run `true`",
-        );
-        if ui.add(check).clicked() {
-            commands.push(Command::CheckHealth(vec![alias.to_string()]));
-        }
+            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                let mut job = egui::text::LayoutJob::default();
+                let mut add = |text: &str, size: f32, color| {
+                    job.append(
+                        text,
+                        0.0,
+                        egui::TextFormat::simple(FontId::proportional(size), color),
+                    );
+                };
+                match report {
+                    _ if checking => add("Checking…", 13.0, p.yellow),
+                    Some(report) => {
+                        add(&health_text(&report.health), 13.0, p.text_strong);
+                        let when = format!("   checked {}", util::ago(report.checked_at));
+                        add(&when, 12.0, p.dim);
+                    }
+                    None => add("Not checked yet", 13.0, p.dim),
+                }
+                ui.add(egui::Label::new(job).truncate());
+            });
+        });
     });
     let report = report.filter(|_| !checking)?;
     let tools = tools_error(shown.ssh);
