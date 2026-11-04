@@ -180,10 +180,14 @@ fn full_session_never_writes_the_ssh_config() {
     let launched = fs::read_to_string(&record).expect("the launch was recorded");
     assert_eq!(launched.trim_end().split('\x1f').next_back(), Some("web"));
 
-    // External edit: picked up by the watcher.
+    // External edit: picked up by the watcher. (Storing web's host key
+    // above also touched ~/.ssh, so an earlier reload may still show the
+    // old hosts: wait for the one with the edit.)
     fs::write(&paths.ssh_config, "Host web\r\nHost db\r\nHost new\r\n").unwrap();
     let before = fingerprint(&paths.ssh_config);
-    let aliases = wait_for(&events, "the reloaded config", host_aliases);
+    let aliases = wait_for(&events, "the reloaded config", |e| {
+        host_aliases(e).filter(|a| a.iter().any(|a| a == "new"))
+    });
     assert_eq!(aliases, ["web", "db", "new"]);
 
     // More writes to app data; the ssh config stays untouched.
