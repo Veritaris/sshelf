@@ -47,6 +47,23 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# The Dock icon with the status dot (src/window.rs, `macos`): winit ignores
+# window icons on macOS. The versions eframe uses.
+objc2 = { version = "0.6.5" }
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "NSData",
+] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "NSApplication",
+    "NSImage",
+    "NSResponder",
+] }
+# The Dock icon goes to AppKit as PNG data.
+png = { version = "0.18.1" }
+
 [build-dependencies]
 # The .exe's icon and version information (build.rs; Windows targets only).
 winresource = { version = "0.1.34" }

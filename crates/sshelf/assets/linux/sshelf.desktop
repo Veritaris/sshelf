@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=sshelf
+GenericName=SSH hosts and tunnels
+Comment=Visual layer over your ~/.ssh/config: hosts, effective config, tunnels and groups
+Exec=sshelf
+Icon=sshelf
+Terminal=false
+Categories=Network;Utility;
+Keywords=ssh;tunnel;port forwarding;config;
+StartupWMClass=sshelf

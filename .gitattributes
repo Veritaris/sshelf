@@ -1,3 +1,5 @@
 # Parser test inputs must reach the tests byte-for-byte: no line-ending conversion.
 crates/sshconf/tests/corpus/** -text
 crates/sshconf/tests/fixtures/** -text
+# Shipped to Linux as is: LF everywhere.
+crates/sshelf/assets/linux/** text eol=lf

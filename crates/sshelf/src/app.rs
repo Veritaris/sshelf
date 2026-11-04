@@ -112,6 +112,9 @@ impl SshelfApp {
         theme::apply(&cc.egui_ctx);
         #[cfg(target_os = "windows")]
         window::native::prepare(cc);
+        // The Dock shows our icon from the start, not a generic one.
+        #[cfg(target_os = "macos")]
+        window::macos::set_dock_icon(Status::Idle);
         let ctx = cc.egui_ctx.clone();
         // A crashed run's tour sandbox goes now.
         sandbox::clean_leftovers(&startup.temp);
@@ -182,7 +185,9 @@ impl SshelfApp {
         );
         // During the tour the tray mirrors the sandbox, under "Tour".
         self.tray_model.tour = self.tour_running();
-        // The taskbar button carries the same status dot as the tray icon.
+        // The taskbar button / Dock icon carries the same status dot as the
+        // tray icon. Linux: X11 taskbars read the window icon; Wayland has
+        // no window icons (its docks use the desktop entry's).
         if self.tray_model.status != self.window_icon {
             self.window_icon = self.tray_model.status;
             let icon = icon::egui_icon(self.window_icon);
@@ -190,6 +195,8 @@ impl SshelfApp {
             // below leaves alone.
             #[cfg(target_os = "windows")]
             window::native::set_taskbar_icon(&icon.rgba, icon.width);
+            #[cfg(target_os = "macos")]
+            window::macos::set_dock_icon(self.window_icon);
             ctx.send_viewport_cmd_to(
                 egui::ViewportId::ROOT,
                 egui::ViewportCommand::Icon(Some(Arc::new(icon))),

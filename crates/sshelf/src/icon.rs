@@ -101,6 +101,20 @@ mod tests {
         assert_eq!(rgb(p.bg_dark)[..3], icon_shape::BG_DARK);
     }
 
+    /// The Linux icon (an SVG for the desktop entry) is the same shape in
+    /// the same colours, and the entry matches the window's app id.
+    #[test]
+    fn the_linux_files_match_the_app() {
+        let svg = include_str!("../assets/linux/sshelf.svg");
+        let hex = |c: [u8; 3]| format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2]);
+        assert!(svg.contains(&hex(icon_shape::ACCENT)));
+        assert!(svg.contains(&hex(icon_shape::BG_DARK)));
+        let entry = include_str!("../assets/linux/sshelf.desktop");
+        let has = |line: &str| entry.lines().any(|l| l.trim_end() == line);
+        assert!(has("Icon=sshelf"));
+        assert!(has("StartupWMClass=sshelf"));
+    }
+
     #[test]
     fn large_sizes_have_smooth_edges() {
         let big = icon_shape::draw(256, None);

@@ -21,6 +21,16 @@ On Linux, install the windowing dev packages first (Debian/Ubuntu):
 sudo apt-get install libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev
 ```
 
+## Linux desktop entry
+
+The Linux release archive has a desktop entry and icon under `share/`, laid out like `~/.local/share`. Install them for your user so launchers and docks show sshelf with its icon (`sshelf` must be on your `PATH`):
+
+```
+cp -r share/. ~/.local/share/
+```
+
+From a checkout, the same files are in `crates/sshelf/assets/linux/`.
+
 ## Stack
 
 Rust, egui/eframe 0.37. Conventions mirror the owner's mp32ogg and atlasmerge projects.

@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 32 32">
+  <!-- The app icon (src/icon_shape.rs, same 32-unit grid): a Magenta
+       rounded square with three dark shelf bars. -->
+  <rect x="1" y="1" width="30" height="30" rx="6" fill="#c678dd"/>
+  <rect x="8" y="8.5" width="16" height="3" fill="#21252b"/>
+  <rect x="8" y="14.5" width="16" height="3" fill="#21252b"/>
+  <rect x="8" y="20.5" width="16" height="3" fill="#21252b"/>
+</svg>

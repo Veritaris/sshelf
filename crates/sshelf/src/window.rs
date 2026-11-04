@@ -37,6 +37,9 @@ fn rounded() -> bool {
 pub fn viewport(builder: ViewportBuilder) -> ViewportBuilder {
     builder
         .with_decorations(false)
+        // Wayland's app id / X11's WM_CLASS: docks match it to the desktop
+        // entry (`assets/linux/sshelf.desktop`) for the icon.
+        .with_app_id("sshelf")
         .with_transparent(rounded())
         // macOS: a system shadow on a transparent window ghosts; flat anyway.
         .with_has_shadow(false)
@@ -389,6 +392,86 @@ pub mod native {
                 return 0;
             }
             DefSubclassProc(hwnd, msg, wparam, lparam)
+        }
+    }
+}
+
+/// macOS: winit ignores window icons, and the Dock shows the app's icon. So
+/// the app sets the Dock icon itself, with the status dot, while it runs
+/// (also giving a binary outside an `.app` bundle its icon).
+#[cfg(target_os = "macos")]
+pub mod macos {
+    use objc2::{AnyThread, MainThreadMarker};
+    use objc2_app_kit::{NSApplication, NSImage};
+    use objc2_foundation::NSData;
+
+    use crate::icon::Status;
+    use crate::icon_shape;
+
+    /// The Dock icon's canvas, in pixels (the Dock shows up to 128 pt @2x).
+    const CANVAS: u32 = 256;
+    /// The shape inside it: Apple's icon grid leaves ~10 % around the body.
+    const BODY: u32 = 208;
+
+    /// Sets the Dock icon to the app icon with `status`'s dot. Call on the
+    /// main thread (`App::logic` is); elsewhere it does nothing.
+    pub fn set_dock_icon(status: Status) {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        let Some(png) = png(&dock_rgba(status), CANVAS) else {
+            return;
+        };
+        let data = NSData::with_bytes(&png);
+        let Some(image) = NSImage::initWithData(NSImage::alloc(), &data) else {
+            return;
+        };
+        let app = NSApplication::sharedApplication(mtm);
+        // SAFETY: on the main thread, with a valid image.
+        unsafe { app.setApplicationIconImage(Some(&image)) };
+    }
+
+    /// The icon body centred on the transparent canvas.
+    fn dock_rgba(status: Status) -> Vec<u8> {
+        let dot = status.color().map(|c| [c.r(), c.g(), c.b()]);
+        let body = icon_shape::draw(BODY, dot);
+        let margin = (CANVAS - BODY) / 2;
+        let mut canvas = vec![0u8; (CANVAS * CANVAS * 4) as usize];
+        for y in 0..BODY {
+            let from = (y * BODY * 4) as usize;
+            let to = (((y + margin) * CANVAS + margin) * 4) as usize;
+            canvas[to..to + (BODY * 4) as usize]
+                .copy_from_slice(&body[from..from + (BODY * 4) as usize]);
+        }
+        canvas
+    }
+
+    /// RGBA pixels as a PNG file.
+    fn png(rgba: &[u8], size: u32) -> Option<Vec<u8>> {
+        let mut out = Vec::new();
+        let mut encoder = png::Encoder::new(&mut out, size, size);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().ok()?;
+        writer.write_image_data(rgba).ok()?;
+        writer.finish().ok()?;
+        Some(out)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn the_dock_icon_is_a_centred_png() {
+            let rgba = dock_rgba(Status::Running);
+            assert_eq!(rgba.len(), (CANVAS * CANVAS * 4) as usize);
+            // Transparent margin, opaque body.
+            assert_eq!(rgba[3], 0);
+            let centre = ((CANVAS / 2 * CANVAS + CANVAS / 2) * 4) as usize;
+            assert_eq!(rgba[centre + 3], 255);
+            let png = png(&rgba, CANVAS).unwrap();
+            assert_eq!(&png[1..4], b"PNG");
         }
     }
 }

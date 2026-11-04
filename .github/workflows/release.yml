@@ -67,6 +67,12 @@ jobs:
             echo "ASSET=$dirname.7z" >> "$GITHUB_ENV"
           else
             cp "target/${{ matrix.platform.target }}/release/${bin}" "$dirname/"
+            if [ "${{ matrix.platform.os }}" = "ubuntu-latest" ]; then
+              # Desktop entry and icon, laid out like ~/.local/share.
+              mkdir -p "$dirname/share/applications" "$dirname/share/icons/hicolor/scalable/apps"
+              cp crates/sshelf/assets/linux/sshelf.desktop "$dirname/share/applications/"
+              cp crates/sshelf/assets/linux/sshelf.svg "$dirname/share/icons/hicolor/scalable/apps/"
+            fi
             tar -czf "$dirname.tar.gz" "$dirname"
             echo "ASSET=$dirname.tar.gz" >> "$GITHUB_ENV"
           fi
