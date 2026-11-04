@@ -23,7 +23,7 @@ use crate::sidebar::{self, View};
 use crate::theme::{self, Palette};
 use crate::toast::Toasts;
 use crate::tour::sandbox::{self, FakeSsh};
-use crate::tour::welcome;
+use crate::tour::{steps, welcome};
 use crate::tray::{self, Tray, TrayAction, TrayModel};
 use crate::tray_menu::TrayMenu;
 use crate::tunnels_view::{KeyFix, TunnelsView};
@@ -452,6 +452,7 @@ impl eframe::App for SshelfApp {
         self.toasts.show(ui.ctx());
 
         let mut commands = Vec::new();
+        let mut tour_chapter = None;
         // Hosts sits flush with the right and bottom edges: the cards'
         // detail pane runs to the window edge and the status bar.
         let frame = egui::Frame::central_panel(ui.style());
@@ -498,10 +499,12 @@ impl eframe::App for SshelfApp {
                         self.data.as_deref(),
                         self.ssh.as_deref(),
                         self.config.as_deref().map(|c| c.path.as_path()),
+                        close_guard::running_count(self.tunnel_states.as_deref()),
                     );
                     for notice in self.settings.take_notices() {
                         self.toasts.push(notice);
                     }
+                    tour_chapter = self.settings.take_tour();
                 }
             });
         if self.orphans.open
@@ -582,6 +585,10 @@ impl eframe::App for SshelfApp {
             self.tunnels.new_tunnel(&host, &data.tunnels);
         }
         self.send(commands);
+        // After this frame's commands went to the user's Core.
+        if let Some(chapter) = tour_chapter {
+            self.start_tour(ui.ctx(), steps::first_step(chapter));
+        }
         window::resize_handles(ui);
         self.tour_overlay(ui.ctx());
     }

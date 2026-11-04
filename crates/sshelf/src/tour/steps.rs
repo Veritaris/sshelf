@@ -16,6 +16,16 @@ pub enum Chapter {
 }
 
 impl Chapter {
+    /// The chapters *Start a chapter…* offers (Done is the closing step).
+    pub const PLAYABLE: [Chapter; 6] = [
+        Chapter::Hosts,
+        Chapter::Editing,
+        Chapter::Tunnels,
+        Chapter::Fixing,
+        Chapter::Groups,
+        Chapter::Window,
+    ];
+
     pub fn title(self) -> &'static str {
         match self {
             Chapter::Hosts => "Hosts",

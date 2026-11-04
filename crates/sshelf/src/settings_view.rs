@@ -1,8 +1,8 @@
 //! Settings (SPEC.md §8, §10; board A-Settings): two columns of cards —
 //! Appearance (host list style, card grouping, *Reduce motion*), Connect
 //! (the terminal command template), Window & tray (closing, the tray menu),
-//! ssh (binary, version, the agent, the override) and Files. *Save* and
-//! *Revert* sit next to the title.
+//! ssh (binary, version, the agent, the override), Files and Help (the
+//! tour, M10). *Save* and *Revert* sit next to the title.
 
 use std::path::{Path, PathBuf};
 
@@ -17,6 +17,7 @@ use sshelf_core::storage::LoadStatus;
 use sshelf_core::terminal;
 
 use crate::theme::{Palette, radius};
+use crate::tour::steps::Chapter;
 use crate::widgets::button::{self, Button};
 use crate::widgets::dropdown::Dropdown;
 use crate::widgets::field::TextField;
@@ -42,6 +43,8 @@ pub struct SettingsView {
     tray_menu: TrayMenu,
     /// Toasts for the app ("Copied command").
     notices: Vec<String>,
+    /// The tour asked for from Help: the chapter to start at.
+    tour: Option<Chapter>,
 }
 
 impl SettingsView {
@@ -85,12 +88,20 @@ impl SettingsView {
         std::mem::take(&mut self.notices)
     }
 
+    /// The tour to start (Help), once: the chapter it starts at.
+    pub fn take_tour(&mut self) -> Option<Chapter> {
+        self.tour.take()
+    }
+
+    /// `running`: the user's tunnels running now (the tour can't start
+    /// while any does).
     pub fn show(
         &mut self,
         ui: &mut Ui,
         data: Option<&AppData>,
         ssh: Option<&SshInfo>,
         ssh_config: Option<&Path>,
+        running: usize,
     ) -> Vec<Command> {
         let mut commands = Vec::new();
         let Some(data) = data else {
@@ -122,6 +133,7 @@ impl SettingsView {
                         ui.spacing_mut().item_spacing.y = GAP;
                         self.ssh(ui, ssh, &mut commands);
                         files(ui, data, ssh_config);
+                        self.help(ui, running);
                     });
                 });
                 ui.add_space(20.0);
@@ -443,6 +455,55 @@ impl SettingsView {
             self.notices.push("Copied command".into());
         }
     }
+
+    /// Help: the tour again, or one chapter of it. Both wait while the
+    /// user's tunnels run: the tour swaps in its own Core.
+    fn help(&mut self, ui: &mut Ui, running: usize) {
+        let p = &Palette::ONE_DARK;
+        let blocked = match running {
+            0 => None,
+            1 => Some(
+                "Stop the running tunnel first: the tour uses its own sample data.".to_string(),
+            ),
+            n => Some(format!(
+                "Stop the {n} running tunnels first: the tour uses its own sample data."
+            )),
+        };
+        card(ui, "Help", |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                let mut again = Button::new("Take the tour again").icon(icons::COMPASS);
+                if let Some(reason) = &blocked {
+                    again = again.tip(reason);
+                }
+                if ui.add_enabled(blocked.is_none(), again).clicked() {
+                    self.tour = Some(Chapter::Hosts);
+                }
+                let options = Chapter::PLAYABLE.map(|c| (c, c.title()));
+                let picked = ui
+                    .add_enabled_ui(blocked.is_none(), |ui| {
+                        Dropdown::new(
+                            "settings_tour_chapter",
+                            "Start a chapter",
+                            &options,
+                            "Start a chapter…",
+                        )
+                        .panel_width(200.0)
+                        .show(ui, Chapter::Done)
+                    })
+                    .inner;
+                if let Some(chapter) = picked {
+                    self.tour = Some(chapter);
+                }
+            });
+            let note = blocked.unwrap_or_else(|| {
+                "A walk through sshelf on sample hosts; your own config and tunnels are not \
+                 touched."
+                    .to_string()
+            });
+            ui.add(egui::Label::new(RichText::new(note).size(12.0).color(p.dim)).wrap());
+        });
+    }
 }
 
 /// The agent in one line: the Windows service when it isn't running, else
@@ -625,10 +686,60 @@ mod tests {
             .with_size([1100.0, 800.0])
             .build_ui_state(
                 move |ui, (view, commands): &mut (SettingsView, Vec<Command>)| {
-                    commands.extend(view.show(ui, Some(&data), None, None));
+                    commands.extend(view.show(ui, Some(&data), None, None, 0));
                 },
                 (SettingsView::default(), Vec::new()),
             )
+    }
+
+    fn help_harness(
+        running: usize,
+    ) -> egui_kittest::Harness<'static, (SettingsView, Vec<Chapter>)> {
+        let data = data();
+        test_util::harness()
+            .with_size([1100.0, 800.0])
+            .build_ui_state(
+                move |ui, (view, asked): &mut (SettingsView, Vec<Chapter>)| {
+                    view.show(ui, Some(&data), None, None, running);
+                    asked.extend(view.take_tour());
+                },
+                (SettingsView::default(), Vec::new()),
+            )
+    }
+
+    #[test]
+    fn help_starts_the_tour_or_a_chapter() {
+        let mut harness = help_harness(0);
+        harness.step();
+        harness.get_by_label("Take the tour again").click();
+        harness.step();
+        harness.get_by_label("Start a chapter").click();
+        harness.step();
+        harness.step();
+        harness.get_by_label("Groups").click();
+        harness.step();
+        harness.step();
+        assert_eq!(harness.state().1, [Chapter::Hosts, Chapter::Groups]);
+    }
+
+    #[test]
+    fn help_waits_while_tunnels_run() {
+        let mut harness = help_harness(2);
+        harness.step();
+        assert!(
+            harness
+                .get_by_label("Take the tour again")
+                .accesskit_node()
+                .is_disabled()
+        );
+        assert!(
+            harness
+                .get_by_label("Start a chapter")
+                .accesskit_node()
+                .is_disabled()
+        );
+        harness
+            .get_by_label("Stop the 2 running tunnels first: the tour uses its own sample data.");
     }
 
     #[test]
@@ -702,7 +813,7 @@ mod tests {
             .with_size([1100.0, 800.0])
             .build_ui_state(
                 |ui, (view, data): &mut (SettingsView, AppData)| {
-                    view.show(ui, Some(data), None, None);
+                    view.show(ui, Some(data), None, None, 0);
                 },
                 state,
             );

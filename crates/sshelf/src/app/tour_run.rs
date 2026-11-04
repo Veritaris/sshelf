@@ -175,11 +175,9 @@ impl SshelfApp {
     /// The earlier chapters' actions a chapter needs, done without UI
     /// (SPEC.md: *Start a chapter…*).
     fn replay(&mut self, step: usize) {
-        let chapter = STEPS[step].chapter;
         let mut commands = Vec::new();
-        let groups = steps::first_step(Chapter::Groups);
-        if step >= groups || chapter == Chapter::Groups {
-            // The group editor adds web admin.
+        if step >= steps::first_step(Chapter::Fixing) {
+            // Made in Tunnels; the group editor adds it later.
             commands.push(Command::SaveTunnel(self.web_admin()));
         }
         if step >= steps::first_step(Chapter::Window) {
@@ -654,6 +652,14 @@ mod tests {
     use crate::app::Startup;
     use crate::test_util;
 
+    /// One tour at a time: two sandboxes would race for the same sample
+    /// ports (the app only ever runs one).
+    static ONE_TOUR: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn one_tour() -> std::sync::MutexGuard<'static, ()> {
+        ONE_TOUR.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// The workspace's fake-ssh binary, beside this test binary's folder
     /// (`target/<profile>/deps/..`): `cargo test --workspace` builds it.
     fn fake_ssh_binary() -> PathBuf {
@@ -718,6 +724,7 @@ mod tests {
     /// only the sandbox's fake-ssh can run; the sandbox is deleted after.
     #[test]
     fn the_whole_tour_plays_in_the_sandbox_and_touches_nothing_else() {
+        let _one = one_tour();
         let root = tempfile::tempdir().unwrap();
         let user = root.path().join("user");
         let paths = Paths::new(&user.join("home"), user.join("app"));
@@ -762,7 +769,101 @@ mod tests {
 
         let ctx = harness.ctx.clone();
         harness.state_mut().start_tour(&ctx, 0);
-        settle(&mut harness, "the sandbox", |app| {
+        play(&mut harness, 0);
+        settle(&mut harness, "tour = done", |app| {
+            app.data
+                .as_ref()
+                .is_some_and(|d| d.settings.tour == Some(TourState::Done))
+        });
+        drop(harness);
+
+        // The sandbox is gone.
+        let left: Vec<_> = fs::read_dir(&temp).unwrap().flatten().collect();
+        assert!(left.is_empty(), "left behind: {left:?}");
+        // The user's files: all as they were, settings.toml aside.
+        let mut after = snapshot(&user);
+        let settings = paths.app_dir.join("settings.toml");
+        let saved = String::from_utf8(after.remove(&settings).unwrap()).unwrap();
+        assert!(saved.contains("tour = \"done\""), "{saved}");
+        let mut before = before;
+        before.remove(&settings);
+        assert_eq!(before, after);
+    }
+
+    /// An app on a user folder in `root` whose Core has no ssh, and the
+    /// fake-ssh binary for the sandbox.
+    fn app_in(root: &Path) -> Harness<'static, SshelfApp> {
+        let paths = Paths::new(&root.join("home"), root.join("app"));
+        fs::create_dir_all(&paths.ssh_dir).unwrap();
+        fs::create_dir_all(&paths.app_dir).unwrap();
+        fs::write(
+            paths.app_dir.join("settings.toml"),
+            format!(
+                "version = 1\nssh_path = '{}'\nreduce_motion = true\ntour = \"done\"\n",
+                root.join("no-ssh-here").display()
+            ),
+        )
+        .unwrap();
+        let temp = root.join("temp");
+        fs::create_dir_all(&temp).unwrap();
+        let startup = Startup {
+            tray: false,
+            fake_ssh: Some(FakeSsh {
+                program: fake_ssh_binary(),
+                prefix: vec![fake_ssh::EMBEDDED_FLAG.into()],
+            }),
+            temp,
+            user_paths: Some(paths),
+        };
+        let mut harness = test_util::harness()
+            .with_size([1280.0, 800.0])
+            .build_eframe(|cc| SshelfApp::with(cc, startup));
+        settle(&mut harness, "the user's data", |app| app.data.is_some());
+        harness
+    }
+
+    /// Each chapter from Settings › Help plays to the end on its replayed
+    /// prerequisites.
+    #[test]
+    fn every_chapter_plays_from_its_first_step() {
+        let _one = one_tour();
+        let root = tempfile::tempdir().unwrap();
+        let mut harness = app_in(root.path());
+        // One through the Help card itself (tall enough to show it without
+        // scrolling).
+        harness.set_size(egui::vec2(1280.0, 1200.0));
+        harness.state_mut().view = View::Settings;
+        harness.run_steps(3);
+        harness.get_by_label("Start a chapter").click();
+        harness.run_steps(3);
+        harness.get_by_label("Fixing problems").click();
+        harness.run_steps(3);
+        let fixing = steps::first_step(Chapter::Fixing);
+        assert_eq!(step_index(harness.state()), Some(fixing));
+        harness.set_size(egui::vec2(1280.0, 800.0));
+        play(&mut harness, fixing);
+        let ctx = harness.ctx.clone();
+        for chapter in Chapter::PLAYABLE.into_iter().skip(1) {
+            if chapter == Chapter::Fixing {
+                continue;
+            }
+            let first = steps::first_step(chapter);
+            harness.state_mut().start_tour(&ctx, first);
+            play(&mut harness, first);
+        }
+        drop(harness);
+        let left: Vec<_> = fs::read_dir(root.path().join("temp"))
+            .unwrap()
+            .flatten()
+            .collect();
+        assert!(left.is_empty(), "left behind: {left:?}");
+    }
+
+    /// Plays a started tour from step `from` to its end with *Show me* on
+    /// every step, checking each step's targets are on screen.
+    fn play(harness: &mut Harness<'_, SshelfApp>, from: usize) {
+        let ctx = harness.ctx.clone();
+        settle(harness, "the sandbox", |app| {
             app.ssh.as_ref().is_some_and(|s| {
                 s.tools
                     .as_ref()
@@ -770,13 +871,13 @@ mod tests {
             }) && app.config.as_ref().is_some_and(|c| c.hosts().is_some())
         });
 
-        for (index, step) in STEPS.iter().enumerate() {
+        for (index, step) in STEPS.iter().enumerate().skip(from) {
             assert_eq!(step_index(harness.state()), Some(index), "{}", step.title);
             // The step's screen, then its targets on screen.
             for _ in 0..5 {
                 harness.step();
             }
-            settle(&mut harness, step.title, |_| {
+            settle(harness, step.title, |_| {
                 step.targets.is_empty()
                     || step
                         .targets
@@ -806,11 +907,11 @@ mod tests {
                         app.error,
                     );
                 }
-                if primary(&harness, "Open my hosts") {
+                if primary(harness, "Open my hosts") {
                     harness.get_by_label("Open my hosts").click();
-                } else if primary(&harness, "Next") {
+                } else if primary(harness, "Next") {
                     harness.get_by_label("Next").click();
-                } else if (!shown || since_shown > 100) && primary(&harness, "Show me") {
+                } else if (!shown || since_shown > 100) && primary(harness, "Show me") {
                     // Again after a while: kittest presses and releases in
                     // one frame, which a popover that just moved can miss.
                     harness.get_by_label("Show me").click();
@@ -826,24 +927,6 @@ mod tests {
         }
         assert!(harness.state().tour.is_none(), "the tour ended");
         assert_eq!(harness.state().view, View::Hosts);
-        settle(&mut harness, "tour = done", |app| {
-            app.data
-                .as_ref()
-                .is_some_and(|d| d.settings.tour == Some(TourState::Done))
-        });
-        drop(harness);
-
-        // The sandbox is gone.
-        let left: Vec<_> = fs::read_dir(&temp).unwrap().flatten().collect();
-        assert!(left.is_empty(), "left behind: {left:?}");
-        // The user's files: all as they were, settings.toml aside.
-        let mut after = snapshot(&user);
-        let settings = paths.app_dir.join("settings.toml");
-        let saved = String::from_utf8(after.remove(&settings).unwrap()).unwrap();
-        assert!(saved.contains("tour = \"done\""), "{saved}");
-        let mut before = before;
-        before.remove(&settings);
-        assert_eq!(before, after);
     }
 
     #[test]
