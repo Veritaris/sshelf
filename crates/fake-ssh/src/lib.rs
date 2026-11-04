@@ -221,10 +221,15 @@ pub fn run(mut args: Vec<String>) -> ExitCode {
             .append(true)
             .open(path)
             .expect("opening FAKE_SSH_RECORD");
-        let line: Vec<&str> = std::iter::once(name.as_str())
+        let words: Vec<&str> = std::iter::once(name.as_str())
             .chain(args.iter().map(String::as_str))
             .collect();
-        writeln!(file, "{}", line.join("\x1f")).expect("writing FAKE_SSH_RECORD");
+        // One write per line: runs that record at the same time (an
+        // `ssh-add -l` beside an `ssh-add <key>`) must not interleave, and
+        // `writeln!` writes the text and the newline separately.
+        let line = format!("{}\n", words.join("\x1f"));
+        file.write_all(line.as_bytes())
+            .expect("writing FAKE_SSH_RECORD");
     }
     if name == "ssh-add" {
         return ssh_add(&args);
