@@ -26,6 +26,8 @@ use crate::tunnels::{Group, Tunnel};
 pub const LOG_LINES: usize = 200;
 /// ssh's `-v` line once authentication and forward setup are done.
 pub const READY_MARKER: &str = "Entering interactive session.";
+/// How long an exit waits for ssh's remaining output to be read.
+const READ_REST: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Owner {
@@ -589,10 +591,15 @@ impl Worker {
         let mut child = spawned.child;
         let pid = child.id();
 
+        // The reader says when it has read everything, so the exit is
+        // reported after ssh's last lines (they decide the failure kind).
+        let (read_all, all_read) = mpsc::channel::<()>();
         if let Some(stderr) = child.stderr.take() {
             let tx = self.tx.clone();
             let id = id.to_string();
             thread::spawn(move || {
+                // Dropped when this thread ends, which wakes the waiter.
+                let _read_all = read_all;
                 for line in BufReader::new(stderr).lines() {
                     let Ok(text) = line else { break };
                     let message = Message::Line {
@@ -610,6 +617,9 @@ impl Worker {
         let waiter_id = id.to_string();
         thread::spawn(move || {
             let code = child.wait().ok().and_then(|s| s.code());
+            // Its last lines first. Bounded: a grandchild (a ProxyCommand)
+            // can keep the pipe open after ssh itself has exited.
+            let _ = all_read.recv_timeout(READ_REST);
             let _ = tx.send(Message::Exited {
                 id: waiter_id,
                 generation,
