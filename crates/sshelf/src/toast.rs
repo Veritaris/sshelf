@@ -8,7 +8,7 @@
 use std::time::Duration;
 
 use egui::text::{LayoutJob, TextFormat};
-use egui::{Align2, Area, FontId, Frame, Id, Margin, Order, Stroke, vec2};
+use egui::{Align2, Area, Color32, FontId, Frame, Id, Margin, Order, Stroke, vec2};
 
 use crate::theme::{Palette, radius, timing};
 use crate::{icons, motion, status_bar};
@@ -31,6 +31,8 @@ struct Toast {
     text: String,
     /// A value after the text, in mono (an alias, a path).
     value: Option<String>,
+    /// The icon before it and its colour (a green check by default).
+    icon: (char, Color32),
     /// Seconds it has been shown (not counting hovered time).
     age: f64,
     /// `egui` time of the last frame that drew it.
@@ -88,20 +90,31 @@ fn message(text: &str, value: Option<&str>) -> LayoutJob {
 
 impl Toasts {
     pub fn push(&mut self, text: impl Into<String>) {
-        self.add(text.into(), None);
+        self.add(
+            text.into(),
+            None,
+            (icons::CIRCLE_CHECK, Palette::ONE_DARK.green),
+        );
     }
 
     /// `text` followed by `value` in mono, e.g. "Opened a terminal for"
     /// and an alias.
     pub fn push_value(&mut self, text: impl Into<String>, value: impl Into<String>) {
-        self.add(text.into(), Some(value.into()));
+        let check = (icons::CIRCLE_CHECK, Palette::ONE_DARK.green);
+        self.add(text.into(), Some(value.into()), check);
     }
 
-    fn add(&mut self, text: String, value: Option<String>) {
+    /// `text` after `icon` in `color` (streamer mode's on and off).
+    pub fn push_icon(&mut self, text: impl Into<String>, icon: char, color: Color32) {
+        self.add(text.into(), None, (icon, color));
+    }
+
+    fn add(&mut self, text: String, value: Option<String>, icon: (char, Color32)) {
         self.items.push(Toast {
             id: self.next_id,
             text,
             value,
+            icon,
             age: 0.0,
             last: None,
         });
@@ -139,7 +152,8 @@ impl Toasts {
                             ui.set_width(WIDTH - 24.0);
                             ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing.x = 10.0;
-                                icons::show(ui, icons::CIRCLE_CHECK, 16.0, p.green);
+                                let (icon, color) = toast.icon;
+                                icons::show(ui, icon, 16.0, color);
                                 ui.label(message(&toast.text, toast.value.as_deref()));
                             });
                         });

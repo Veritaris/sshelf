@@ -1,8 +1,9 @@
 //! Settings (SPEC.md §8, §10; board A-Settings): two columns of cards —
 //! Appearance (host list style, card grouping, *Reduce motion*), Connect
 //! (the terminal command template), Window & tray (closing, the tray menu),
-//! ssh (binary, version, the agent, the override), Files and Help (the
-//! tour, M10). *Save* and *Revert* sit next to the title.
+//! Privacy (streamer mode, M11; applied at once), ssh (binary, version, the
+//! agent, the override), Files and Help (the tour, M10). *Save* and *Revert*
+//! sit next to the title.
 
 use std::path::{Path, PathBuf};
 
@@ -23,8 +24,8 @@ use crate::widgets::button::{self, Button};
 use crate::widgets::dropdown::Dropdown;
 use crate::widgets::field::TextField;
 use crate::widgets::switch::switch;
-use crate::widgets::{nav, popup, text};
-use crate::{fonts, icons};
+use crate::widgets::{masked, nav, popup, text};
+use crate::{fonts, icons, privacy};
 
 /// Label column of a card's rows.
 const LABEL: f32 = 150.0;
@@ -47,10 +48,14 @@ pub struct SettingsView {
     notices: Vec<String>,
     /// The tour asked for from Help: the chapter to start at.
     tour: Option<Chapter>,
+    /// Privacy's switches flipped: streamer mode and hidden aliases, to
+    /// apply at once.
+    streamer: Option<(bool, bool)>,
 }
 
 impl SettingsView {
-    /// The settings as edited (the tour's state is kept as saved).
+    /// The settings as edited (the tour's state and streamer mode, which
+    /// apply at once, are kept as saved).
     fn draft(&self) -> Settings {
         let path = self.ssh_path.trim();
         Settings {
@@ -71,6 +76,13 @@ impl SettingsView {
     /// Follows the saved settings: always when the draft has no edits, and
     /// when the draft is exactly what was saved (it was just saved from here).
     fn sync(&mut self, saved: &Settings) {
+        // What applies at once follows the saved settings even with edits,
+        // so neither counts as an edit nor is undone by *Save*.
+        if let Some(base) = &mut self.base {
+            base.streamer_mode = saved.streamer_mode;
+            base.streamer_hide_aliases = saved.streamer_hide_aliases;
+            base.tour = saved.tour;
+        }
         let dirty = self.base.as_ref().is_some_and(|b| self.draft() != *b);
         if self.base.as_ref() != Some(saved) && (!dirty || self.draft() == *saved) {
             self.ssh_path = saved
@@ -97,6 +109,11 @@ impl SettingsView {
     /// The tour to start (Help), once: the chapter it starts at.
     pub fn take_tour(&mut self) -> Option<Chapter> {
         self.tour.take()
+    }
+
+    /// Streamer mode and hidden aliases as just set in Privacy, once.
+    pub fn take_streamer(&mut self) -> Option<(bool, bool)> {
+        self.streamer.take()
     }
 
     /// `running`: the user's tunnels running now (the tour can't start
@@ -133,6 +150,7 @@ impl SettingsView {
                         self.appearance(ui);
                         self.connect(ui, ssh);
                         self.window_and_tray(ui, ssh);
+                        self.privacy(ui, &data.settings);
                     });
                     ui.vertical(|ui| {
                         ui.set_width(column);
@@ -368,6 +386,58 @@ impl SettingsView {
                 };
                 ui.add(egui::Label::new(RichText::new(text).size(13.0).color(color)).wrap());
             });
+        });
+    }
+
+    /// Privacy: streamer mode and *Hide host aliases and tags*, applied at
+    /// once (outside *Save* / *Revert*). The second is dimmed while streamer
+    /// mode is off, but can be set ahead.
+    fn privacy(&mut self, ui: &mut Ui, saved: &Settings) {
+        let p = &Palette::ONE_DARK;
+        card(ui, "Privacy", |ui| {
+            let (mut on, mut hide) = (saved.streamer_mode, saved.streamer_hide_aliases);
+            let streamer = switch_row(
+                ui,
+                "Streamer mode",
+                "Masks addresses, users, ports, paths and keys everywhere in sshelf. Hold a \
+                 masked value to peek; copy still copies the real value.",
+                &mut on,
+            );
+            let hidden = ui
+                .scope(|ui| {
+                    if !saved.streamer_mode {
+                        ui.multiply_opacity(0.5);
+                    }
+                    switch_row(
+                        ui,
+                        "Hide host aliases and tags",
+                        "Shows them as host 1, host 2… Only while streamer mode is on.",
+                        &mut hide,
+                    )
+                })
+                .inner;
+            if streamer || hidden {
+                self.streamer = Some((on, hide));
+            }
+            let line = ui.available_rect_before_wrap();
+            ui.painter().hline(
+                line.x_range(),
+                line.top(),
+                egui::Stroke::new(1.0, p.separator),
+            );
+            // 10 px between the line and the footnote.
+            ui.add_space(8.0);
+            ui.add(
+                egui::Label::new(
+                    RichText::new(
+                        "Applies at once, without Save. Not covered: the terminal that Connect \
+                         opens and system file dialogs.",
+                    )
+                    .size(12.0)
+                    .color(p.dim),
+                )
+                .wrap(),
+            );
         });
     }
 
@@ -667,11 +737,49 @@ fn row(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui)) {
     });
 }
 
+/// A setting with a switch: its name (painted: the switch carries it) and
+/// help on the left, the switch on the right. Returns whether it flipped.
+fn switch_row(ui: &mut Ui, name: &str, help: &str, on: &mut bool) -> bool {
+    let p = &Palette::ONE_DARK;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 14.0;
+        let text_width = (ui.available_width() - 36.0 - 14.0).max(80.0);
+        ui.vertical(|ui| {
+            ui.set_width(text_width);
+            ui.spacing_mut().item_spacing.y = 2.0;
+            let (rect, _) = ui.allocate_exact_size(vec2(text_width, 18.0), Sense::hover());
+            ui.painter().text(
+                egui::pos2(rect.left(), rect.center().y),
+                Align2::LEFT_CENTER,
+                name,
+                FontId::proportional(13.0),
+                p.text_strong,
+            );
+            ui.add(egui::Label::new(RichText::new(help).size(12.0).color(p.dim)).wrap());
+        });
+        switch(ui, on, name).changed()
+    })
+    .inner
+}
+
 /// A path in mono, cut in the middle to the width left (the full path in a
-/// tooltip when cut), with an optional dim note after it.
+/// tooltip when cut), with an optional dim note after it. In streamer mode
+/// the path is a masked token, with no tooltip.
 fn path_label(ui: &mut Ui, path: &str, note: Option<&str>) -> egui::Response {
     let p = &Palette::ONE_DARK;
     let font = FontId::monospace(12.0);
+    if privacy::get(ui.ctx()).on {
+        let style = masked::Style {
+            font,
+            color: p.text,
+            on_card: true,
+        };
+        let response = masked::value(ui, path, &style);
+        if let Some(note) = note {
+            ui.label(RichText::new(note).size(12.0).color(p.dim));
+        }
+        return response;
+    }
     let note_width = note.map_or(0.0, |n| {
         ui.painter()
             .layout_no_wrap(n.to_string(), FontId::proportional(12.0), p.dim)
@@ -833,6 +941,61 @@ mod tests {
             ..saved
         };
         assert_eq!(harness.state().1, [Command::SaveSettings(expected)]);
+    }
+
+    /// Privacy's switches apply at once: nothing to save, and a later Save of
+    /// other edits keeps streamer mode as it is now.
+    #[test]
+    fn privacy_applies_at_once_and_save_keeps_it() {
+        let state = (SettingsView::default(), data(), Vec::new());
+        let mut harness = test_util::harness()
+            .with_size([1100.0, 900.0])
+            .build_ui_state(
+                |ui, (view, data, commands): &mut (SettingsView, AppData, Vec<Command>)| {
+                    commands.extend(view.show(ui, Some(data), None, None, 0));
+                },
+                state,
+            );
+        harness.step();
+        harness.state_mut().0.reduce_motion = true;
+        harness.step();
+        harness
+            .get_by_role_and_label(egui::accesskit::Role::Switch, "Streamer mode")
+            .click();
+        harness.step();
+        assert_eq!(harness.state_mut().0.take_streamer(), Some((true, false)));
+        // The core applied it and sent the new data back.
+        harness.state_mut().1.settings.streamer_mode = true;
+        harness.step();
+        harness.get_by_label("Save").click();
+        harness.step();
+        harness.step();
+        let expected = Settings {
+            reduce_motion: true,
+            streamer_mode: true,
+            ..Settings::default()
+        };
+        assert_eq!(harness.state().2, [Command::SaveSettings(expected)]);
+    }
+
+    /// With streamer mode on, Settings masks its own paths.
+    #[test]
+    fn streamer_mode_masks_the_paths() {
+        let mut data = data();
+        data.app_dir = PathBuf::from("/home/lk-user-q7/.config/sshelf");
+        let mut harness = test_util::harness()
+            .with_size([1100.0, 900.0])
+            .build_ui_state(
+                move |ui, view: &mut SettingsView| {
+                    privacy::set(ui.ctx(), privacy::Privacy { on: true });
+                    view.show(ui, Some(&data), None, Some(Path::new("/q7/config")), 0);
+                },
+                SettingsView::default(),
+            );
+        harness.step();
+        harness.step();
+        let drawn = test_util::drawn_text(&harness);
+        assert!(!drawn.contains("q7"), "{drawn}");
     }
 
     #[test]

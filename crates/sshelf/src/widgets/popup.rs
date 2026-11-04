@@ -5,9 +5,10 @@
 //! and fade out the same way; the next tooltip within 300 ms of one closing
 //! shows at once.
 //!
-//! Context menus (right click): fade in and scale 98 → 100 % from the click
-//! point, fade out (120 ms); the hover highlight slides between rows (50 ms)
-//! and fades in place when the pointer leaves.
+//! Context menus (right click; click menus drop from their widget): fade in
+//! and scale 98 → 100 % from the click point, fade out (120 ms); the hover
+//! highlight slides between rows (50 ms) and fades in place when the pointer
+//! leaves.
 
 use egui::emath::TSTransform;
 use egui::{
@@ -171,13 +172,44 @@ pub fn menu_is_open(response: &Response) -> bool {
 /// A context menu on `response`'s widget, opened by a right click. `add`
 /// builds its items each frame it shows.
 pub fn context_menu(response: &Response, add: impl FnOnce(&mut Menu)) {
+    let opened = response.secondary_clicked().then(|| {
+        response
+            .interact_pointer_pos()
+            .unwrap_or(response.rect.center())
+    });
+    menu(response, opened, MENU_WIDTH, false, add);
+}
+
+/// A menu `width` wide under `response`'s widget (a chip), opened and
+/// closed again by clicking it.
+pub fn click_menu(response: &Response, width: f32, add: impl FnOnce(&mut Menu)) {
+    let was_open = menu_is_open(response);
+    if response.clicked() && was_open {
+        close_menus(&response.ctx);
+    }
+    let opened =
+        (response.clicked() && !was_open).then(|| response.rect.left_bottom() + vec2(0.0, 4.0));
+    menu(response, opened, width, true, add);
+}
+
+fn close_menus(ctx: &egui::Context) {
+    ctx.data_mut(|d| d.remove::<OpenMenu>(open_menu_id()));
+}
+
+/// Shows the menu of `response`'s widget while open; `opened`: opens it
+/// at that point now. `toggles`: presses on the widget itself are its own
+/// (they don't count as a click outside).
+fn menu(
+    response: &Response,
+    opened: Option<Pos2>,
+    width: f32,
+    toggles: bool,
+    add: impl FnOnce(&mut Menu),
+) {
     let ctx = response.ctx.clone();
     let id = response.id.with("context_menu");
     let at_id = id.with("at");
-    if response.secondary_clicked() {
-        let at = response
-            .interact_pointer_pos()
-            .unwrap_or(response.rect.center());
+    if let Some(at) = opened {
         ctx.data_mut(|d| {
             d.insert_temp(open_menu_id(), OpenMenu { id });
             d.insert_temp(at_id, at);
@@ -211,7 +243,7 @@ pub fn context_menu(response: &Response, add: impl FnOnce(&mut Menu)) {
                 .corner_radius(radius::CONTROL)
                 .inner_margin(Margin::same(4))
                 .show(ui, |ui| {
-                    ui.set_width(MENU_WIDTH - 8.0);
+                    ui.set_width(width - 8.0);
                     ui.spacing_mut().item_spacing.y = 0.0;
                     let mut menu = Menu::new(ui, id);
                     add(&mut menu);
@@ -232,12 +264,12 @@ pub fn context_menu(response: &Response, add: impl FnOnce(&mut Menu)) {
     }
     let clicked_outside = ctx.input(|i| {
         (i.pointer.primary_pressed() || i.pointer.secondary_pressed())
-            && i.pointer
-                .interact_pos()
-                .is_some_and(|pos| !area.response.rect.contains(pos))
+            && i.pointer.interact_pos().is_some_and(|pos| {
+                !area.response.rect.contains(pos) && !(toggles && response.rect.contains(pos))
+            })
     }) && !response.secondary_clicked();
     if close || clicked_outside || ctx.input(|i| i.key_pressed(Key::Escape)) {
-        ctx.data_mut(|d| d.remove::<OpenMenu>(open_menu_id()));
+        close_menus(&ctx);
     }
 }
 
@@ -319,6 +351,48 @@ impl<'a> Menu<'a> {
         let clicked = enabled && response.clicked();
         self.chosen |= clicked;
         clicked
+    }
+
+    /// A row with `label` and a switch; returns whether it was flipped (the
+    /// menu stays open).
+    pub fn switch(&mut self, label: &str, on: &mut bool) -> bool {
+        let p = &Palette::ONE_DARK;
+        let (rect, _) = self
+            .ui
+            .allocate_exact_size(vec2(self.ui.available_width(), ITEM_HEIGHT), Sense::hover());
+        // Painted: the switch carries the name.
+        self.ui.painter().text(
+            egui::pos2(rect.left() + 10.0, rect.center().y),
+            Align2::LEFT_CENTER,
+            label,
+            FontId::proportional(13.0),
+            p.text,
+        );
+        let mut child = self.ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(rect.shrink2(vec2(10.0, 0.0)))
+                .layout(egui::Layout::right_to_left(egui::Align::Center)),
+        );
+        crate::widgets::switch::switch(&mut child, on, label).changed()
+    }
+
+    /// A dim note under the items.
+    pub fn note(&mut self, text: &str) {
+        let p = &Palette::ONE_DARK;
+        Frame::new()
+            .inner_margin(Margin {
+                left: 10,
+                right: 10,
+                top: 4,
+                bottom: 6,
+            })
+            .show(self.ui, |ui| {
+                ui.add(
+                    egui::Label::new(egui::RichText::new(text).size(11.0).color(p.dim))
+                        .wrap()
+                        .selectable(false),
+                );
+            });
     }
 
     pub fn separator(&mut self) {

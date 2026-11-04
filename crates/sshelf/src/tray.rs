@@ -1,5 +1,6 @@
-//! Tray icon and menu (SPEC.md §10 "Tray"): recent hosts to connect to,
-//! groups to start or stop, active tunnels to stop, Show and Quit.
+//! Tray icon and menu (SPEC.md §10 "Tray"): the *Streamer mode* switch,
+//! recent hosts to connect to, groups to start or stop, active tunnels to
+//! stop, Show and Quit.
 //!
 //! [`model`] builds a [`TrayModel`] from app state (pure, tested); the native
 //! menu ([`TrayModel::entries`]) and the sshelf menu (`tray_menu`) both show
@@ -15,7 +16,9 @@ use sshconf::HostList;
 use sshelf_core::core::{AppData, Command};
 use sshelf_core::settings::TrayIconStyle;
 use sshelf_core::supervisor::{GroupState, Owner, Snapshot, TunnelState};
-use tray_icon::menu::{IsMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
+use tray_icon::menu::{
+    CheckMenuItem, IsMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu,
+};
 use tray_icon::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
 use crate::close_guard;
@@ -46,6 +49,8 @@ pub enum TrayAction {
     Quit,
     /// Right click with the sshelf menu on: open it by the icon.
     OpenMenu(IconRect),
+    /// The *Streamer mode* switch: on or off.
+    SetStreamer(bool),
 }
 
 impl TrayAction {
@@ -60,6 +65,7 @@ impl TrayAction {
             TrayAction::Show => "show".into(),
             TrayAction::Quit => "quit".into(),
             TrayAction::OpenMenu(_) => "open-menu".into(),
+            TrayAction::SetStreamer(on) => format!("streamer:{}", if *on { "on" } else { "off" }),
         }
     }
 
@@ -77,6 +83,11 @@ impl TrayAction {
             "group-stop" => TrayAction::StopGroup(arg),
             "tunnel-stop" => TrayAction::StopTunnel(arg),
             "tunnel-show" => TrayAction::ShowTunnel(arg),
+            "streamer" => match arg.as_str() {
+                "on" => TrayAction::SetStreamer(true),
+                "off" => TrayAction::SetStreamer(false),
+                _ => return None,
+            },
             _ => return None,
         })
     }
@@ -91,7 +102,8 @@ impl TrayAction {
             TrayAction::ShowTunnel(_)
             | TrayAction::Show
             | TrayAction::Quit
-            | TrayAction::OpenMenu(_) => return None,
+            | TrayAction::OpenMenu(_)
+            | TrayAction::SetStreamer(_) => return None,
         })
     }
 }
@@ -103,6 +115,12 @@ pub enum Entry {
     Item {
         label: String,
         action: Option<String>,
+    },
+    /// An item with a check mark; a click runs `action`.
+    Check {
+        label: String,
+        checked: bool,
+        action: String,
     },
     Separator,
     Submenu {
@@ -164,6 +182,9 @@ pub struct TrayModel {
     pub host_key_waiting: bool,
     /// The tour runs: this is its sandbox, under a "Tour" header.
     pub tour: bool,
+    /// Streamer mode is on (the user's, also during the tour): its switch
+    /// is on and ports are masked.
+    pub streamer: bool,
 }
 
 impl Default for TrayModel {
@@ -265,6 +286,7 @@ pub fn model(
         recent,
         host_key_waiting,
         tour: false,
+        streamer: false,
     }
 }
 
@@ -289,6 +311,11 @@ impl TrayModel {
         if self.host_key_waiting {
             entries.push(item("A host key waits for you…", TrayAction::Show));
         }
+        entries.push(Entry::Check {
+            label: "Streamer mode".into(),
+            checked: self.streamer,
+            action: TrayAction::SetStreamer(!self.streamer).id(),
+        });
         entries.push(Entry::Separator);
         let connect: Vec<Entry> = if self.recent.is_empty() {
             vec![info("No sessions launched from sshelf yet")]
@@ -574,6 +601,17 @@ fn build(entries: &[Entry]) -> Vec<Box<dyn IsMenuItem>> {
                     label,
                     action: None,
                 } => Box::new(MenuItem::new(menu_text(label), false, None)),
+                Entry::Check {
+                    label,
+                    checked,
+                    action,
+                } => Box::new(CheckMenuItem::with_id(
+                    action.clone(),
+                    menu_text(label),
+                    true,
+                    *checked,
+                    None,
+                )),
                 Entry::Separator => Box::new(PredefinedMenuItem::separator()),
                 Entry::Submenu { label, entries } => {
                     let submenu = Submenu::new(menu_text(label), true);
@@ -671,12 +709,35 @@ mod tests {
                 Entry::Item { label, action } => {
                     format!("{label}{}", if action.is_none() { " [off]" } else { "" })
                 }
+                Entry::Check { label, checked, .. } => {
+                    format!("[{}] {label}", if *checked { "x" } else { " " })
+                }
                 Entry::Separator => "---".into(),
                 Entry::Submenu { label, entries } => {
                     format!("{label} > {}", labels(entries).join(" | "))
                 }
             })
             .collect()
+    }
+
+    #[test]
+    fn the_streamer_switch_turns_it_on_or_off() {
+        let mut model = model(None, None, None, false);
+        let check = |model: &TrayModel| {
+            model
+                .entries()
+                .into_iter()
+                .find_map(|e| match e {
+                    Entry::Check {
+                        checked, action, ..
+                    } => Some((checked, TrayAction::parse(&action))),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        assert_eq!(check(&model), (false, Some(TrayAction::SetStreamer(true))));
+        model.streamer = true;
+        assert_eq!(check(&model), (true, Some(TrayAction::SetStreamer(false))));
     }
 
     #[test]
@@ -687,6 +748,7 @@ mod tests {
             labels(&model.entries()),
             [
                 "sshelf: nothing running [off]",
+                "[ ] Streamer mode",
                 "---",
                 // Deduplicated by host (w1 is web), missing hosts dropped.
                 "Connect > db | web",
@@ -750,7 +812,7 @@ mod tests {
     fn nothing_launched_yet() {
         let model = model(None, None, None, false);
         assert_eq!(
-            labels(&model.entries())[2],
+            labels(&model.entries())[3],
             "Connect > No sessions launched from sshelf yet [off]"
         );
     }
@@ -765,6 +827,8 @@ mod tests {
             TrayAction::ShowTunnel("t-a".into()),
             TrayAction::Show,
             TrayAction::Quit,
+            TrayAction::SetStreamer(true),
+            TrayAction::SetStreamer(false),
         ] {
             assert_eq!(TrayAction::parse(&action.id()), Some(action));
         }

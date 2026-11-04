@@ -34,7 +34,7 @@ use crate::theme::{Palette, radius};
 use crate::tray::{IconRect, TrayAction, TrayModel};
 use crate::widgets::button::Button;
 use crate::widgets::switch::switch;
-use crate::widgets::{marks, nav};
+use crate::widgets::{marks, masked, nav};
 use crate::{fonts, icons};
 
 const WIDTH: f32 = 340.0;
@@ -86,7 +86,7 @@ fn viewport_id() -> ViewportId {
 
 /// The menu's height for `model` (every row has a fixed height).
 fn height(model: &TrayModel) -> f32 {
-    let mut height = PAD * 2.0 + HEADER + FOOTER;
+    let mut height = PAD * 2.0 + HEADER + ROW + FOOTER;
     if model.host_key_waiting {
         height += BANNER;
     }
@@ -323,6 +323,31 @@ fn contents_in(ui: &mut Ui, rect: egui::Rect, model: &TrayModel, actions: &mut V
         });
     });
 
+    // Streamer mode, at the top: it can be turned on with the window hidden.
+    fixed(ui, ROW, |ui| {
+        let rect = ui.max_rect();
+        // Painted: the switch carries the name.
+        ui.painter().text(
+            pos2(rect.left() + 10.0, rect.center().y),
+            Align2::LEFT_CENTER,
+            "Streamer mode",
+            FontId::proportional(13.0),
+            p.text,
+        );
+        ui.painter().hline(
+            rect.x_range().shrink(6.0),
+            rect.bottom() - 0.5,
+            Stroke::new(1.0, p.selection),
+        );
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.add_space(10.0);
+            let mut on = model.streamer;
+            if switch(ui, &mut on, "Streamer mode").changed() {
+                actions.push(TrayAction::SetStreamer(on));
+            }
+        });
+    });
+
     if model.host_key_waiting {
         fixed(ui, BANNER, |ui| {
             let banner = ui.max_rect().shrink2(vec2(0.0, 4.0));
@@ -412,6 +437,12 @@ fn contents_in(ui: &mut Ui, rect: egui::Rect, model: &TrayModel, actions: &mut V
                     (text.to_string(), p.red)
                 } else if !tunnel.manual {
                     (format!("used by {}", tunnel.used_by.join(", ")), p.dim)
+                } else if model.streamer {
+                    // Streamer mode: the port is masked (not peekable here).
+                    (
+                        tunnel.port.map(|_| ":".to_string()).unwrap_or_default(),
+                        p.dim,
+                    )
                 } else {
                     (
                         tunnel.port.map(|p| format!(":{p}")).unwrap_or_default(),
@@ -423,6 +454,10 @@ fn contents_in(ui: &mut Ui, rect: egui::Rect, model: &TrayModel, actions: &mut V
                         .font(FontId::monospace(11.0))
                         .color(color),
                 );
+                if model.streamer && tunnel.manual && !failed && tunnel.port.is_some() {
+                    ui.add_space(-4.0);
+                    masked::dots(ui, false);
+                }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     ui.add_space(6.0);
                     let name = format!("Stop {}", tunnel.name);
@@ -768,6 +803,7 @@ mod tests {
         let model = model();
         let expected = PAD * 2.0
             + HEADER
+            + ROW
             + FOOTER
             + BANNER
             + (SECTION + ROW)
@@ -775,7 +811,34 @@ mod tests {
             + (SECTION + 2.0 * ROW);
         assert_eq!(height(&model), expected);
         let empty = TrayModel::default();
-        assert_eq!(height(&empty), PAD * 2.0 + HEADER + FOOTER + SECTION + ROW);
+        assert_eq!(
+            height(&empty),
+            PAD * 2.0 + HEADER + ROW + FOOTER + SECTION + ROW
+        );
+    }
+
+    /// Streamer mode: ports show as dots (no peeking in the tray); the
+    /// switch turns it off.
+    #[test]
+    fn streamer_mode_masks_ports_and_its_switch_turns_it_off() {
+        let model = TrayModel {
+            streamer: true,
+            ..model()
+        };
+        let mut actions = Vec::new();
+        let mut harness = crate::test_util::harness()
+            .with_size([WIDTH, height(&model)])
+            .build_ui(|ui| contents(ui, &model, &mut actions));
+        harness.step();
+        let drawn = crate::test_util::drawn_text(&harness);
+        assert!(!drawn.contains("6443"), "{drawn}");
+        harness.get_by_label(sshelf_core::redact::DOTS);
+        harness
+            .get_by_role_and_label(egui::accesskit::Role::Switch, "Streamer mode")
+            .click();
+        harness.step();
+        drop(harness);
+        assert_eq!(actions, [TrayAction::SetStreamer(false)]);
     }
 
     #[test]

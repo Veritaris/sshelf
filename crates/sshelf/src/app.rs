@@ -31,6 +31,8 @@ use crate::tray_menu::TrayMenu;
 use crate::tunnels_view::{KeyFix, TunnelsView};
 use crate::{motion, status_bar, window};
 
+#[cfg(test)]
+mod leak;
 mod tour_run;
 
 /// How the app starts: the real one, or a test's.
@@ -216,6 +218,8 @@ impl SshelfApp {
         );
         // During the tour the tray mirrors the sandbox, under "Tour".
         self.tray_model.tour = self.tour_running();
+        // Streamer mode is the user's, during the tour too.
+        self.tray_model.streamer = privacy::get(ctx).on;
         // The taskbar button / Dock icon carries the same status dot as the
         // tray icon. Linux: X11 taskbars read the window icon; Wayland has
         // no window icons (its docks use the desktop entry's).
@@ -265,6 +269,12 @@ impl SshelfApp {
                 close_guard::show(ctx);
                 self.view = View::Tunnels;
                 self.tunnels.select(&id);
+            }
+            TrayAction::SetStreamer(on) => {
+                let hide = self
+                    .user_settings()
+                    .is_some_and(|s| s.streamer_hide_aliases);
+                self.set_streamer(on, hide);
             }
             other => self.send(other.command().into_iter().collect()),
         }
@@ -356,6 +366,12 @@ impl SshelfApp {
     /// The window's drag strip (SPEC.md §10), above everything but the sidebar.
     fn drag_strip(&mut self, ui: &mut egui::Ui) {
         let tour = self.tour_running();
+        let settings = self.user_settings();
+        let streamer = settings
+            .filter(|s| s.streamer_mode)
+            .map(|s| window::Streamer {
+                hide_aliases: s.streamer_hide_aliases,
+            });
         let action = egui::Panel::top("drag_strip")
             .resizable(false)
             .exact_size(window::STRIP_HEIGHT)
@@ -366,10 +382,15 @@ impl SshelfApp {
                 top: 0,
                 bottom: 0,
             }))
-            .show(ui, |ui| window::strip(ui, "sshelf", tour))
+            .show(ui, |ui| window::strip(ui, "sshelf", tour, streamer))
             .inner;
         match action {
             Some(window::StripAction::ExitTour) => self.end_tour(false),
+            Some(window::StripAction::HideAliases(hide)) => self.set_streamer(true, hide),
+            Some(window::StripAction::StreamerOff) => {
+                let hide = streamer.is_some_and(|s| s.hide_aliases);
+                self.set_streamer(false, hide);
+            }
             Some(window::StripAction::Close) if tour => self.tour_close(ui.ctx()),
             Some(action) => window::apply(ui.ctx(), action),
             None => {}
@@ -580,6 +601,9 @@ impl eframe::App for SshelfApp {
                         self.toasts.push(notice);
                     }
                     tour_chapter = self.settings.take_tour();
+                    if let Some((on, hide)) = self.settings.take_streamer() {
+                        self.set_streamer(on, hide);
+                    }
                 }
             });
         if self.orphans.open

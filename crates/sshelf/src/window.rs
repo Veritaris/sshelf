@@ -82,13 +82,30 @@ pub enum StripAction {
     Close,
     /// *Exit tour*.
     ExitTour,
+    /// The streamer chip's menu: *Hide host aliases and tags* flipped.
+    HideAliases(bool),
+    /// The streamer chip's menu: *Turn off streamer mode*.
+    StreamerOff,
+}
+
+/// Streamer mode as the drag strip shows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Streamer {
+    pub hide_aliases: bool,
 }
 
 /// The drag strip: `title` on the left, *Minimize* and *Close* on the right.
 /// Dragging it moves the window; a double click maximizes or restores. While
 /// the tour runs it also shows the Magenta "Tour · sample data" chip, what
-/// it promises, and *Exit tour* (SPEC.md §10 *Onboarding tour*).
-pub fn strip(ui: &mut Ui, title: &str, tour: bool) -> Option<StripAction> {
+/// it promises, and *Exit tour* (SPEC.md §10 *Onboarding tour*). In
+/// streamer mode the streamer chip with its menu takes the title's place
+/// (SPEC.md §10 *Streamer mode*).
+pub fn strip(
+    ui: &mut Ui,
+    title: &str,
+    tour: bool,
+    streamer: Option<Streamer>,
+) -> Option<StripAction> {
     let p = &Palette::ONE_DARK;
     // Registered first, so the buttons on top of it get their own clicks.
     let drag = ui.interact(
@@ -104,7 +121,16 @@ pub fn strip(ui: &mut Ui, title: &str, tour: bool) -> Option<StripAction> {
         None
     };
     ui.horizontal_centered(|ui| {
-        ui.add(Label::new(RichText::new(title).size(12.0).color(p.dim)).selectable(false));
+        match streamer {
+            Some(streamer) => {
+                if let Some(chosen) = streamer_chip(ui, streamer) {
+                    action = Some(chosen);
+                }
+            }
+            None => {
+                ui.add(Label::new(RichText::new(title).size(12.0).color(p.dim)).selectable(false));
+            }
+        }
         if tour {
             ui.add_space(8.0);
             marks::chip(ui, "Tour · sample data", p.accent, p.bg_dark);
@@ -144,6 +170,67 @@ pub fn strip(ui: &mut Ui, title: &str, tour: bool) -> Option<StripAction> {
     action
 }
 
+/// The streamer chip (Blue on its tint, 26 px) and its menu: *Hide host
+/// aliases and tags*, then *Turn off streamer mode* with a note.
+fn streamer_chip(ui: &mut Ui, streamer: Streamer) -> Option<StripAction> {
+    use egui::text::{LayoutJob, TextFormat};
+    let p = &Palette::ONE_DARK;
+    const HEIGHT: f32 = 26.0;
+    const PAD: f32 = 8.0;
+    const GAP: f32 = 6.0;
+    let mut job = LayoutJob::default();
+    let font = egui::FontId::proportional(12.0);
+    job.append(
+        "Streamer mode",
+        0.0,
+        TextFormat::simple(font.clone(), p.blue),
+    );
+    if streamer.hide_aliases {
+        job.append(
+            " · names hidden",
+            0.0,
+            TextFormat::simple(font, p.link_hover),
+        );
+    }
+    let galley = ui.fonts_mut(|f| f.layout_job(job));
+    let width = PAD + 14.0 + GAP + galley.size().x + GAP + 12.0 + PAD;
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, HEIGHT), Sense::click());
+    response.widget_info(|| WidgetInfo::labeled(Role::Button, true, "Streamer mode"));
+    let painter = ui.painter();
+    painter.rect_filled(rect, radius::CONTROL, p.blue_tint);
+    let mut x = rect.left() + PAD;
+    let y = rect.center().y;
+    let icon = |x: f32, glyph: char, size: f32| {
+        painter.text(
+            Pos2::new(x + size / 2.0, y),
+            Align2::CENTER_CENTER,
+            glyph,
+            icons::font(size),
+            p.blue,
+        );
+    };
+    icon(x, icons::EYE_OFF, 14.0);
+    x += 14.0 + GAP;
+    let text_size = galley.size();
+    painter.galley(Pos2::new(x, y - text_size.y / 2.0), galley, p.blue);
+    x += text_size.x + GAP;
+    icon(x, icons::CHEVRON_DOWN, 12.0);
+    let response = response.on_hover_cursor(CursorIcon::PointingHand);
+    let mut action = None;
+    crate::widgets::popup::click_menu(&response, 340.0, |menu| {
+        let mut hide = streamer.hide_aliases;
+        if menu.switch("Hide host aliases and tags", &mut hide) {
+            action = Some(StripAction::HideAliases(hide));
+        }
+        menu.separator();
+        if menu.item(Some(icons::EYE), "Turn off streamer mode", true) {
+            action = Some(StripAction::StreamerOff);
+        }
+        menu.note("Turning it off shows every value at once. Do it off stream.");
+    });
+    action
+}
+
 /// Carries out a [`StripAction`]. *Close* is the same close request as the
 /// OS's, so the close guard decides what happens (SPEC.md §10).
 pub fn apply(ctx: &egui::Context, action: StripAction) {
@@ -152,8 +239,8 @@ pub fn apply(ctx: &egui::Context, action: StripAction) {
         StripAction::ToggleMaximize => ViewportCommand::Maximized(!maximized(ctx)),
         StripAction::Minimize => ViewportCommand::Minimized(true),
         StripAction::Close => ViewportCommand::Close,
-        // The app ends the tour itself.
-        StripAction::ExitTour => return,
+        // The app ends the tour and sets streamer mode itself.
+        StripAction::ExitTour | StripAction::HideAliases(_) | StripAction::StreamerOff => return,
     };
     ctx.send_viewport_cmd(command);
 }
@@ -595,7 +682,7 @@ mod tests {
             .with_size([800.0, 44.0])
             .build_ui_state(
                 |ui, actions: &mut Vec<StripAction>| {
-                    actions.extend(strip(ui, "sshelf", false));
+                    actions.extend(strip(ui, "sshelf", false, None));
                 },
                 Vec::new(),
             );
@@ -609,5 +696,37 @@ mod tests {
             harness.state(),
             &[StripAction::Minimize, StripAction::Close]
         );
+    }
+
+    /// Streamer mode: the chip replaces the title; its menu flips *Hide host
+    /// aliases and tags* (staying open) and turns streamer mode off.
+    #[test]
+    fn the_streamer_chip_and_its_menu() {
+        let mut harness = test_util::harness()
+            .with_size([800.0, 300.0])
+            .build_ui_state(
+                |ui, actions: &mut Vec<StripAction>| {
+                    let streamer = Streamer {
+                        hide_aliases: false,
+                    };
+                    ui.allocate_ui(egui::vec2(800.0, 44.0), |ui| {
+                        actions.extend(strip(ui, "sshelf", false, Some(streamer)));
+                    });
+                },
+                Vec::new(),
+            );
+        harness.run();
+        assert!(harness.query_by_label("sshelf").is_none());
+        harness.get_by_label("Streamer mode").click();
+        harness.run();
+        harness.get_by_label("Hide host aliases and tags").click();
+        harness.run();
+        harness.get_by_label("Turn off streamer mode").click();
+        harness.run();
+        assert_eq!(
+            harness.state(),
+            &[StripAction::HideAliases(true), StripAction::StreamerOff]
+        );
+        assert!(harness.query_by_label("Turn off streamer mode").is_none());
     }
 }

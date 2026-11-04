@@ -97,6 +97,37 @@ impl SshelfApp {
         data.map(|d| &d.settings)
     }
 
+    /// Sets streamer mode in the user's settings (also during the tour,
+    /// whose Core isn't theirs). It shows from this frame on: the user's
+    /// data is updated here too, as their Core will publish it (during the
+    /// tour its events wait until the tour ends). Turning it on or off says
+    /// so in a toast.
+    pub(super) fn set_streamer(&mut self, on: bool, hide_aliases: bool) {
+        let (core, data) = match &mut self.tour {
+            Some(run) => (&run.user.core, &mut run.user.data),
+            None => (&self.core, &mut self.data),
+        };
+        let was = data.as_ref().is_some_and(|d| d.settings.streamer_mode);
+        if let Some(data) = data {
+            let settings = &mut Arc::make_mut(data).settings;
+            settings.streamer_mode = on;
+            settings.streamer_hide_aliases = hide_aliases;
+        }
+        if let Some((core, _)) = core {
+            core.send(Command::SetStreamer { on, hide_aliases });
+        }
+        if on != was {
+            let p = &crate::theme::Palette::ONE_DARK;
+            if on {
+                let text = "Streamer mode on · values are masked";
+                self.toasts.push_icon(text, crate::icons::EYE_OFF, p.blue);
+            } else {
+                let text = "Streamer mode off · values are visible";
+                self.toasts.push_icon(text, crate::icons::EYE, p.yellow);
+            }
+        }
+    }
+
     /// Starts the tour at `step` (0, or a chapter's first step): builds the
     /// sandbox, starts its Core and puts the user's session aside.
     pub(super) fn start_tour(&mut self, ctx: &Context, step: usize) {
@@ -660,7 +691,7 @@ mod tests {
 
     use super::*;
     use crate::app::Startup;
-    use crate::test_util;
+    use crate::test_util::{self, fake_ssh_binary};
 
     /// One tour at a time: two sandboxes would race for the same sample
     /// ports (the app only ever runs one).
@@ -668,21 +699,6 @@ mod tests {
 
     fn one_tour() -> std::sync::MutexGuard<'static, ()> {
         ONE_TOUR.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    /// The workspace's fake-ssh binary, beside this test binary's folder
-    /// (`target/<profile>/deps/..`): `cargo test --workspace` builds it.
-    fn fake_ssh_binary() -> PathBuf {
-        let exe = std::env::current_exe().unwrap();
-        let dir = exe.parent().and_then(Path::parent).unwrap();
-        let path = dir.join(format!("fake-ssh{}", std::env::consts::EXE_SUFFIX));
-        assert!(
-            path.is_file(),
-            "the tour test runs the fake-ssh binary; build it first \
-             (`cargo test --workspace` does): {}",
-            path.display()
-        );
-        path
     }
 
     /// Every file under `dir` with its bytes.

@@ -33,6 +33,36 @@ pub fn drawn_text<State>(harness: &Harness<'_, State>) -> String {
     out
 }
 
+/// Every accessibility name and value in the last frame, one per line: what
+/// a screen reader (or a screen-reading tool) would get.
+pub fn accessible_text<State>(harness: &Harness<'_, State>) -> String {
+    use egui_kittest::kittest::{By, NodeT, Queryable};
+    let mut out = String::new();
+    for node in harness.query_all(By::new()) {
+        let node = node.accesskit_node();
+        for text in [node.label(), node.value()].into_iter().flatten() {
+            out.push_str(&text);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// The workspace's fake-ssh binary, beside this test binary's folder
+/// (`target/<profile>/deps/..`): `cargo test --workspace` builds it.
+pub fn fake_ssh_binary() -> std::path::PathBuf {
+    let exe = std::env::current_exe().unwrap();
+    let dir = exe.parent().and_then(std::path::Path::parent).unwrap();
+    let path = dir.join(format!("fake-ssh{}", std::env::consts::EXE_SUFFIX));
+    assert!(
+        path.is_file(),
+        "this test runs the fake-ssh binary; build it first \
+         (`cargo test --workspace` does): {}",
+        path.display()
+    );
+    path
+}
+
 /// Presses the primary button at `pos` (held until [`release`]).
 pub fn press<State>(harness: &mut Harness<'_, State>, pos: egui::Pos2) {
     let input = harness.input_mut();
