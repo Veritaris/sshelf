@@ -10,6 +10,12 @@ on:
 permissions:
   contents: read
 
+# A newer push to the same branch (or PR) cancels the older run, so only the
+# latest commit waits for the scarce macOS runners.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     name: Test ${{ matrix.platform.target }}
