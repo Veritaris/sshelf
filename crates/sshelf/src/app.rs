@@ -360,6 +360,9 @@ impl eframe::App for SshelfApp {
                         self.ssh.as_deref(),
                         self.config.as_deref().map(|c| c.path.as_path()),
                     );
+                    for notice in self.settings.take_notices() {
+                        self.toasts.push(notice);
+                    }
                 }
             });
         if self.orphans.open
