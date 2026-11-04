@@ -16,7 +16,7 @@ use crate::fonts;
 use crate::groups_view::GroupsView;
 use crate::hostkey_modal::HostKeyModals;
 use crate::hosts_view::{HostsView, Navigate};
-use crate::icon::Status;
+use crate::icon::{self, Status};
 use crate::orphans_window::{self, OrphansWindow};
 use crate::settings_view::SettingsView;
 use crate::sidebar::{self, View};
@@ -75,6 +75,8 @@ pub struct SshelfApp {
     tray_model: TrayModel,
     /// The sshelf tray menu (right click).
     tray_menu: TrayMenu,
+    /// The status dot the window's icon (taskbar button) shows now.
+    window_icon: Status,
     /// The last error, in the status bar until dismissed.
     error: Option<String>,
     /// Successes, briefly.
@@ -151,6 +153,7 @@ impl SshelfApp {
             tray,
             tray_model: TrayModel::default(),
             tray_menu: TrayMenu::default(),
+            window_icon: Status::Idle,
             error: tray_error,
             toasts: Toasts::default(),
             config_loaded: None,
@@ -179,6 +182,19 @@ impl SshelfApp {
         );
         // During the tour the tray mirrors the sandbox, under "Tour".
         self.tray_model.tour = self.tour_running();
+        // The taskbar button carries the same status dot as the tray icon.
+        if self.tray_model.status != self.window_icon {
+            self.window_icon = self.tray_model.status;
+            let icon = icon::egui_icon(self.window_icon);
+            // Windows: the taskbar shows the big icon, which the command
+            // below leaves alone.
+            #[cfg(target_os = "windows")]
+            window::native::set_taskbar_icon(&icon.rgba, icon.width);
+            ctx.send_viewport_cmd_to(
+                egui::ViewportId::ROOT,
+                egui::ViewportCommand::Icon(Some(Arc::new(icon))),
+            );
+        }
         // The sshelf tray menu's clicks, carried out here: `ui` may not run.
         let model = self.tray_model.clone();
         for action in self.tray_menu.poll(ctx, &model) {

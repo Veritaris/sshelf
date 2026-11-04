@@ -56,7 +56,7 @@ fn run() -> eframe::Result<()> {
         viewport: window::viewport(
             egui::ViewportBuilder::default()
                 .with_title("sshelf")
-                .with_icon(Arc::new(icon::egui_icon())),
+                .with_icon(Arc::new(icon::egui_icon(icon::Status::Idle))),
         ),
         ..Default::default()
     };

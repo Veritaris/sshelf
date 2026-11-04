@@ -264,25 +264,73 @@ pub fn resize_handles(ui: &mut Ui) {
 #[cfg(target_os = "windows")]
 pub mod native {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use std::sync::atomic::{AtomicIsize, Ordering};
     use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
     use windows_sys::Win32::Graphics::Dwm::{
         DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND,
         DwmSetWindowAttribute,
     };
     use windows_sys::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
+
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        IsZoomed, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
-        SetWindowPos, WM_NCCALCSIZE,
+        CreateIcon, DestroyIcon, HICON, ICON_BIG, IsZoomed, SWP_FRAMECHANGED, SWP_NOACTIVATE,
+        SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SendMessageW, SetWindowPos, WM_NCCALCSIZE,
+        WM_SETICON,
     };
 
     const SUBCLASS_ID: usize = 1;
+
+    /// The root window, once prepared (0: none).
+    static ROOT: AtomicIsize = AtomicIsize::new(0);
+    /// The big icon we last set (0: still winit's), destroyed when replaced.
+    static BIG_ICON: AtomicIsize = AtomicIsize::new(0);
 
     /// Call once from the app's creation, with the root window.
     pub fn prepare(cc: &eframe::CreationContext<'_>) {
         let Ok(RawWindowHandle::Win32(handle)) = cc.window_handle().map(|h| h.as_raw()) else {
             return;
         };
-        frameless(handle.hwnd.get() as HWND);
+        let hwnd = handle.hwnd.get() as HWND;
+        ROOT.store(hwnd as isize, Ordering::Relaxed);
+        frameless(hwnd);
+    }
+
+    /// Sets the root window's big icon (the taskbar button) to `rgba`
+    /// (`size` × `size`, straight alpha). winit's `set_window_icon`, which
+    /// `ViewportCommand::Icon` reaches, only replaces the small one.
+    pub fn set_taskbar_icon(rgba: &[u8], size: u32) {
+        let hwnd = ROOT.load(Ordering::Relaxed) as HWND;
+        if hwnd.is_null() {
+            return;
+        }
+        // Top-down BGRA; the AND mask is empty (the alpha channel decides).
+        let bgra: Vec<u8> = rgba
+            .chunks_exact(4)
+            .flat_map(|p| [p[2], p[1], p[0], p[3]])
+            .collect();
+        let mask = vec![0u8; (size.div_ceil(32) * 4 * size) as usize];
+        // SAFETY: the buffers hold `size` × `size` pixels in the layouts
+        // CreateIcon expects (1 bpp mask, 32 bpp colour); `hwnd` is the live
+        // root window; only icons created here are destroyed.
+        unsafe {
+            let icon = CreateIcon(
+                std::ptr::null_mut(),
+                size as i32,
+                size as i32,
+                1,
+                32,
+                mask.as_ptr(),
+                bgra.as_ptr(),
+            );
+            if icon.is_null() {
+                return;
+            }
+            SendMessageW(hwnd, WM_SETICON, ICON_BIG as WPARAM, icon as LPARAM);
+            let old = BIG_ICON.swap(icon as isize, Ordering::Relaxed);
+            if old != 0 {
+                DestroyIcon(old as HICON);
+            }
+        }
     }
 
     /// The fix for any frameless window of ours (the root, the tray menu):

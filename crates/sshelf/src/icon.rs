@@ -73,11 +73,16 @@ pub fn rgba(status: Status) -> Vec<u8> {
     icon_shape::draw(SIZE, status.color().map(|c| [c.r(), c.g(), c.b()]))
 }
 
-pub fn egui_icon() -> egui::IconData {
+/// The window's icon (taskbar button, Alt+Tab): drawn larger than the tray's
+/// so the taskbar's 48 px at 150 % scales down, not up.
+const WINDOW_SIZE: u32 = 64;
+
+/// The window icon with `status`'s dot, as the tray icon has it.
+pub fn egui_icon(status: Status) -> egui::IconData {
     egui::IconData {
-        rgba: rgba(Status::Idle),
-        width: SIZE,
-        height: SIZE,
+        rgba: icon_shape::draw(WINDOW_SIZE, status.color().map(|c| [c.r(), c.g(), c.b()])),
+        width: WINDOW_SIZE,
+        height: WINDOW_SIZE,
     }
 }
 
