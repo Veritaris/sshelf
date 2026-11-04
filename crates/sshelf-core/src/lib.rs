@@ -23,6 +23,7 @@ pub mod paths;
 pub mod process;
 pub mod redact;
 pub mod rename;
+pub mod running;
 pub mod settings;
 pub mod ssh;
 pub mod storage;

@@ -8,10 +8,14 @@
 //! - A tunnel is *Running* once ssh logs `Entering interactive session.`; an
 //!   exit nobody asked for makes it *Failed* with ssh's last message.
 //! - Shutting down stops every tunnel (no detached processes).
+//! - With a record (`start_recorded`), what runs is kept in `running.toml`;
+//!   after a crash the next start takes those processes over (Unix; SPEC.md
+//!   §7 *Surviving a crash*).
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::{BufRead, BufReader};
 use std::net::TcpListener;
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -19,7 +23,9 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::child::{self, KILL_GRACE, TreeKiller};
+use crate::running::{self, RunningFile, RunningTunnel};
 use crate::ssh::Tool;
+use crate::storage::Store;
 use crate::tunnels::{Group, Tunnel};
 
 /// Stderr lines kept per tunnel.
@@ -203,6 +209,14 @@ pub enum Request {
     },
     /// ssh for processes started from now on.
     SetSsh(Option<Tool>),
+    /// Takes over what `running.toml` lists from before a crash, as far as
+    /// it is still the same process running the same `tunnels`' ssh (SPEC.md
+    /// §7 *Surviving a crash*); the rest is dropped from the file, never
+    /// killed. Send once, before anything starts. Until then the file is
+    /// left as it is.
+    Adopt {
+        tunnels: Vec<Tunnel>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -210,6 +224,8 @@ pub enum SupervisorEvent {
     Snapshot(Arc<Snapshot>),
     /// A request that could not be carried out (e.g. a port conflict).
     Error(String),
+    /// `Adopt` took over this many tunnels.
+    Adopted(usize),
 }
 
 enum Message {
@@ -234,7 +250,26 @@ pub struct Supervisor {
 }
 
 impl Supervisor {
+    /// A supervisor that keeps no record of its tunnels (tests, the tour).
     pub fn start(ssh: Option<Tool>, on_event: impl Fn(SupervisorEvent) + Send + 'static) -> Self {
+        Self::launch(ssh, None, on_event)
+    }
+
+    /// A supervisor that records its running tunnels in `running.toml` in
+    /// `app_dir`, so a later start can take them over (`Request::Adopt`).
+    pub fn start_recorded(
+        ssh: Option<Tool>,
+        app_dir: PathBuf,
+        on_event: impl Fn(SupervisorEvent) + Send + 'static,
+    ) -> Self {
+        Self::launch(ssh, Some(Store::new(app_dir)), on_event)
+    }
+
+    fn launch(
+        ssh: Option<Tool>,
+        record: Option<Store>,
+        on_event: impl Fn(SupervisorEvent) + Send + 'static,
+    ) -> Self {
         let (tx, rx) = mpsc::channel();
         let worker_tx = tx.clone();
         let thread = thread::Builder::new()
@@ -247,6 +282,8 @@ impl Supervisor {
                     entries: BTreeMap::new(),
                     next_generation: 0,
                     changed: false,
+                    record,
+                    recorded: None,
                 }
                 .run(rx)
             })
@@ -299,6 +336,9 @@ pub fn check_ports(tunnels: &[&Tunnel]) -> Vec<String> {
 struct Process {
     generation: u64,
     killer: TreeKiller,
+    /// `child::start_time` of its pid (`running.toml`); `None` where the OS
+    /// isn't covered.
+    started: Option<u64>,
 }
 
 struct Entry {
@@ -332,6 +372,11 @@ struct Worker {
     entries: BTreeMap<String, Entry>,
     next_generation: u64,
     changed: bool,
+    /// Where `running.toml` goes, if it is kept.
+    record: Option<Store>,
+    /// What it holds now; `None` until `Adopt` has read it (it is left alone
+    /// until then).
+    recorded: Option<RunningFile>,
 }
 
 impl Worker {
@@ -362,7 +407,158 @@ impl Worker {
             }
             self.reconnect_due();
             self.publish();
+            self.write_record();
         }
+    }
+
+    /// Writes `running.toml` when what runs changed (and once `Adopt` has
+    /// read it): the tunnels starting or running, with their processes.
+    fn write_record(&mut self) {
+        if self.record.is_none() || self.recorded.is_none() {
+            return;
+        }
+        let file = RunningFile {
+            tunnels: self
+                .entries
+                .iter()
+                .filter(|(_, e)| {
+                    matches!(e.status.state, TunnelState::Starting | TunnelState::Running)
+                })
+                .filter_map(|(id, e)| {
+                    let process = e.process.as_ref()?;
+                    Some(RunningTunnel {
+                        id: id.clone(),
+                        pid: e.status.pid?,
+                        started: process.started.unwrap_or(0),
+                        args: e.tunnel.ssh_args(),
+                        owners: e.status.owners.iter().map(running::owner_key).collect(),
+                    })
+                })
+                .collect(),
+        };
+        if self.recorded.as_ref() == Some(&file) {
+            return;
+        }
+        let saved = self.record.as_ref().map(|store| store.save(&file));
+        // Remembered either way: a file that can't be written is reported
+        // once, not on every change.
+        self.recorded = Some(file);
+        if let Some(Err(e)) = saved {
+            self.error(format!("Running tunnels can't be recorded: {e}"));
+        }
+    }
+
+    /// `Request::Adopt`: reads `running.toml` and takes over what still runs
+    /// as recorded; the file is rewritten with what was taken over.
+    fn adopt(&mut self, tunnels: Vec<Tunnel>) {
+        let Some(store) = &mut self.record else {
+            return;
+        };
+        if self.recorded.is_some() {
+            return;
+        }
+        let file = store.load::<RunningFile>().data;
+        let mut adopted = 0;
+        for recorded in &file.tunnels {
+            if self.adopt_one(recorded, &tunnels) {
+                adopted += 1;
+            }
+        }
+        // Forces the rewrite: what wasn't taken over goes.
+        self.recorded = Some(RunningFile {
+            tunnels: file.tunnels,
+        });
+        self.changed = true;
+        if adopted > 0 {
+            (self.on_event)(SupervisorEvent::Adopted(adopted));
+        }
+    }
+
+    /// Takes over `recorded` if it is still the same process (same start
+    /// time) running what its tunnel runs now (same arguments).
+    fn adopt_one(&mut self, recorded: &RunningTunnel, tunnels: &[Tunnel]) -> bool {
+        let Some(tunnel) = tunnels.iter().find(|t| t.id == recorded.id) else {
+            return false;
+        };
+        let same = !self.entries.contains_key(&recorded.id)
+            && tunnel.ssh_args() == recorded.args
+            && child::start_time(recorded.pid) == Some(recorded.started);
+        if !same {
+            return false;
+        }
+        #[cfg(unix)]
+        {
+            self.take_over(tunnel.clone(), recorded);
+            true
+        }
+        // Windows: tunnels die with sshelf; `start_time` is never known.
+        #[cfg(not(unix))]
+        false
+    }
+
+    /// Runs `tunnel` as the process `recorded` names: Running, with its
+    /// recorded owners; a thread reports its exit.
+    #[cfg(unix)]
+    fn take_over(&mut self, tunnel: Tunnel, recorded: &RunningTunnel) {
+        self.next_generation += 1;
+        let generation = self.next_generation;
+        let pid = recorded.pid;
+        let id = tunnel.id.clone();
+        let mut owners: BTreeSet<Owner> = recorded
+            .owners
+            .iter()
+            .filter_map(|key| running::owner_from_key(key))
+            .collect();
+        if owners.is_empty() {
+            owners.insert(Owner::Manual);
+        }
+        let tx = self.tx.clone();
+        let waiter_id = id.clone();
+        thread::spawn(move || {
+            child::wait_exit(pid);
+            // Its own last words went to the sshelf that crashed.
+            let _ = tx.send(Message::Line {
+                id: waiter_id.clone(),
+                generation,
+                text: "ssh exited".to_string(),
+            });
+            let _ = tx.send(Message::Exited {
+                id: waiter_id,
+                generation,
+                code: None,
+            });
+        });
+        let mut log = VecDeque::new();
+        push_log(
+            &mut log,
+            format!(
+                "Taken over after sshelf restarted (pid {pid}); earlier output isn't available"
+            ),
+        );
+        self.entries.insert(
+            id,
+            Entry {
+                tunnel,
+                status: TunnelStatus {
+                    state: TunnelState::Running,
+                    owners,
+                    log,
+                    pid: Some(pid),
+                    failure: None,
+                    reconnect: None,
+                    running_since: Some(Instant::now()),
+                },
+                process: Some(Process {
+                    generation,
+                    killer: TreeKiller::adopt(pid),
+                    started: Some(recorded.started),
+                }),
+                restart: false,
+                attempt: 0,
+                due: None,
+            },
+        );
+        self.changed = true;
     }
 
     /// Restarts tunnels whose reconnect wait is over and that are still
@@ -492,6 +688,7 @@ impl Worker {
                 }
             }
             Request::SetSsh(ssh) => self.ssh = ssh,
+            Request::Adopt { tunnels } => self.adopt(tunnels),
         }
     }
 
@@ -631,6 +828,7 @@ impl Worker {
         entry.process = Some(Process {
             generation,
             killer: spawned.killer,
+            started: child::start_time(pid),
         });
         entry.status.state = TunnelState::Starting;
         entry.status.failure = None;
@@ -744,6 +942,8 @@ impl Worker {
                 Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => break,
             }
         }
+        // A clean quit: nothing left to take over.
+        self.write_record();
     }
 }
 

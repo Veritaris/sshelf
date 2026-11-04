@@ -65,6 +65,13 @@ pub struct TreeKiller {
 }
 
 impl TreeKiller {
+    /// The tree a process `pid` that leads its own group started, e.g. one
+    /// sshelf ran before it crashed (SPEC.md §7 *Surviving a crash*).
+    #[cfg(unix)]
+    pub fn adopt(pid: u32) -> Self {
+        Self { pgid: pid as i32 }
+    }
+
     /// Stops every process in the tree; returns at once (Unix escalates to
     /// SIGKILL in the background if needed).
     pub fn kill(&self) {
@@ -83,11 +90,134 @@ impl Drop for TreeKiller {
     }
 }
 
+/// When process `pid` started, as a number that changes when the pid is
+/// reused: `None` if there is no such process, or this OS isn't covered
+/// (Windows needs none: its tunnels die with sshelf).
+pub fn start_time(pid: u32) -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        // Field 22 of /proc/<pid>/stat, in clock ticks since boot; the
+        // fields are counted after the command name, which may hold spaces.
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let after_name = &stat[stat.rfind(')')? + 1..];
+        after_name.split_whitespace().nth(19)?.parse().ok()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of::<libc::proc_bsdinfo>() as i32;
+        // SAFETY: `info` is a writable `proc_bsdinfo` of `size` bytes.
+        let read = unsafe {
+            libc::proc_pidinfo(
+                pid as i32,
+                libc::PROC_PIDTBSDINFO,
+                0,
+                (&mut info as *mut libc::proc_bsdinfo).cast(),
+                size,
+            )
+        };
+        (read == size).then(|| info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
+/// Blocks until process `pid`, which need not be a child of this one, has
+/// exited (or returns at once if it is gone).
+#[cfg(unix)]
+pub fn wait_exit(pid: u32) {
+    unix::wait_exit(pid);
+}
+
 #[cfg(unix)]
 mod unix {
     use std::thread;
+    use std::time::Duration;
 
     use super::KILL_GRACE;
+
+    /// How often a process without an exit notification is looked at.
+    const POLL: Duration = Duration::from_secs(1);
+
+    fn interrupted() -> bool {
+        std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted
+    }
+
+    fn process_alive(pid: i32) -> bool {
+        // SAFETY: signal 0 only checks whether the process exists.
+        let result = unsafe { libc::kill(pid, 0) };
+        result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+
+    /// Linux: a pidfd turns readable when the process exits. Kernels
+    /// before 5.3 have none; then it is looked at every second.
+    #[cfg(target_os = "linux")]
+    pub fn wait_exit(pid: u32) {
+        // SAFETY: pidfd_open takes a pid and flags and returns a new fd.
+        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid as libc::pid_t, 0) } as i32;
+        if fd >= 0 {
+            let mut poll = libc::pollfd {
+                fd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: one valid pollfd; the fd is closed once, below.
+            unsafe {
+                while libc::poll(&mut poll, 1, -1) < 0 && interrupted() {}
+                libc::close(fd);
+            }
+            return;
+        }
+        while process_alive(pid as i32) {
+            thread::sleep(POLL);
+        }
+    }
+
+    /// macOS: kqueue reports the process's exit.
+    #[cfg(target_os = "macos")]
+    pub fn wait_exit(pid: u32) {
+        // SAFETY: a new kqueue; closed below.
+        let kq = unsafe { libc::kqueue() };
+        if kq >= 0 {
+            let change = libc::kevent {
+                ident: pid as usize,
+                filter: libc::EVFILT_PROC,
+                flags: libc::EV_ADD | libc::EV_ONESHOT,
+                fflags: libc::NOTE_EXIT,
+                data: 0,
+                udata: std::ptr::null_mut(),
+            };
+            // SAFETY: one change in, one event out, no timeout.
+            let mut event: libc::kevent = unsafe { std::mem::zeroed() };
+            let registered =
+                unsafe { libc::kevent(kq, &change, 1, std::ptr::null_mut(), 0, std::ptr::null()) };
+            if registered == 0 {
+                unsafe {
+                    while libc::kevent(kq, std::ptr::null(), 0, &mut event, 1, std::ptr::null()) < 0
+                        && interrupted()
+                    {}
+                    libc::close(kq);
+                }
+                return;
+            }
+            // SAFETY: closed once.
+            unsafe { libc::close(kq) };
+        }
+        while process_alive(pid as i32) {
+            thread::sleep(POLL);
+        }
+    }
+
+    /// Elsewhere: looked at every second.
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    pub fn wait_exit(pid: u32) {
+        while process_alive(pid as i32) {
+            thread::sleep(POLL);
+        }
+    }
 
     fn alive(pgid: i32) -> bool {
         // SAFETY: signal 0 only checks whether the group exists.

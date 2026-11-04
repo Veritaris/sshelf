@@ -655,13 +655,23 @@ impl Worker {
         }
         self.refresh_ssh();
         let tx = self.self_tx.clone();
-        self.supervisor = Some(Supervisor::start(
-            self.tools.as_ref().ok().map(|t| t.ssh.clone()),
-            move |event| {
-                let _ = tx.send(Message::Supervisor(event));
-            },
-        ));
+        let ssh = self.tools.as_ref().ok().map(|t| t.ssh.clone());
+        let on_event = move |event| {
+            let _ = tx.send(Message::Supervisor(event));
+        };
+        // The tour's sandbox keeps no record: its tunnels are never taken
+        // over (SPEC.md §7 *Surviving a crash*).
+        self.supervisor = Some(match self.sandbox {
+            Some(_) => Supervisor::start(ssh, on_event),
+            None => Supervisor::start_recorded(ssh, self.paths.app_dir.clone(), on_event),
+        });
         self.reload();
+        // Tunnels still running from before a crash, before anything starts.
+        if let Some(supervisor) = &self.supervisor {
+            supervisor.send(Request::Adopt {
+                tunnels: self.data.tunnels.tunnels.clone(),
+            });
+        }
         // Groups marked "Start on app launch" (SPEC.md §7), through the
         // normal start: host keys are checked and may ask first.
         // Never in the tour's sandbox.
@@ -686,6 +696,14 @@ impl Worker {
                 }
                 Message::Supervisor(SupervisorEvent::Error(e)) => {
                     self.error(e);
+                    continue;
+                }
+                Message::Supervisor(SupervisorEvent::Adopted(count)) => {
+                    let text = match count {
+                        1 => "Took over a tunnel that kept running".to_string(),
+                        n => format!("Took over {n} tunnels that kept running"),
+                    };
+                    self.emitter.emit(Event::Notice(text));
                     continue;
                 }
                 Message::KeyCheck { start, result } => {

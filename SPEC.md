@@ -66,6 +66,7 @@ Location: the platform config directory for `sshelf` (via `directories`). Human-
 | `hosts.toml` | Per-host metadata keyed by alias: tags, notes, favorite, color, display order |
 | `tunnels.toml` | Tunnel definitions and groups |
 | `history.toml` | Recent connections launched from the app (for the tray menu) |
+| `running.toml` | The tunnels running now: their ssh process (pid, start time, arguments) and owners. Written by the supervisor whenever that changes, empty after a clean quit; read once at start to take tunnels over after a crash (§7 *Surviving a crash*, M12) |
 
 Rules:
 - **Every file has a top-level `version` integer from the very first commit.**
@@ -227,7 +228,22 @@ ssh -v -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o BatchMode=yes
 - **Stop group:** releases the group's ownership; a tunnel stops only when no owners remain. If a tunnel stays up, show why ("still used by: Work on staging").
 - States per tunnel: `Stopped`, `Starting`, `Running`, `Stopping`, `Failed(reason)`, plus host key / auth sub-states (§9). `Failed` keeps the tunnel's owners and shows ssh's last non-debug stderr line; starting it (or its group) again retries it. A start that arrives while a tunnel is `Stopping` runs once the old process has exited, so the two never compete for a port.
 - The last 200 stderr lines per tunnel are kept in memory (not persisted).
-- Tunnels stop when the app quits (no detached background processes).
+- Tunnels stop when the app quits (no detached background processes). After a crash, see *Surviving a crash*.
+
+### Surviving a crash (milestone 12)
+
+- **Windows:** tunnels run in a Job Object with "kill on close", so if sshelf dies the OS ends them too. Nothing is left to take over.
+- **macOS / Linux:** each tunnel leads its own process group, which outlives a crash. The supervisor records what runs in `running.toml` (§3): tunnel id, pid, the process's start time, ssh's arguments and the owners. It is written atomically whenever that changes; a clean quit leaves it empty.
+- **At start,** before anything else starts (start-on-launch groups included), each recorded tunnel is taken over only if:
+  - its process is alive with the recorded start time, so a reused pid never matches;
+  - the tunnel still exists and its ssh arguments now are the recorded ones (an edited tunnel doesn't match).
+
+  Anything else is dropped from the file and never killed.
+- **A taken-over tunnel** is *Running* with its recorded owners, and *Stop* ends its process group as usual.
+  - Its earlier output went to the sshelf that crashed: the log starts with "Taken over after sshelf restarted (pid N); earlier output isn't available".
+  - Its exit is watched without polling: Linux `pidfd` (a 1 s check on kernels before 5.3), macOS `kqueue`. It is then *Failed* with "ssh exited", and auto-reconnect applies as usual; the new run is a normal child with a log.
+- **Toast:** "Took over N tunnels that kept running".
+- **Not covered:** the tour's sandbox keeps no record; ssh processes sshelf didn't record stay "port in use".
 
 ### Testing
 
@@ -652,6 +668,15 @@ Each milestone ends with its acceptance criteria met, tests green on all three O
   - nothing outside the sandbox is touched, and it is deleted afterwards;
   - the tour and each chapter can be replayed from Settings;
   - CI passes on all three OSes.
+
+### M12 — Surviving a crash
+- Everything in §7 *Surviving a crash*: `running.toml`, taking tunnels over at start on macOS and Linux, watching their exit, the toast.
+- Tests (`crates/fake-ssh/tests/adopt.rs`), with a real crash: the test binary runs itself again as a sshelf that starts a tunnel and aborts.
+  - A tunnel left by a crash is taken over, and *Stop* ends it.
+  - An adopted tunnel that dies fails with "ssh exited" and reconnects as a new process.
+  - A changed tunnel is neither taken over nor killed; a reused pid is dropped.
+  - A clean quit leaves nothing recorded.
+- **Done when:** on macOS and Linux a tunnel survives `kill -9` of sshelf and shows as *Running* after the next start; *Stop* ends it; CI passes on all three OSes.
 
 ---
 

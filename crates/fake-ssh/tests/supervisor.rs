@@ -54,6 +54,8 @@ impl Harness {
                 Ok(SupervisorEvent::Error(e)) => {
                     panic!("unexpected error while waiting for {what}: {e}")
                 }
+                // Never sent: these supervisors keep no record.
+                Ok(SupervisorEvent::Adopted(_)) => {}
                 Err(_) => panic!("timed out waiting for {what}; last: {:#?}", self.last),
             }
         }
@@ -67,6 +69,7 @@ impl Harness {
             match self.events.recv_timeout(left) {
                 Ok(SupervisorEvent::Error(e)) => return e,
                 Ok(SupervisorEvent::Snapshot(s)) => self.last = s,
+                Ok(SupervisorEvent::Adopted(_)) => {}
                 Err(_) => panic!("timed out waiting for an error"),
             }
         }
