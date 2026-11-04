@@ -1,5 +1,7 @@
 # sshelf
 
+> **How this project is made:** sshelf follows spec-driven development (SDD). I write and maintain the specification ([SPEC.md](SPEC.md)), and most of the code is written by an LLM (Claude Opus) with a human in the loop: I make the design decisions, review the changes and test each milestone.
+
 A desktop app for Windows, macOS and Linux that puts a visual layer over your real `~/.ssh/config`. Browse your hosts, see what ssh will actually do for each of them, edit them safely, open sessions, and keep port-forwarding tunnels running from one place.
 
 ![Hosts with the detail of one host](docs/screenshots/hosts.webp)
