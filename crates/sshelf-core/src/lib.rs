@@ -21,6 +21,7 @@ pub mod metadata;
 pub mod orphans;
 pub mod paths;
 pub mod process;
+pub mod redact;
 pub mod rename;
 pub mod settings;
 pub mod ssh;

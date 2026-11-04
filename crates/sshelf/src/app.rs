@@ -283,6 +283,8 @@ impl SshelfApp {
                     self.config_loaded = Some(SystemTime::now());
                 }
                 Event::Data(data) => self.data = Some(data),
+                // Streamer mode isn't drawn yet (M11 step 2).
+                Event::Redactor(_) => {}
                 Event::Resolved {
                     alias,
                     generation,

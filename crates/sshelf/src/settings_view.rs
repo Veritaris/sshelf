@@ -62,6 +62,8 @@ impl SettingsView {
             reduce_motion: self.reduce_motion,
             tray_menu: self.tray_menu,
             tray_icon: self.tray_icon,
+            streamer_mode: self.base.as_ref().is_some_and(|b| b.streamer_mode),
+            streamer_hide_aliases: self.base.as_ref().is_some_and(|b| b.streamer_hide_aliases),
             tour: self.base.as_ref().and_then(|b| b.tour),
         }
     }

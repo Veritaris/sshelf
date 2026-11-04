@@ -31,6 +31,12 @@ pub struct Settings {
     pub tray_menu: TrayMenu,
     /// How the tray / menu bar icon is drawn (SPEC.md §10 *Tray*).
     pub tray_icon: TrayIconStyle,
+    /// Streamer mode: mask every value that could identify a machine, an
+    /// account or the user (SPEC.md §10 *Streamer mode*).
+    pub streamer_mode: bool,
+    /// While streamer mode is on, also show host aliases as "host N" and
+    /// tags as `tag`.
+    pub streamer_hide_aliases: bool,
     /// The onboarding tour (SPEC.md §10 *Onboarding tour*); missing until the
     /// welcome screen was answered, which shows it.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -114,6 +120,8 @@ impl Default for Settings {
             reduce_motion: false,
             tray_menu: TrayMenu::Sshelf,
             tray_icon: TrayIconStyle::Colored,
+            streamer_mode: false,
+            streamer_hide_aliases: false,
             tour: None,
         }
     }
@@ -142,6 +150,8 @@ mod tests {
             reduce_motion: true,
             tray_menu: TrayMenu::System,
             tray_icon: TrayIconStyle::Monochrome,
+            streamer_mode: true,
+            streamer_hide_aliases: true,
             tour: Some(TourState::Done),
         };
         store.save(&settings).unwrap();
@@ -153,6 +163,8 @@ mod tests {
             "reduce_motion = true",
             "tray_menu = \"system\"",
             "tray_icon = \"monochrome\"",
+            "streamer_mode = true",
+            "streamer_hide_aliases = true",
             "tour = \"done\"",
         ] {
             assert!(text.contains(line), "{line}: {text}");
@@ -194,6 +206,9 @@ mod tests {
         assert!(!loaded.data.reduce_motion);
         assert_eq!(loaded.data.tray_menu, TrayMenu::Sshelf);
         assert_eq!(loaded.data.tray_icon, TrayIconStyle::Colored);
+        // Streamer mode is off until turned on (M11 keys missing).
+        assert!(!loaded.data.streamer_mode);
+        assert!(!loaded.data.streamer_hide_aliases);
         // No `tour` key: the welcome screen is due.
         assert_eq!(loaded.data.tour, None);
     }

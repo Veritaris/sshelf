@@ -28,6 +28,7 @@ use crate::metadata::{HostMeta, HostsFile};
 use crate::orphans::{self, GroupOrphan, Orphan, TunnelOrphan};
 use crate::paths::Paths;
 use crate::process;
+use crate::redact::{self, Redactor};
 use crate::rename;
 use crate::settings::Settings;
 use crate::ssh::{self, AgentStatus, Resolved, SshTools, Tool};
@@ -246,6 +247,9 @@ enum KeyFor {
 pub enum Event {
     Config(Arc<ConfigSnapshot>),
     Data(Arc<AppData>),
+    /// Streamer mode's filter for the current config and tunnels; sent
+    /// before every [`Event::Data`].
+    Redactor(Arc<Redactor>),
     Resolved {
         alias: String,
         /// [`ConfigSnapshot::generation`] the result belongs to.
@@ -933,7 +937,26 @@ impl Worker {
             .map(|hosts| orphans::find_tunnel_orphans(&self.data.tunnels, hosts))
             .unwrap_or_default();
         self.data.group_orphans = orphans::find_group_orphans(&self.data.tunnels);
+        // Streamer mode's filter follows the config and the tunnels; it goes
+        // first, so the data it covers never arrives without it.
+        self.emitter
+            .emit(Event::Redactor(Arc::new(self.redactor())));
         self.emitter.emit(Event::Data(Arc::new(self.data.clone())));
+    }
+
+    /// Streamer mode's filter over the loaded config, the tunnels, the home
+    /// folder and the local login (SPEC.md §10 *Streamer mode*).
+    fn redactor(&self) -> Redactor {
+        let local_user = std::env::var("USER")
+            .or_else(|_| std::env::var("USERNAME"))
+            .ok();
+        Redactor::build(redact::Sources {
+            set: self.config.set(),
+            hosts: self.config.hosts(),
+            tunnels: &self.data.tunnels,
+            home: &self.paths.home,
+            local_user: local_user.as_deref(),
+        })
     }
 
     fn resolve(&self, alias: String) {
