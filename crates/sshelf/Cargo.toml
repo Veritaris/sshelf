@@ -78,3 +78,5 @@ tray-icon = { version = "0.26.1", default-features = false, features = ["ksni"] 
 # Headless UI tests: drive views through their accessibility labels.
 egui_kittest = { version = "0.37.0", features = ["eframe"] }
 tempfile = { version = "3.27.0" }
+# examples/iconset.rs: the macOS icon set for the release's .app bundle.
+png = { version = "0.18.1" }

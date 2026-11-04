@@ -61,3 +61,12 @@ jobs:
 
       - name: Test
         run: cargo test --workspace
+
+      # What the release's .app needs, checked before a tag: the icon set
+      # converts to .icns and Info.plist is valid.
+      - name: Check the macOS bundle files
+        if: matrix.platform.os == 'macos-15'
+        run: |
+          cargo run -p sshelf --example iconset -- "$RUNNER_TEMP/sshelf.iconset"
+          iconutil -c icns "$RUNNER_TEMP/sshelf.iconset" -o "$RUNNER_TEMP/sshelf.icns"
+          plutil -lint crates/sshelf/assets/macos/Info.plist

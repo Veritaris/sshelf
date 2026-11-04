@@ -61,18 +61,31 @@ jobs:
           dirname="${bin}-${VERSION}-${{ matrix.platform.target }}"
           mkdir "$dirname"
 
-          if [ "${{ matrix.platform.os }}" = "windows-latest" ]; then
+          if [ "${{ matrix.platform.os }}" = "macos-15" ]; then
+            # sshelf.app with the full icon set, in a .dmg with an
+            # Applications shortcut. Signed ad hoc only (no Developer ID):
+            # Apple Silicon needs a consistent bundle signature.
+            cargo run -p sshelf --example iconset -- sshelf.iconset
+            iconutil -c icns sshelf.iconset -o sshelf.icns
+            app="$dirname/sshelf.app"
+            mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+            cp "target/${{ matrix.platform.target }}/release/${bin}" "$app/Contents/MacOS/"
+            cp sshelf.icns "$app/Contents/Resources/"
+            sed "s/@VERSION@/${VERSION}/g" crates/sshelf/assets/macos/Info.plist > "$app/Contents/Info.plist"
+            codesign --force --deep --sign - "$app"
+            ln -s /Applications "$dirname/Applications"
+            hdiutil create -volname "sshelf ${VERSION}" -srcfolder "$dirname" -ov -format UDZO "$dirname.dmg"
+            echo "ASSET=$dirname.dmg" >> "$GITHUB_ENV"
+          elif [ "${{ matrix.platform.os }}" = "windows-latest" ]; then
             cp "target/${{ matrix.platform.target }}/release/${bin}.exe" "$dirname/"
             7z a -t7z "$dirname.7z" "$dirname"
             echo "ASSET=$dirname.7z" >> "$GITHUB_ENV"
           else
             cp "target/${{ matrix.platform.target }}/release/${bin}" "$dirname/"
-            if [ "${{ matrix.platform.os }}" = "ubuntu-latest" ]; then
-              # Desktop entry and icon, laid out like ~/.local/share.
-              mkdir -p "$dirname/share/applications" "$dirname/share/icons/hicolor/scalable/apps"
-              cp crates/sshelf/assets/linux/sshelf.desktop "$dirname/share/applications/"
-              cp crates/sshelf/assets/linux/sshelf.svg "$dirname/share/icons/hicolor/scalable/apps/"
-            fi
+            # Desktop entry and icon, laid out like ~/.local/share.
+            mkdir -p "$dirname/share/applications" "$dirname/share/icons/hicolor/scalable/apps"
+            cp crates/sshelf/assets/linux/sshelf.desktop "$dirname/share/applications/"
+            cp crates/sshelf/assets/linux/sshelf.svg "$dirname/share/icons/hicolor/scalable/apps/"
             tar -czf "$dirname.tar.gz" "$dirname"
             echo "ASSET=$dirname.tar.gz" >> "$GITHUB_ENV"
           fi

@@ -21,6 +21,10 @@ On Linux, install the windowing dev packages first (Debian/Ubuntu):
 sudo apt-get install libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev
 ```
 
+## macOS
+
+The release has a `.dmg`: drag `sshelf.app` to Applications. The app isn't signed with a Developer ID, so the first start needs right click › *Open* (or `xattr -d com.apple.quarantine /Applications/sshelf.app`).
+
 ## Linux desktop entry
 
 The Linux release archive has a desktop entry and icon under `share/`, laid out like `~/.local/share`. Install them for your user so launchers and docks show sshelf with its icon (`sshelf` must be on your `PATH`):

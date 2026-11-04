@@ -3,3 +3,4 @@ crates/sshconf/tests/corpus/** -text
 crates/sshconf/tests/fixtures/** -text
 # Shipped to Linux as is: LF everywhere.
 crates/sshelf/assets/linux/** text eol=lf
+crates/sshelf/assets/macos/** text eol=lf
