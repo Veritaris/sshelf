@@ -498,6 +498,66 @@ pub struct HostEditor {
     keys_requested: bool,
     /// The key dialog asked for *Settings* (the agent service).
     open_settings: bool,
+    /// Streamer mode: the cover's *Hold to peek* is held down.
+    peeking: bool,
+}
+
+/// What the streamer-mode cover asks for.
+enum CoverAction {
+    Peek,
+    Close,
+}
+
+/// The editor's cover in streamer mode (SPEC.md §10 *Streamer mode*,
+/// *Editors*): the editor shows the raw config, so it stays covered.
+fn cover(ui: &mut Ui) -> Option<CoverAction> {
+    let p = &Palette::ONE_DARK;
+    let mut action = None;
+    ui.vertical_centered(|ui| {
+        ui.add_space((ui.available_height() / 2.0 - 110.0).max(24.0));
+        ui.spacing_mut().item_spacing.y = 10.0;
+        let (tile, _) = ui.allocate_exact_size(egui::Vec2::splat(44.0), Sense::hover());
+        ui.painter().rect_filled(tile, radius::CONTROL, p.blue_tint);
+        ui.painter().text(
+            tile.center(),
+            egui::Align2::CENTER_CENTER,
+            icons::LOCK,
+            icons::font(22.0),
+            p.blue,
+        );
+        ui.label(
+            RichText::new("Hidden in streamer mode")
+                .font(fonts::semibold(17.0))
+                .color(p.text_strong),
+        );
+        ui.allocate_ui(egui::vec2(380.0, 0.0), |ui| {
+            ui.add(
+                egui::Label::new(
+                    RichText::new(
+                        "The editor shows the raw config, so it stays covered while streamer \
+                         mode is on. Hold to peek; turn streamer mode off to edit.",
+                    )
+                    .size(13.0)
+                    .color(p.dim),
+                )
+                .halign(egui::Align::Center)
+                .wrap(),
+            );
+        });
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.add_space((ui.available_width() - 200.0).max(0.0) / 2.0);
+            ui.spacing_mut().item_spacing.x = 8.0;
+            let peek = ui.add(Button::new("Hold to peek").icon(icons::EYE));
+            if peek.is_pointer_button_down_on() {
+                action = Some(CoverAction::Peek);
+            }
+            if ui.add(Button::new("Close").ghost()).clicked() {
+                action = Some(CoverAction::Close);
+            }
+        });
+    });
+    action
 }
 
 impl HostEditor {
@@ -690,6 +750,25 @@ impl HostEditor {
         inset: Color32,
     ) -> Vec<Command> {
         let mut commands = Vec::new();
+        // Streamer mode: covered, except while *Hold to peek* is held.
+        if privacy::get(ui.ctx()).on {
+            if self.peeking && !ui.input(|i| i.pointer.primary_down()) {
+                self.peeking = false;
+            }
+            if !self.peeking {
+                match cover(ui) {
+                    Some(CoverAction::Peek) => {
+                        self.peeking = true;
+                        ui.ctx().request_repaint();
+                    }
+                    Some(CoverAction::Close) => self.close(),
+                    None => {}
+                }
+                return commands;
+            }
+        } else {
+            self.peeking = false;
+        }
         let mut close = false;
         let mut reopen = false;
         let mut open_keys = None;

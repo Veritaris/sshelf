@@ -2,12 +2,19 @@
 //! stores it in the context once per frame; views and widgets read it from
 //! there, so no view signature changes.
 
-use egui::{Context, Id};
+use std::borrow::Cow;
+use std::sync::Arc;
 
-#[derive(Clone, Copy, Default)]
+use egui::{Context, Id};
+use sshelf_core::redact::Redactor;
+
+#[derive(Clone, Default)]
 pub struct Privacy {
     /// Streamer mode is on: values are masked.
     pub on: bool,
+    /// What the free-text filter knows (core rebuilds it on every config
+    /// load and tunnel change).
+    pub redactor: Arc<Redactor>,
 }
 
 impl Privacy {
@@ -17,6 +24,16 @@ impl Privacy {
             format!("Copied {name} · not shown in streamer mode")
         } else {
             format!("Copied {name}")
+        }
+    }
+
+    /// `text` through the filter for places that only take a string (the
+    /// native tray menu, the window title): tokens become "•••••".
+    pub fn plain<'a>(&self, text: &'a str) -> Cow<'a, str> {
+        if self.on {
+            Cow::Owned(self.redactor.mask_plain(text, false))
+        } else {
+            Cow::Borrowed(text)
         }
     }
 }

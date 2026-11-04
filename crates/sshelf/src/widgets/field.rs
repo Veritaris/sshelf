@@ -6,8 +6,11 @@ use egui::{
     Color32, CursorIcon, FontId, Margin, Response, Stroke, StrokeKind, TextEdit, Ui, Widget, vec2,
 };
 
-use crate::motion;
+use sshelf_core::redact::DOTS;
+
 use crate::theme::{Palette, radius, timing};
+use crate::widgets::masked;
+use crate::{motion, privacy};
 
 pub struct TextField<'a> {
     text: &'a mut String,
@@ -24,6 +27,8 @@ pub struct TextField<'a> {
     password: bool,
     /// Room kept free at the right end (for a button over the field).
     inset_right: f32,
+    /// Filled from stored data: masked in streamer mode until focused.
+    prefilled: bool,
 }
 
 impl<'a> TextField<'a> {
@@ -39,7 +44,17 @@ impl<'a> TextField<'a> {
             fill: None,
             password: false,
             inset_right: 0.0,
+            prefilled: false,
         }
+    }
+
+    /// The value comes from stored data (SPEC.md §10 *Streamer mode*,
+    /// *Pre-filled inputs*): in streamer mode the field shows "•••••" until
+    /// the user focuses it; from then on it is their input and shows as
+    /// typed.
+    pub fn prefilled(mut self) -> Self {
+        self.prefilled = true;
+        self
     }
 
     /// The value is allowed but risky: a Light Yellow outline.
@@ -94,10 +109,36 @@ impl<'a> TextField<'a> {
 impl Widget for TextField<'_> {
     fn ui(self, ui: &mut Ui) -> Response {
         let p = &Palette::ONE_DARK;
+        let edit_id = ui.next_auto_id().with("field_edit");
         let width = self.width.unwrap_or_else(|| ui.available_width());
         let (rect, _) = ui.allocate_exact_size(vec2(width, self.height), egui::Sense::hover());
         let fill = self.fill.unwrap_or(ui.visuals().extreme_bg_color);
         ui.painter().rect_filled(rect, radius::CONTROL, fill);
+        // A pre-filled value stays covered until the field is focused once.
+        let taken = edit_id.with("taken");
+        if self.prefilled && privacy::get(ui.ctx()).on && !self.text.is_empty() {
+            if ui.memory(|m| m.has_focus(edit_id)) {
+                ui.ctx().data_mut(|d| d.insert_temp(taken, true));
+            }
+            if !ui
+                .ctx()
+                .data(|d| d.get_temp::<bool>(taken))
+                .unwrap_or(false)
+            {
+                let response = ui.interact(rect, edit_id.with("cover"), egui::Sense::click());
+                response.widget_info(|| egui::WidgetInfo::text_edit(true, "", DOTS, self.hint));
+                let mut child = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(rect.shrink2(vec2(12.0, 0.0)))
+                        .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                );
+                masked::dots(&mut child, false);
+                if response.clicked() {
+                    ui.memory_mut(|m| m.request_focus(edit_id));
+                }
+                return response.on_hover_cursor(CursorIcon::Text);
+            }
+        }
         let font = if self.mono {
             FontId::monospace(13.0)
         } else {
@@ -116,6 +157,7 @@ impl Widget for TextField<'_> {
         );
         let response = child.add(
             TextEdit::singleline(self.text)
+                .id(edit_id)
                 .password(self.password)
                 .frame(egui::Frame::NONE)
                 .hint_text(self.hint)
@@ -151,5 +193,48 @@ impl Widget for TextField<'_> {
             );
         }
         response.on_hover_cursor(CursorIcon::Text)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use egui_kittest::kittest::Queryable;
+
+    use super::*;
+    use crate::privacy::Privacy;
+    use crate::test_util::{self, drawn_text};
+
+    /// Streamer mode: a pre-filled value shows as dots until the field is
+    /// focused; from then on it shows, also after focus leaves.
+    #[test]
+    fn a_prefilled_value_shows_once_focused() {
+        let mut harness = test_util::harness()
+            .with_size([400.0, 60.0])
+            .build_ui_state(
+                |ui, text: &mut String| {
+                    let on = Privacy {
+                        on: true,
+                        ..Privacy::default()
+                    };
+                    privacy::set(ui.ctx(), on);
+                    let label = ui.label("Bind");
+                    ui.add(TextField::new(text).prefilled())
+                        .labelled_by(label.id);
+                },
+                "10.77.3.41".to_string(),
+            );
+        harness.run_steps(2);
+        assert!(!drawn_text(&harness).contains("10.77"));
+        harness.get_by_label("Bind").click();
+        harness.run_steps(3);
+        assert!(
+            drawn_text(&harness).contains("10.77.3.41"),
+            "focused: shown"
+        );
+        harness
+            .ctx
+            .memory_mut(|m| m.surrender_focus(m.focused().unwrap()));
+        harness.run_steps(2);
+        assert!(drawn_text(&harness).contains("10.77.3.41"), "still shown");
     }
 }

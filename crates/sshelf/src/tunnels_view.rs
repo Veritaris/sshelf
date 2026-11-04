@@ -14,6 +14,7 @@ use egui::{
 use sshconf::HostList;
 use sshelf_core::core::{AppData, Command, ConfigSnapshot, SshInfo};
 use sshelf_core::hints;
+use sshelf_core::redact::DOTS;
 use sshelf_core::supervisor::{FailureKind, Owner, Snapshot, TunnelState, TunnelStatus};
 use sshelf_core::tunnels::{DEFAULT_BIND, Forward, ForwardKind, Tunnel, TunnelsFile};
 
@@ -24,8 +25,8 @@ use crate::widgets::button::{self, Button};
 use crate::widgets::dropdown::{Choice, Dropdown};
 use crate::widgets::field::TextField;
 use crate::widgets::switch::switch;
-use crate::widgets::{marks, nav, popup, text};
-use crate::{fonts, icons, motion, tour};
+use crate::widgets::{marks, masked, nav, popup, text};
+use crate::{fonts, icons, motion, privacy, tour};
 
 /// Width of the tunnel list.
 const LIST_WIDTH: f32 = 340.0;
@@ -136,9 +137,13 @@ fn new_forward() -> Forward {
     }
 }
 
-/// "L 6443": a forward's kind and listen port.
-fn forward_short(forward: &Forward) -> String {
-    format!("{:?} {}", forward.kind, forward.listen)
+/// "L 6443": a forward's kind and listen port (masked in streamer mode).
+fn forward_short(forward: &Forward, masked: bool) -> String {
+    if masked {
+        format!("{:?} {DOTS}", forward.kind)
+    } else {
+        format!("{:?} {}", forward.kind, forward.listen)
+    }
 }
 
 /// The target `host:port` split for its two fields (IPv6 without brackets).
@@ -273,7 +278,8 @@ fn sub_line(
 ) -> (String, Color32) {
     let p = &Palette::ONE_DARK;
     let state = status.map_or(TunnelState::Stopped, |s| s.state.clone());
-    let forward = tunnel.forwards.first().map(forward_short);
+    let masked = privacy::get(ctx).on;
+    let forward = tunnel.forwards.first().map(|f| forward_short(f, masked));
     let with_forward = |text: String| match &forward {
         Some(f) => format!("{text} · {f}"),
         None => text,
@@ -535,6 +541,8 @@ impl TunnelsView {
                                     .selectable(false),
                             );
                             let (line, color) = sub_line(ui.ctx(), tunnel, status, &data.tunnels);
+                            // Clicks go to the row: no tokens to peek here.
+                            let line = privacy::get(ui.ctx()).plain(&line).into_owned();
                             let font = FontId::monospace(11.0);
                             let (line, _) = text::elide(ui.painter(), &line, &font, text_width);
                             ui.add(
@@ -928,14 +936,12 @@ impl TunnelsView {
                         ui.set_width(ui.available_width());
                         ui.horizontal_wrapped(|ui| {
                             ui.label(RichText::new("Command").size(12.0).color(p.dim));
-                            ui.add(
-                                egui::Label::new(
-                                    RichText::new(command_line(draft))
-                                        .font(FontId::monospace(12.0))
-                                        .color(p.text),
-                                )
-                                .wrap(),
-                            );
+                            let style = masked::Style {
+                                font: FontId::monospace(12.0),
+                                color: p.text,
+                                on_card: false,
+                            };
+                            masked::text(ui, &command_line(draft), &style, true);
                         });
                     });
             });
@@ -1179,6 +1185,7 @@ fn forward_card(
                 ui.add(
                     TextField::new(&mut forward.bind)
                         .mono()
+                        .prefilled()
                         .width(BIND)
                         .warning(exposed),
                 )
@@ -1192,6 +1199,7 @@ fn forward_card(
                     .add(
                         TextField::new(&mut listen)
                             .mono()
+                            .prefilled()
                             .hint(labels[1])
                             .width(PORT)
                             .error(forward.listen == 0 && !errors.is_empty()),
@@ -1218,6 +1226,7 @@ fn forward_card(
                         .add(
                             TextField::new(&mut host)
                                 .mono()
+                                .prefilled()
                                 .hint("localhost")
                                 .width(host_width),
                         )
@@ -1228,7 +1237,13 @@ fn forward_card(
                             .color(p.dim),
                     );
                     let port_edit = ui
-                        .add(TextField::new(&mut port).mono().hint(labels[3]).width(PORT))
+                        .add(
+                            TextField::new(&mut port)
+                                .mono()
+                                .prefilled()
+                                .hint(labels[3])
+                                .width(PORT),
+                        )
                         .labelled_by(ids[3]);
                     if host_edit.changed() || port_edit.changed() {
                         forward.target = Some(join_target(&host, &port));
@@ -1244,11 +1259,13 @@ fn forward_card(
             if forward.is_exposed() {
                 ui.horizontal_wrapped(|ui| {
                     icons::show(ui, icons::TRIANGLE_ALERT, icons::INLINE, p.yellow);
-                    ui.label(
-                        RichText::new(format!("{}: {}", forward.bind, exposed_hint(forward.kind)))
-                            .size(12.0)
-                            .color(p.yellow),
-                    );
+                    let style = masked::Style {
+                        font: FontId::proportional(12.0),
+                        color: p.yellow,
+                        on_card: true,
+                    };
+                    let text = format!("{}: {}", forward.bind, exposed_hint(forward.kind));
+                    masked::text(ui, &text, &style, true);
                 });
             }
             for error in errors {
@@ -1327,6 +1344,7 @@ fn forwards_table(ui: &mut Ui, tunnel: &Tunnel) {
                 (width - 60.0 - 130.0 - 90.0 - 100.0 - 24.0).max(80.0),
                 100.0,
             ];
+            let masked = privacy::get(ui.ctx()).on;
             let cells = |ui: &mut Ui, rect: Rect, texts: [(&str, Color32, bool); 5]| {
                 let mut x = rect.left() + 12.0;
                 for (i, (text, color, mono)) in texts.into_iter().enumerate() {
@@ -1335,6 +1353,26 @@ fn forwards_table(ui: &mut Ui, tunnel: &Tunnel) {
                     } else {
                         fonts::semibold(11.0)
                     };
+                    // Streamer mode: the addresses and ports are tokens.
+                    if masked && mono && !text.is_empty() {
+                        let cell = Rect::from_min_size(
+                            pos2(x, rect.top()),
+                            vec2(columns[i] - 8.0, rect.height()),
+                        );
+                        let mut child = ui.new_child(
+                            egui::UiBuilder::new()
+                                .max_rect(cell)
+                                .layout(Layout::left_to_right(Align::Center)),
+                        );
+                        let style = masked::Style {
+                            font,
+                            color,
+                            on_card: true,
+                        };
+                        masked::value(&mut child, text, &style);
+                        x += columns[i];
+                        continue;
+                    }
                     let (shown, _) = text::elide(ui.painter(), text, &font, columns[i] - 8.0);
                     ui.painter().text(
                         pos2(x, rect.center().y),
@@ -1449,13 +1487,20 @@ fn failure_banner(
             )),
             _ => hints::failure_hint(reason).map(String::from),
         };
-        ui.label(
-            RichText::new(reason)
-                .font(FontId::monospace(12.0))
-                .color(p.text_strong),
-        );
+        // ssh's own words: free text through the filter.
+        let style = masked::Style {
+            font: FontId::monospace(12.0),
+            color: p.text_strong,
+            on_card: true,
+        };
+        masked::text(ui, reason, &style, true);
         if let Some(body) = body {
-            ui.add(egui::Label::new(RichText::new(body).size(13.0).color(p.text)).wrap());
+            let style = masked::Style {
+                font: FontId::proportional(13.0),
+                color: p.text,
+                on_card: true,
+            };
+            masked::text(ui, &body, &style, true);
         }
         if let Some(text) = reconnect_text(ui.ctx(), status) {
             ui.label(RichText::new(text).size(13.0).color(p.yellow));
@@ -1576,14 +1621,12 @@ fn log(
                         } else {
                             p.dim
                         };
-                        ui.add(
-                            egui::Label::new(
-                                RichText::new(format!("{time}  {}", line.text))
-                                    .font(FontId::monospace(12.0))
-                                    .color(color),
-                            )
-                            .wrap(),
-                        );
+                        let style = masked::Style {
+                            font: FontId::monospace(12.0),
+                            color,
+                            on_card: false,
+                        };
+                        masked::text(ui, &format!("{time}  {}", line.text), &style, true);
                     }
                 });
         });

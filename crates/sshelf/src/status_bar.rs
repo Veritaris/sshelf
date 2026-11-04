@@ -11,12 +11,11 @@ use sshelf_core::core::SshInfo;
 use sshelf_core::ssh::AgentStatus;
 use sshelf_core::supervisor::{Snapshot, TunnelState};
 
-use crate::icons;
 use crate::theme::Palette;
 use crate::tour::targets::{self, Target};
 use crate::widgets::button::Button;
-use crate::widgets::marks;
-use crate::window;
+use crate::widgets::{marks, masked};
+use crate::{icons, privacy, window};
 
 /// Height of the bar.
 pub const HEIGHT: f32 = 28.0;
@@ -109,7 +108,17 @@ pub fn show(ui: &mut Ui, status: &Status, error: &mut Option<String>) {
                     *error = None;
                 }
                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                    ui.add(Label::new(small(text, p.text_strong)).truncate());
+                    // Free text from ssh: through the filter in streamer mode.
+                    if privacy::get(ui.ctx()).on {
+                        let style = masked::Style {
+                            font: egui::FontId::proportional(12.0),
+                            color: p.text_strong,
+                            on_card: true,
+                        };
+                        masked::text(ui, &text, &style, false);
+                    } else {
+                        ui.add(Label::new(small(text, p.text_strong)).truncate());
+                    }
                 });
             });
             return;

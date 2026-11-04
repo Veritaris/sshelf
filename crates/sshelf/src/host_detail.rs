@@ -27,7 +27,7 @@ use crate::tour::targets::{self, Target};
 use crate::tunnels_view::state_label;
 use crate::widgets::button::{self, Button};
 use crate::widgets::color::{self, Picking};
-use crate::widgets::{copy, marks, nav, popup, text};
+use crate::widgets::{copy, marks, masked, nav, popup, text};
 use crate::{fonts, icons, motion, privacy, util};
 
 /// `ssh -G` keys shown first, in this order.
@@ -45,6 +45,37 @@ const IMPORTANT: &[&str] = &[
     "remoteforward",
     "dynamicforward",
     "serveraliveinterval",
+];
+
+/// `ssh -G` keys whose values are always masked in streamer mode (others
+/// only where the filter finds something): addresses, users, ports, paths,
+/// commands and forwards.
+const SENSITIVE: &[&str] = &[
+    "hostname",
+    "user",
+    "port",
+    "proxyjump",
+    "proxycommand",
+    "identityfile",
+    "certificatefile",
+    "identityagent",
+    "localforward",
+    "remoteforward",
+    "dynamicforward",
+    "bindaddress",
+    "bindinterface",
+    "hostkeyalias",
+    "controlpath",
+    "userknownhostsfile",
+    "globalknownhostsfile",
+    "knownhostscommand",
+    "localcommand",
+    "remotecommand",
+    "revokedhostkeys",
+    "securitykeyprovider",
+    "pkcs11provider",
+    "xauthlocation",
+    "setenv",
 ];
 
 /// The connection values of *Overview*: `ssh -G` key and its label. Only
@@ -418,11 +449,12 @@ impl HostDetail {
             self.save_meta(&alias, meta, commands);
         }
         if let Some(address) = self.address(&alias) {
-            ui.label(
-                RichText::new(address)
-                    .font(FontId::monospace(13.0))
-                    .color(p.dim),
-            );
+            let style = masked::Style {
+                font: FontId::monospace(13.0),
+                color: p.dim,
+                on_card: false,
+            };
+            masked::value(ui, &address, &style);
         }
         let small = |text: String, color: Color32| RichText::new(text).size(12.0).color(color);
         for &at in &host.also_in {
@@ -562,6 +594,7 @@ impl HostDetail {
                             hover_outline: false,
                             corners: CornerRadius::same(radius::CONTROL),
                             on_card: true,
+                            sensitive: true,
                         };
                         if copy::row(ui, row) {
                             self.notices.push(privacy::get(ui.ctx()).copied(label));
@@ -708,14 +741,42 @@ impl HostDetail {
         commands: &mut Vec<Command>,
     ) {
         let p = &Palette::ONE_DARK;
-        ui.add(
-            egui::TextEdit::multiline(&mut self.notes)
-                .hint_text("Notes")
-                .desired_rows(3)
-                .desired_width(f32::INFINITY)
-                .background_color(inset)
-                .margin(Margin::symmetric(12, 10)),
-        );
+        if privacy::get(ui.ctx()).on {
+            // Streamer mode: notes are data, shown through the filter and
+            // read-only (editing them means turning it off).
+            egui::Frame::new()
+                .fill(inset)
+                .corner_radius(radius::CONTROL)
+                .inner_margin(Margin::symmetric(12, 10))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.set_min_height(54.0);
+                    if self.notes.is_empty() {
+                        ui.label(RichText::new("Notes").color(p.dim));
+                    } else {
+                        let style = masked::Style {
+                            font: FontId::proportional(13.0),
+                            color: p.text,
+                            on_card: true,
+                        };
+                        masked::text(ui, &self.notes, &style, true);
+                    }
+                });
+            ui.label(
+                RichText::new("Read-only in streamer mode")
+                    .size(11.0)
+                    .color(p.dim),
+            );
+        } else {
+            ui.add(
+                egui::TextEdit::multiline(&mut self.notes)
+                    .hint_text("Notes")
+                    .desired_rows(3)
+                    .desired_width(f32::INFINITY)
+                    .background_color(inset)
+                    .margin(Margin::symmetric(12, 10)),
+            );
+        }
         if self.notes.trim_end() == self.base.notes {
             return;
         }
@@ -786,7 +847,12 @@ impl HostDetail {
                 marks::banner(ui, p.red_tint, |ui| {
                     ui.horizontal_wrapped(|ui| {
                         icons::show(ui, icons::CIRCLE_X, icons::INLINE, p.red);
-                        ui.label(RichText::new(format!("ssh -G failed: {e}")).color(p.red));
+                        let style = masked::Style {
+                            font: FontId::proportional(13.0),
+                            color: p.red,
+                            on_card: true,
+                        };
+                        masked::text(ui, &format!("ssh -G failed: {e}"), &style, true);
                     });
                 });
             }
@@ -822,8 +888,13 @@ impl HostDetail {
                             );
                             ui.add_space(6.0);
                         }
+                        let privacy = privacy::get(ui.ctx());
                         for (index, (key, value)) in rows.into_iter().enumerate() {
                             let important = IMPORTANT.contains(&key.as_str());
+                            // Streamer mode: option names and harmless values
+                            // (`30`, `no`) stay visible.
+                            let sensitive =
+                                SENSITIVE.contains(&key.as_str()) || privacy.redactor.finds(value);
                             let row = copy::Row {
                                 name: key,
                                 key: (key, key_width, if important { p.accent } else { p.dim }),
@@ -836,9 +907,10 @@ impl HostDetail {
                                 hover_outline: true,
                                 corners: CornerRadius::same(radius::ROW),
                                 on_card: false,
+                                sensitive,
                             };
                             if copy::row(ui, row) {
-                                notices.push(privacy::get(ui.ctx()).copied(key));
+                                notices.push(privacy.copied(key));
                             }
                         }
                     });
@@ -1323,15 +1395,24 @@ fn forward_line(ui: &mut Ui, forward: &Forward) {
     } else {
         format!("{}:{}", forward.bind, forward.listen)
     };
+    // Streamer mode: the listen address and the target are tokens.
+    let style = masked::Style {
+        font: FontId::monospace(12.0),
+        color: p.dim,
+        on_card: false,
+    };
     ui.spacing_mut().item_spacing.x = 4.0;
     match forward.kind {
         ForwardKind::D => {
-            ui.label(mono(format!("D {listen} (SOCKS)")));
+            ui.label(mono("D".into()));
+            masked::value(ui, &listen, &style);
+            ui.label(mono("(SOCKS)".into()));
         }
         kind => {
-            ui.label(mono(format!("{kind:?} {listen}")));
+            ui.label(mono(format!("{kind:?}")));
+            masked::value(ui, &listen, &style);
             icons::show(ui, icons::ARROW_RIGHT, 12.0, p.dim);
-            ui.label(mono(forward.target.clone().unwrap_or_default()));
+            masked::value(ui, forward.target.as_deref().unwrap_or_default(), &style);
         }
     }
     ui.spacing_mut().item_spacing.x = 8.0;
@@ -1451,6 +1532,7 @@ fn health(
                     let tip = why_not
                         .clone()
                         .unwrap_or_else(|| format!("Run ssh-add for {file} in a terminal"));
+                    let tip = privacy::get(ui.ctx()).plain(&tip).into_owned();
                     let load = Button::new("Load key into agent").small().tip(&tip);
                     if ui.add_enabled(why_not.is_none(), load).clicked() {
                         commands.push(Command::AddKeyToAgent {
@@ -1519,13 +1601,19 @@ fn health(
         }
         Health::Unreachable(why) => {
             marks::banner(ui, p.red_tint, |ui| {
-                ui.label(
-                    RichText::new(why)
-                        .font(FontId::monospace(12.0))
-                        .color(p.red),
-                );
+                let style = masked::Style {
+                    font: FontId::monospace(12.0),
+                    color: p.red,
+                    on_card: true,
+                };
+                masked::text(ui, why, &style, true);
                 if let Some(hint) = hints::failure_hint(why) {
-                    ui.label(RichText::new(hint).color(p.text_strong));
+                    let style = masked::Style {
+                        font: FontId::proportional(13.0),
+                        color: p.text_strong,
+                        ..style
+                    };
+                    masked::text(ui, hint, &style, true);
                 }
                 ui.horizontal_wrapped(|ui| {
                     let edit = Button::new("Edit host")
@@ -1582,6 +1670,7 @@ fn route_line(
         return None;
     }
     let mut clicked = None;
+    let privacy = privacy::get(ui.ctx());
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
         let arrow = |ui: &mut Ui| {
@@ -1594,6 +1683,7 @@ fn route_line(
                 for hop in hops {
                     arrow(ui);
                     let tip = format!("{}:{}", hop.hostname, hop.port);
+                    let tip = privacy.plain(&tip).into_owned();
                     match hosts.and_then(|h| h.find(&hop.destination)) {
                         Some(host) => {
                             let link = button::link(ui, &hop.destination, 13.0);
@@ -1603,6 +1693,15 @@ fn route_line(
                             popup::tip_below(link, |ui| {
                                 ui.label(tip);
                             });
+                        }
+                        // Not a host of the config: an address.
+                        None if privacy.on => {
+                            let style = masked::Style {
+                                font: FontId::monospace(13.0),
+                                color: p.text,
+                                on_card: false,
+                            };
+                            masked::value(ui, &hop.destination, &style);
                         }
                         None => hint(
                             ui,
@@ -1615,7 +1714,12 @@ fn route_line(
             Some(Some(Err(e))) => {
                 arrow(ui);
                 ui.label(RichText::new("?").color(p.dim));
-                ui.label(RichText::new(e).size(12.0).color(p.yellow));
+                let style = masked::Style {
+                    font: FontId::proportional(12.0),
+                    color: p.yellow,
+                    on_card: false,
+                };
+                masked::text(ui, &e, &style, false);
             }
             Some(None) => {
                 arrow(ui);
@@ -1628,7 +1732,7 @@ fn route_line(
             hint(
                 ui,
                 RichText::new("ProxyCommand").size(13.0).italics(),
-                command,
+                &privacy.plain(command),
             );
         }
         arrow(ui);

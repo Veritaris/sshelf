@@ -11,7 +11,8 @@ use egui::text::{LayoutJob, TextFormat};
 use egui::{Align2, Area, Color32, FontId, Frame, Id, Margin, Order, Stroke, vec2};
 
 use crate::theme::{Palette, radius, timing};
-use crate::{icons, motion, status_bar};
+use crate::widgets::masked;
+use crate::{icons, motion, privacy, status_bar};
 
 /// Older toasts give way beyond this many.
 const MAX: usize = 3;
@@ -154,7 +155,21 @@ impl Toasts {
                                 ui.spacing_mut().item_spacing.x = 10.0;
                                 let (icon, color) = toast.icon;
                                 icons::show(ui, icon, 16.0, color);
-                                ui.label(message(&toast.text, toast.value.as_deref()));
+                                if privacy::get(ui.ctx()).on {
+                                    // Through the filter (a value is an alias).
+                                    let text = match &toast.value {
+                                        Some(value) => format!("{} {value}", toast.text),
+                                        None => toast.text.clone(),
+                                    };
+                                    let style = masked::Style {
+                                        font: FontId::proportional(13.0),
+                                        color: p.text,
+                                        on_card: false,
+                                    };
+                                    masked::text(ui, &text, &style, true);
+                                } else {
+                                    ui.label(message(&toast.text, toast.value.as_deref()));
+                                }
                             });
                         });
                 });

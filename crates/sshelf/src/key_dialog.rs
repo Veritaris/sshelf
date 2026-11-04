@@ -22,8 +22,8 @@ use crate::tour::targets::{self, Target};
 use crate::widgets::button::{self, Button};
 use crate::widgets::dropdown::{Choice, Dropdown};
 use crate::widgets::field::TextField;
-use crate::widgets::{copy, marks, text};
-use crate::{fonts, icons, motion};
+use crate::widgets::{copy, marks, masked, text};
+use crate::{fonts, icons, motion, privacy};
 
 /// What the host editor (or the app) should do for the dialog.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -472,9 +472,12 @@ fn options(ui: &mut Ui, form: &mut Form, id: u64, commands: &mut Vec<Command>) -
                 ui.add(TextField::new(&mut form.comment)).labelled_by(label);
             });
             row(ui, "File", |ui, label| {
-                let response = ui
-                    .add(TextField::new(&mut form.path).mono())
-                    .labelled_by(label);
+                // A path under the home folder until the user edits it.
+                let mut field = TextField::new(&mut form.path).mono();
+                if !form.path_edited {
+                    field = field.prefilled();
+                }
+                let response = ui.add(field).labelled_by(label);
                 if response.changed() {
                     form.path_edited = true;
                 }
@@ -768,6 +771,7 @@ fn result(
             hover_outline: false,
             corners: egui::CornerRadius::same(radius::CONTROL),
             on_card: false,
+            sensitive: true,
         };
         if copy::row(ui, fingerprint) {
             action = Some(KeyAction::Copied("fingerprint".into()));
@@ -822,14 +826,24 @@ fn result(
                     ui.horizontal_top(|ui| {
                         let width = ui.available_width() - 32.0;
                         ui.allocate_ui(vec2(width, 0.0), |ui| {
-                            ui.add(
-                                egui::Label::new(
-                                    RichText::new(&key.public_line)
-                                        .font(FontId::monospace(12.0))
-                                        .color(p.text_strong),
-                                )
-                                .wrap(),
-                            );
+                            if privacy::get(ui.ctx()).on {
+                                // Streamer mode: a token; *Copy* still copies it.
+                                let style = masked::Style {
+                                    font: FontId::monospace(12.0),
+                                    color: p.text_strong,
+                                    on_card: false,
+                                };
+                                masked::value(ui, &key.public_line, &style);
+                            } else {
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(&key.public_line)
+                                            .font(FontId::monospace(12.0))
+                                            .color(p.text_strong),
+                                    )
+                                    .wrap(),
+                                );
+                            }
                         });
                         let copy = Button::icon_only(icons::COPY, "Copy public key")
                             .ghost()

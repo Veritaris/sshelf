@@ -38,6 +38,8 @@ pub struct Row<'a> {
     pub corners: CornerRadius,
     /// The row sits on a raised card (a masked value's pill is lighter).
     pub on_card: bool,
+    /// Streamer mode masks the value (harmless ones, like `30`, stay).
+    pub sensitive: bool,
 }
 
 /// Shows the row; returns whether it was clicked (its value is copied).
@@ -82,7 +84,7 @@ pub fn row(ui: &mut Ui, row: Row) -> bool {
     let value_left = left + key_width;
     let room = (rect.right() - 8.0 - value_left - ICON_GAP - ICON).max(0.0);
     let font = FontId::monospace(13.0);
-    let masked = privacy::get(ui.ctx()).on;
+    let masked = privacy::get(ui.ctx()).on && row.sensitive;
     let (value_rect, cut) = if masked {
         // Streamer mode: the token (hold to peek); a click on the row still
         // copies the real value.
@@ -151,7 +153,11 @@ mod tests {
             .with_size([480.0, 60.0])
             .build_ui_state(
                 |ui, copies: &mut usize| {
-                    privacy::set(ui.ctx(), Privacy { on: true });
+                    let on = Privacy {
+                        on: true,
+                        ..Privacy::default()
+                    };
+                    privacy::set(ui.ctx(), on);
                     let p = &Palette::ONE_DARK;
                     let copied = row(
                         ui,
@@ -167,6 +173,7 @@ mod tests {
                             hover_outline: false,
                             corners: CornerRadius::same(8),
                             on_card: true,
+                            sensitive: true,
                         },
                     );
                     *copies += usize::from(copied);

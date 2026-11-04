@@ -9,6 +9,7 @@ use std::time::SystemTime;
 
 use sshelf_core::core::{AppData, Command, ConfigSnapshot, Core, Event, ParentWindow, SshInfo};
 use sshelf_core::paths::Paths;
+use sshelf_core::redact::Redactor;
 use sshelf_core::settings;
 use sshelf_core::supervisor::Snapshot;
 
@@ -92,6 +93,8 @@ pub struct SshelfApp {
     view: View,
     config: Option<Arc<ConfigSnapshot>>,
     data: Option<Arc<AppData>>,
+    /// Streamer mode's filter for this Core's data.
+    redactor: Arc<Redactor>,
     ssh: Option<Arc<SshInfo>>,
     tunnel_states: Option<Arc<Snapshot>>,
     hosts: HostsView,
@@ -177,6 +180,7 @@ impl SshelfApp {
             view: View::Hosts,
             config: None,
             data: None,
+            redactor: Arc::default(),
             ssh: None,
             tunnel_states: None,
             hosts: HostsView::default(),
@@ -294,8 +298,7 @@ impl SshelfApp {
                     self.config_loaded = Some(SystemTime::now());
                 }
                 Event::Data(data) => self.data = Some(data),
-                // Streamer mode isn't drawn yet (M11 step 2).
-                Event::Redactor(_) => {}
+                Event::Redactor(redactor) => self.redactor = redactor,
                 Event::Resolved {
                     alias,
                     generation,
@@ -454,6 +457,7 @@ impl eframe::App for SshelfApp {
             ctx,
             Privacy {
                 on: self.user_settings().is_some_and(|s| s.streamer_mode),
+                redactor: self.redactor.clone(),
             },
         );
         // sshelf was started again: show this window instead (also from the

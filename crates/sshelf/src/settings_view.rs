@@ -278,11 +278,13 @@ impl SettingsView {
                 let terminal = detected
                     .map(|t| t.describe())
                     .unwrap_or_else(|| "none found".to_string());
-                ui.label(
-                    RichText::new(format!("Detected terminal: {terminal}"))
-                        .size(12.0)
-                        .color(p.dim),
-                );
+                // Free text: the terminal's path is masked in streamer mode.
+                let style = masked::Style {
+                    font: FontId::proportional(12.0),
+                    color: p.dim,
+                    on_card: true,
+                };
+                masked::text(ui, &format!("Detected terminal: {terminal}"), &style, true);
                 if self.terminal_command != DEFAULT_TERMINAL_COMMAND {
                     ui.label(RichText::new("·").size(12.0).color(p.dim));
                     if button::link(ui, "Reset to default", 12.0).clicked() {
@@ -501,7 +503,8 @@ impl SettingsView {
                     ui.add(
                         TextField::new(&mut self.ssh_path)
                             .hint("path to an ssh binary (empty: detect)")
-                            .mono(),
+                            .mono()
+                            .prefilled(),
                     )
                     .labelled_by(label.id);
                 });
@@ -987,7 +990,11 @@ mod tests {
             .with_size([1100.0, 900.0])
             .build_ui_state(
                 move |ui, view: &mut SettingsView| {
-                    privacy::set(ui.ctx(), privacy::Privacy { on: true });
+                    let on = privacy::Privacy {
+                        on: true,
+                        ..Default::default()
+                    };
+                    privacy::set(ui.ctx(), on);
                     view.show(ui, Some(&data), None, Some(Path::new("/q7/config")), 0);
                 },
                 SettingsView::default(),

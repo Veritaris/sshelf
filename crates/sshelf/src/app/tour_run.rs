@@ -10,6 +10,7 @@ use std::time::SystemTime;
 
 use egui::{Context, Rect};
 use sshelf_core::core::{AppData, Command, ConfigSnapshot, Core, Event, SandboxOptions, SshInfo};
+use sshelf_core::redact::Redactor;
 use sshelf_core::settings::{CloseBehavior, Settings, TourState};
 use sshelf_core::supervisor::{GroupState, Snapshot, TunnelState};
 use sshelf_core::tunnels::{DEFAULT_BIND, Forward, ForwardKind, Tunnel};
@@ -41,6 +42,7 @@ pub(super) struct Session {
     core: Option<(Core, Receiver<Event>)>,
     config: Option<Arc<ConfigSnapshot>>,
     data: Option<Arc<AppData>>,
+    redactor: Arc<Redactor>,
     ssh: Option<Arc<SshInfo>>,
     tunnel_states: Option<Arc<Snapshot>>,
     config_loaded: Option<SystemTime>,
@@ -70,6 +72,7 @@ impl SshelfApp {
         std::mem::swap(&mut self.core, &mut other.core);
         std::mem::swap(&mut self.config, &mut other.config);
         std::mem::swap(&mut self.data, &mut other.data);
+        std::mem::swap(&mut self.redactor, &mut other.redactor);
         std::mem::swap(&mut self.ssh, &mut other.ssh);
         std::mem::swap(&mut self.tunnel_states, &mut other.tunnel_states);
         std::mem::swap(&mut self.config_loaded, &mut other.config_loaded);

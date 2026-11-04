@@ -10,6 +10,7 @@ use egui::{
 };
 use sshelf_core::core::{AppData, Command};
 use sshelf_core::hints;
+use sshelf_core::redact::DOTS;
 use sshelf_core::supervisor::{GroupState, Owner, Snapshot, TunnelState};
 use sshelf_core::tunnels::{Group, Tunnel};
 
@@ -23,8 +24,8 @@ use crate::widgets::button::Button;
 use crate::widgets::dropdown::{Choice, Dropdown};
 use crate::widgets::field::TextField;
 use crate::widgets::switch::{switch, switch_raised};
-use crate::widgets::{marks, nav, popup, text};
-use crate::{fonts, icons, motion};
+use crate::widgets::{marks, masked, nav, popup, text};
+use crate::{fonts, icons, motion, privacy};
 
 /// Width of the group list.
 const LIST_WIDTH: f32 = 340.0;
@@ -79,12 +80,17 @@ fn state_chip(state: GroupState, total: usize) -> (String, Color32, Color32) {
     }
 }
 
-/// "L 127.0.0.1:6443": a tunnel's first forward (and how many more).
-fn forwards_short(tunnel: &Tunnel) -> String {
+/// "L 127.0.0.1:6443": a tunnel's first forward (and how many more);
+/// "L •••••" when `masked`.
+fn forwards_short(tunnel: &Tunnel, masked: bool) -> String {
     let Some(first) = tunnel.forwards.first() else {
         return String::new();
     };
-    let mut text = format!("{:?} {}:{}", first.kind, first.bind, first.listen);
+    let mut text = if masked {
+        format!("{:?} {DOTS}", first.kind)
+    } else {
+        format!("{:?} {}:{}", first.kind, first.bind, first.listen)
+    };
     if tunnel.forwards.len() > 1 {
         text.push_str(&format!(" +{}", tunnel.forwards.len() - 1));
     }
@@ -545,9 +551,10 @@ impl GroupsView {
         x += flex + GAP;
         cell(x, &tunnel.host, FontId::monospace(13.0), p.dim, flex);
         x += flex + GAP;
+        // A clickable row: a masked forward shows as dots, not a token.
         cell(
             x,
-            &forwards_short(tunnel),
+            &forwards_short(tunnel, privacy::get(ui.ctx()).on),
             FontId::monospace(12.0),
             p.text,
             160.0,
@@ -583,14 +590,17 @@ impl GroupsView {
                 .show(ui, |ui| {
                     ui.set_width(ui.available_width());
                     ui.spacing_mut().item_spacing.y = 4.0;
-                    ui.add(egui::Label::new(RichText::new(reason).size(12.0).color(p.red)).wrap());
+                    let style = |color| masked::Style {
+                        font: FontId::proportional(12.0),
+                        color,
+                        on_card: true,
+                    };
+                    masked::text(ui, reason, &style(p.red), true);
                     if let Some(text) = reconnect_text(ui.ctx(), states.tunnels.get(&tunnel.id)) {
                         ui.label(RichText::new(text).size(12.0).color(p.yellow));
                     }
                     if let Some(hint) = hints::failure_hint(reason) {
-                        ui.add(
-                            egui::Label::new(RichText::new(hint).size(12.0).color(p.dim)).wrap(),
-                        );
+                        masked::text(ui, hint, &style(p.dim), true);
                     }
                 });
         }

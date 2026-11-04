@@ -14,8 +14,8 @@ use sshelf_core::hostkeys::KeyInfo;
 use crate::theme::{Palette, radius};
 use crate::widgets::button::{self, Button};
 use crate::widgets::field::TextField;
-use crate::widgets::marks;
-use crate::{fonts, icons};
+use crate::widgets::{marks, masked};
+use crate::{fonts, icons, privacy};
 
 const COMPARE_HINT: &str = "ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub";
 
@@ -109,17 +109,24 @@ impl HostKeyModals {
                     .show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         ui.spacing_mut().item_spacing.y = 10.0;
+                        let value = masked::Style {
+                            font: FontId::monospace(13.0),
+                            color: p.text,
+                            on_card: false,
+                        };
                         kv(ui, "Host", |ui| {
-                            ui.label(mono(&target.hostname, p.text));
+                            masked::value(ui, &target.hostname, &value);
                         });
                         kv(ui, "Port", |ui| {
-                            ui.label(mono(&target.port.to_string(), p.text));
+                            masked::value(ui, &target.port.to_string(), &value);
                             if target.port != 22 {
-                                ui.label(
-                                    RichText::new(format!("(stored as [host]:{})", target.port))
-                                        .size(12.0)
-                                        .color(p.dim),
-                                );
+                                let note = masked::Style {
+                                    font: FontId::proportional(12.0),
+                                    color: p.dim,
+                                    on_card: false,
+                                };
+                                let text = format!("(stored as [host]:{})", target.port);
+                                masked::text(ui, &text, &note, false);
                             }
                         });
                         for key in &unknown.keys {
@@ -155,10 +162,12 @@ impl HostKeyModals {
                         egui::vec2(room.max(100.0), 36.0),
                         Layout::left_to_right(Align::Center),
                         |ui| {
-                            ui.add(
-                                egui::Label::new(RichText::new(note).size(12.0).color(p.dim))
-                                    .wrap(),
-                            );
+                            let style = masked::Style {
+                                font: FontId::proportional(12.0),
+                                color: p.dim,
+                                on_card: true,
+                            };
+                            masked::text(ui, &note, &style, true);
                         },
                     );
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -243,7 +252,12 @@ impl HostKeyModals {
                                 " It is a jump host on the way to {final_host}."
                             ));
                         }
-                        ui.add(egui::Label::new(RichText::new(context).size(13.0)).wrap());
+                        let style = masked::Style {
+                            font: FontId::proportional(13.0),
+                            color: p.text,
+                            on_card: true,
+                        };
+                        masked::text(ui, &context, &style, true);
                         ui.columns(2, |columns| {
                             fingerprints(
                                 &mut columns[0],
@@ -348,8 +362,18 @@ fn dialog_frame(outline: Color32) -> Frame {
         .corner_radius(radius::LARGE)
 }
 
-/// A fingerprint in mono, wrapped anywhere (it has no spaces), never cut.
+/// A fingerprint in mono, wrapped anywhere (it has no spaces), never cut;
+/// a token in streamer mode.
 fn fingerprint(ui: &mut Ui, text: &str, color: Color32) {
+    if privacy::get(ui.ctx()).on {
+        let style = masked::Style {
+            font: FontId::monospace(12.0),
+            color,
+            on_card: false,
+        };
+        masked::value(ui, text, &style);
+        return;
+    }
     let mut job = egui::text::LayoutJob::single_section(
         text.to_string(),
         egui::TextFormat::simple(FontId::monospace(12.0), color),

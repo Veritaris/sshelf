@@ -12,12 +12,12 @@ use sshelf_core::core::{AppData, Command};
 use sshelf_core::settings::{CloseBehavior, Settings};
 use sshelf_core::supervisor::{Snapshot, TunnelState};
 
-use crate::fonts;
 use crate::theme::{Palette, radius};
 use crate::tour::targets::{self, Target};
 use crate::widgets::button::Button;
-use crate::widgets::marks;
 use crate::widgets::switch::switch;
+use crate::widgets::{marks, masked};
+use crate::{fonts, privacy};
 
 #[derive(Default)]
 pub struct CloseGuard {
@@ -317,11 +317,26 @@ fn tunnel_list(ui: &mut Ui, tunnels: &[(String, String)]) {
                         marks::dot(ui, p.green);
                         ui.label(RichText::new(name).size(13.0));
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            ui.label(
-                                RichText::new(port)
-                                    .font(FontId::monospace(11.0))
-                                    .color(p.dim),
-                            );
+                            // Streamer mode: ":" and the port as a token.
+                            let style = masked::Style {
+                                font: FontId::monospace(11.0),
+                                color: p.dim,
+                                on_card: true,
+                            };
+                            match port.strip_prefix(':') {
+                                Some(number) if privacy::get(ui.ctx()).on => {
+                                    masked::value(ui, number, &style);
+                                    ui.add_space(-6.0);
+                                    ui.label(RichText::new(":").font(style.font).color(p.dim));
+                                }
+                                _ => {
+                                    ui.label(
+                                        RichText::new(port)
+                                            .font(FontId::monospace(11.0))
+                                            .color(p.dim),
+                                    );
+                                }
+                            }
                         });
                     },
                 );
