@@ -62,11 +62,24 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
-      # What the release's .app needs, checked before a tag: the icon set
-      # converts to .icns and Info.plist is valid.
-      - name: Check the macOS bundle files
+      # What the release's .dmg needs, checked before a tag: the icon set
+      # converts to .icns, Info.plist is valid, and a .dmg builds with its
+      # window layout (here around the debug binary).
+      - name: Check the macOS bundle and .dmg
         if: matrix.platform.os == 'macos-15'
         run: |
-          cargo run -p sshelf --example iconset -- "$RUNNER_TEMP/sshelf.iconset"
-          iconutil -c icns "$RUNNER_TEMP/sshelf.iconset" -o "$RUNNER_TEMP/sshelf.icns"
+          t="$RUNNER_TEMP"
+          cargo run -p sshelf --example iconset -- "$t/sshelf.iconset"
+          iconutil -c icns "$t/sshelf.iconset" -o "$t/sshelf.icns"
           plutil -lint crates/sshelf/assets/macos/Info.plist
+          app="$t/stage/sshelf.app"
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+          cp target/debug/sshelf "$app/Contents/MacOS/"
+          cp "$t/sshelf.icns" "$app/Contents/Resources/"
+          sed "s/@VERSION@/0.0.0/g" crates/sshelf/assets/macos/Info.plist > "$app/Contents/Info.plist"
+          cargo run -p sshelf --example dmg_background -- "$t/bg"
+          tiffutil -cathidpicheck "$t/bg/background.png" "$t/bg/background@2x.png" -out "$t/bg/background.tiff"
+          python3 -m venv "$t/dmgbuild"
+          "$t/dmgbuild/bin/pip" install --quiet dmgbuild
+          "$t/dmgbuild/bin/dmgbuild" -s crates/sshelf/assets/macos/dmg-settings.py \
+            -D app="$app" -D background="$t/bg/background.tiff" "sshelf check" "$t/check.dmg"

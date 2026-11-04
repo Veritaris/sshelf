@@ -62,9 +62,11 @@ jobs:
           mkdir "$dirname"
 
           if [ "${{ matrix.platform.os }}" = "macos-15" ]; then
-            # sshelf.app with the full icon set, in a .dmg with an
-            # Applications shortcut. Signed ad hoc only (no Developer ID):
-            # Apple Silicon needs a consistent bundle signature.
+            # sshelf.app with the full icon set, in a .dmg whose window shows
+            # it beside an Applications shortcut over a background (dmgbuild
+            # writes the layout itself; no Finder scripting). Signed ad hoc
+            # only (no Developer ID): Apple Silicon needs a consistent bundle
+            # signature.
             cargo run -p sshelf --example iconset -- sshelf.iconset
             iconutil -c icns sshelf.iconset -o sshelf.icns
             app="$dirname/sshelf.app"
@@ -73,8 +75,13 @@ jobs:
             cp sshelf.icns "$app/Contents/Resources/"
             sed "s/@VERSION@/${VERSION}/g" crates/sshelf/assets/macos/Info.plist > "$app/Contents/Info.plist"
             codesign --force --deep --sign - "$app"
-            ln -s /Applications "$dirname/Applications"
-            hdiutil create -volname "sshelf ${VERSION}" -srcfolder "$dirname" -ov -format UDZO "$dirname.dmg"
+            cargo run -p sshelf --example dmg_background -- dmg-background
+            tiffutil -cathidpicheck dmg-background/background.png dmg-background/background@2x.png -out dmg-background/background.tiff
+            python3 -m venv "$RUNNER_TEMP/dmgbuild"
+            "$RUNNER_TEMP/dmgbuild/bin/pip" install --quiet dmgbuild
+            "$RUNNER_TEMP/dmgbuild/bin/dmgbuild" -s crates/sshelf/assets/macos/dmg-settings.py \
+              -D app="$app" -D background="$PWD/dmg-background/background.tiff" \
+              "sshelf ${VERSION}" "$dirname.dmg"
             echo "ASSET=$dirname.dmg" >> "$GITHUB_ENV"
           elif [ "${{ matrix.platform.os }}" = "windows-latest" ]; then
             cp "target/${{ matrix.platform.target }}/release/${bin}.exe" "$dirname/"
