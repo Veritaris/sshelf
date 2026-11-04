@@ -17,6 +17,7 @@ mod icons;
 mod key_dialog;
 mod motion;
 mod orphans_window;
+mod privacy;
 mod settings_view;
 mod sidebar;
 mod status_bar;

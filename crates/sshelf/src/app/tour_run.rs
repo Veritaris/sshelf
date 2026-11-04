@@ -87,6 +87,16 @@ impl SshelfApp {
         self.tour.is_some()
     }
 
+    /// The user's own settings, also while the tour shows the sandbox's
+    /// (streamer mode stays as the user set it during the tour).
+    pub(super) fn user_settings(&self) -> Option<&Settings> {
+        let data = match &self.tour {
+            Some(run) => run.user.data.as_ref(),
+            None => self.data.as_ref(),
+        };
+        data.map(|d| &d.settings)
+    }
+
     /// Starts the tour at `step` (0, or a chapter's first step): builds the
     /// sandbox, starts its Core and puts the user's session aside.
     pub(super) fn start_tour(&mut self, ctx: &Context, step: usize) {

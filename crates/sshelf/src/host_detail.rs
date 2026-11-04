@@ -28,7 +28,7 @@ use crate::tunnels_view::state_label;
 use crate::widgets::button::{self, Button};
 use crate::widgets::color::{self, Picking};
 use crate::widgets::{copy, marks, nav, popup, text};
-use crate::{fonts, icons, motion, util};
+use crate::{fonts, icons, motion, privacy, util};
 
 /// `ssh -G` keys shown first, in this order.
 const IMPORTANT: &[&str] = &[
@@ -561,9 +561,10 @@ impl HostDetail {
                             hover_fill: p.separator,
                             hover_outline: false,
                             corners: CornerRadius::same(radius::CONTROL),
+                            on_card: true,
                         };
                         if copy::row(ui, row) {
-                            self.notices.push(format!("Copied {label}"));
+                            self.notices.push(privacy::get(ui.ctx()).copied(label));
                         }
                     }
                 }
@@ -834,9 +835,10 @@ impl HostDetail {
                                 hover_fill: p.surface,
                                 hover_outline: true,
                                 corners: CornerRadius::same(radius::ROW),
+                                on_card: false,
                             };
                             if copy::row(ui, row) {
-                                notices.push(format!("Copied {key}"));
+                                notices.push(privacy::get(ui.ctx()).copied(key));
                             }
                         }
                     });

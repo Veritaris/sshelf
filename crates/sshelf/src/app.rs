@@ -19,6 +19,7 @@ use crate::hostkey_modal::HostKeyModals;
 use crate::hosts_view::{HostsView, Navigate};
 use crate::icon::{self, Status};
 use crate::orphans_window::{self, OrphansWindow};
+use crate::privacy::{self, Privacy};
 use crate::settings_view::SettingsView;
 use crate::sidebar::{self, View};
 use crate::theme::{self, Palette};
@@ -427,6 +428,13 @@ impl eframe::App for SshelfApp {
     /// the tray are handled here, the drawing in [`Self::ui`].
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.apply_events(ctx);
+        // Streamer mode for this frame's drawing, from the user's settings.
+        privacy::set(
+            ctx,
+            Privacy {
+                on: self.user_settings().is_some_and(|s| s.streamer_mode),
+            },
+        );
         // sshelf was started again: show this window instead (also from the
         // tray, where only `logic` runs).
         if self.startup.show.as_ref().is_some_and(|s| s.take()) {

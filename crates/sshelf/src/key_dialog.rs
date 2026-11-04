@@ -767,6 +767,7 @@ fn result(
             hover_fill: p.surface,
             hover_outline: false,
             corners: egui::CornerRadius::same(radius::CONTROL),
+            on_card: false,
         };
         if copy::row(ui, fingerprint) {
             action = Some(KeyAction::Copied("fingerprint".into()));

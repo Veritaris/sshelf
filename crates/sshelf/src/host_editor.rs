@@ -30,7 +30,7 @@ use crate::widgets::button::Button;
 use crate::widgets::dropdown::{Choice, Dropdown};
 use crate::widgets::field::TextField;
 use crate::widgets::{marks, nav, popup};
-use crate::{fonts, icons, util};
+use crate::{fonts, icons, privacy, util};
 
 /// How a form field edits its directive.
 #[derive(Clone, Copy)]
@@ -865,7 +865,9 @@ impl HostEditor {
                     session.use_key(&identity_file);
                 }
             }
-            Some(KeyAction::Copied(what)) => self.status = Some((false, format!("Copied {what}"))),
+            Some(KeyAction::Copied(what)) => {
+                self.status = Some((false, privacy::get(ctx).copied(&what)));
+            }
             Some(KeyAction::OpenSettings) => self.open_settings = true,
             None => {}
         }
