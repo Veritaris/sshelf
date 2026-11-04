@@ -130,7 +130,10 @@ pub fn show(ui: &mut Ui, view: &mut View, rail: &Rail) -> bool {
         p.selection,
         radius::CONTROL,
     );
-    for (item, rect) in ITEMS.iter().zip(rects) {
+    // The hover background slides between items (under the icons).
+    let hover_slot = ui.painter().add(egui::Shape::Noop);
+    let mut hovered = None;
+    for (index, (item, rect)) in ITEMS.iter().zip(rects).enumerate() {
         let mut tip = item.name.to_string();
         if item.view == View::Tunnels && rail.running > 0 {
             tip.push_str(&format!(" · {} running", rail.running));
@@ -146,6 +149,9 @@ pub fn show(ui: &mut Ui, view: &mut View, rail: &Rail) -> bool {
                 rail_item(ui, rect, item, &tip, item.view == *view)
             })
             .inner;
+        if response.hovered() && item.view != *view {
+            hovered = Some((index, rect));
+        }
         if item.view == View::Tunnels && rail.running > 0 {
             // The activity dot: 8 px, 6 px in from the top-right corner.
             let center = rect.right_top() + vec2(-10.0, 10.0);
@@ -160,26 +166,18 @@ pub fn show(ui: &mut Ui, view: &mut View, rail: &Rail) -> bool {
             *view = item.view;
         }
     }
+    nav::hover_highlight(ui, Id::unique("rail_hover"), hover_slot, hovered, p.surface);
     !rail.orphans.is_empty() && orphan_button(ui, at(settings.top() - GAP - ITEM), rail.orphans)
 }
 
-/// One view button: a hover background that fades in, an icon that turns
-/// Magenta when selected (the background is the sliding highlight).
+/// One view button: an icon that turns Magenta when selected (the
+/// backgrounds are the sliding selection and hover highlights).
 fn rail_item(ui: &mut Ui, rect: Rect, item: &Item, tip: &str, selected: bool) -> Response {
     let p = &Palette::ONE_DARK;
     let response = ui.interact(rect, Id::unique(("rail", item.name)), Sense::click());
     let enabled = response.enabled();
     response.widget_info(|| WidgetInfo::selected(Role::Button, enabled, selected, item.name));
     let ctx = ui.ctx();
-    let hover = motion::fade(
-        ctx,
-        response.id.with("hover"),
-        response.hovered() && !selected,
-        timing::HOVER,
-        motion::ease_out,
-    );
-    ui.painter()
-        .rect_filled(rect, radius::CONTROL, p.surface.gamma_multiply(hover));
     let on = motion::fade(
         ctx,
         response.id.with("selected"),

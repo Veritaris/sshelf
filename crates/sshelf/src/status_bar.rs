@@ -14,11 +14,19 @@ use sshelf_core::supervisor::{Snapshot, TunnelState};
 use crate::icons;
 use crate::theme::Palette;
 use crate::tour::targets::{self, Target};
+use crate::widgets::button::Button;
 use crate::widgets::marks;
 use crate::window;
 
 /// Height of the bar.
 pub const HEIGHT: f32 = 28.0;
+/// Height while it shows an error: room for the square *Dismiss* button.
+const ERROR_HEIGHT: f32 = 36.0;
+
+/// The bar's height, taller with an error.
+pub fn height(error: bool) -> f32 {
+    if error { ERROR_HEIGHT } else { HEIGHT }
+}
 
 /// What the bar reports.
 pub struct Status<'a> {
@@ -84,14 +92,20 @@ pub fn show(ui: &mut Ui, status: &Status, error: &mut Option<String>) {
         p.bg_dark
     };
     ui.painter().rect_filled(rect, corners, fill);
-    let inner = rect.shrink2(vec2(16.0, 0.0));
+    // With an error, the square button sits 4 px from the right edge.
+    let inner = if error.is_some() {
+        rect.shrink2(vec2(16.0, 0.0)).with_max_x(rect.right() - 4.0)
+    } else {
+        rect.shrink2(vec2(16.0, 0.0))
+    };
     let layout = Layout::left_to_right(Align::Center);
     ui.scope_builder(UiBuilder::new().max_rect(inner).layout(layout), |ui| {
         if let Some(text) = error.clone() {
             ui.spacing_mut().item_spacing.x = 8.0;
             icons::show(ui, icons::CIRCLE_X, icons::INLINE, p.red);
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if icons::button(ui, icons::X, "Dismiss").clicked() {
+                let dismiss = Button::icon_only(icons::X, "Dismiss").small().ghost();
+                if ui.add(dismiss).clicked() {
                     *error = None;
                 }
                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {

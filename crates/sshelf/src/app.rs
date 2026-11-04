@@ -326,7 +326,7 @@ impl SshelfApp {
         };
         egui::Panel::bottom("status")
             .resizable(false)
-            .exact_size(status_bar::HEIGHT)
+            .exact_size(status_bar::height(self.error.is_some()))
             .show_separator_line(false)
             .frame(egui::Frame::NONE)
             .show(ui, |ui| status_bar::show(ui, &status, &mut self.error));
