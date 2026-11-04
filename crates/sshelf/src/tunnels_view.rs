@@ -1733,6 +1733,19 @@ mod tests {
         harness.get_by_label("Failed · key not accepted");
         harness.get_by_label_contains("ssh-add");
         harness.get_by_label_contains("no keys loaded");
+        // The health banner's fixes, for the tunnel's host.
+        harness.get_by_label("Generate key…").click();
+        harness.step();
+        assert_eq!(
+            harness.state_mut().0.take_key_fix(),
+            Some(KeyFix::GenerateKey("bastion".into()))
+        );
+        harness.get_by_label("Load key into agent").click();
+        harness.step();
+        assert_eq!(
+            harness.state_mut().0.take_key_fix(),
+            Some(KeyFix::LoadKey("bastion".into()))
+        );
     }
 
     #[test]
