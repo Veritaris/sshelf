@@ -8,6 +8,8 @@ description = "Visual layer over your ~/.ssh/config: hosts, effective config, tu
 [dependencies]
 sshconf = { path = "../sshconf" }
 sshelf-core = { path = "../sshelf-core" }
+# The onboarding tour's ssh: `sshelf --fake-ssh …` runs it (SPEC.md §8).
+fake-ssh = { path = "../fake-ssh" }
 # Icons come from the bundled Lucide font (src/fonts.rs), so egui's opt-in
 # emoji fonts (`monochrome_emoji_fonts`) stay off.
 egui = { version = "0.37.0" }

@@ -3726,6 +3726,7 @@ dependencies = [
  "eframe",
  "egui",
  "egui_kittest",
+ "fake-ssh",
  "raw-window-handle",
  "sshconf",
  "sshelf-core",
