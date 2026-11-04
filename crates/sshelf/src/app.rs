@@ -148,6 +148,8 @@ impl SshelfApp {
                 Event::KeyGenerated { id, result } => {
                     self.hosts.editor.on_key_generated(id, result);
                 }
+                Event::Keys(keys) => self.hosts.editor.on_keys(keys),
+                Event::KeyFilePicked { id, path } => self.hosts.editor.on_key_file(id, path),
                 Event::Error(message) => self.error = Some(message),
                 Event::Tunnels(states) => self.tunnel_states = Some(states),
                 // A start from the tray may need an answer: show the window.

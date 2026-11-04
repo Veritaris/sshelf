@@ -137,11 +137,9 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
             .data(|d| d.get_temp::<State>(self.id))
             .unwrap_or_default();
         let trigger = self.trigger(ui, state.open);
-        let selected_index = self
-            .choices
-            .iter()
-            .position(|c| c.value == selected)
-            .unwrap_or(0);
+        // `None`: no option is the current one (an "add" menu), so none
+        // gets the check.
+        let selected_index = self.choices.iter().position(|c| c.value == selected);
         let mut picked = None;
 
         let keyboard_open = trigger.has_focus()
@@ -152,7 +150,7 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
             });
         if (trigger.clicked() || keyboard_open) && !state.open {
             state.open = true;
-            state.highlight = selected_index;
+            state.highlight = selected_index.unwrap_or(0);
         } else if trigger.clicked() {
             state.open = false;
         }
@@ -337,7 +335,7 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
         &self,
         ui: &mut Ui,
         state: &mut State,
-        selected: usize,
+        selected: Option<usize>,
         max_height: f32,
     ) -> Option<usize> {
         let p = &Palette::ONE_DARK;
@@ -359,7 +357,7 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
                     };
                     let (rect, response) =
                         ui.allocate_exact_size(vec2(ui.available_width(), row), sense);
-                    let is_selected = index == selected;
+                    let is_selected = Some(index) == selected;
                     response.widget_info(|| {
                         WidgetInfo::selected(
                             Role::ListBoxOption,

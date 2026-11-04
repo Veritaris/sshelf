@@ -19,7 +19,7 @@ use crate::config_edit::{self, Change, ConfigWriter, Edit, Problem};
 use crate::health::{self, Health, HealthReport, HealthSnapshot};
 use crate::history::History;
 use crate::hostkeys::{self, ChangedKey, Keygen, KnownHostsWriter, UnknownKey};
-use crate::keygen::{self, GeneratedKey, KeyRequest};
+use crate::keygen::{self, FoundKey, GeneratedKey, KeyRequest};
 use crate::metadata::{HostMeta, HostsFile};
 use crate::orphans::{self, GroupOrphan, Orphan, TunnelOrphan};
 use crate::paths::Paths;
@@ -143,6 +143,14 @@ pub enum Command {
     /// Work out every jump host on the way to an alias (`ssh -G` per hop);
     /// answered by [`Event::Route`].
     ResolveRoute(String),
+    /// List the key pairs in `~/.ssh` (their `.pub` files only); answered by
+    /// [`Event::Keys`].
+    FindKeys,
+    /// Open the system file dialog to choose a key file; answered by
+    /// [`Event::KeyFilePicked`] under `id`.
+    PickKeyFile {
+        id: u64,
+    },
     Shutdown,
 }
 
@@ -222,6 +230,14 @@ pub enum Event {
     KeyGenerated {
         id: u64,
         result: Result<GeneratedKey, String>,
+    },
+    /// The key pairs in `~/.ssh` ([`Command::FindKeys`]).
+    Keys(Arc<Vec<FoundKey>>),
+    /// The file chosen for [`Command::PickKeyFile`] `id`; `None` when the
+    /// dialog was cancelled.
+    KeyFilePicked {
+        id: u64,
+        path: Option<PathBuf>,
     },
     /// Something the user asked for succeeded (e.g. "Settings saved").
     Notice(String),
@@ -680,6 +696,26 @@ impl Worker {
                         )),
                         Err(e) => self.error(format!("cannot generate the key: {e}")),
                     }
+                }
+                Command::FindKeys => {
+                    let (dir, emitter) = (self.paths.ssh_dir.clone(), self.emitter.clone());
+                    thread::spawn(move || {
+                        emitter.emit(Event::Keys(Arc::new(keygen::find_keys(&dir))));
+                    });
+                }
+                Command::PickKeyFile { id } => {
+                    let (dir, emitter) = (self.paths.ssh_dir.clone(), self.emitter.clone());
+                    // The dialog stays open as long as the user likes: off
+                    // the core thread. Async, so on macOS it runs on the
+                    // main thread's event loop.
+                    thread::spawn(move || {
+                        let dialog = rfd::AsyncFileDialog::new()
+                            .set_title("Choose a key file")
+                            .set_directory(&dir)
+                            .pick_file();
+                        let path = pollster::block_on(dialog).map(|f| f.path().to_path_buf());
+                        emitter.emit(Event::KeyFilePicked { id, path });
+                    });
                 }
                 Command::LoadPublicKey { id, path } => {
                     let result = keygen::load_public(&path);

@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use egui::{
@@ -18,7 +19,7 @@ use sshconf::diff::{self, DiffOp};
 use sshconf::{ConfigFile, FileId, LineKind, edit};
 use sshelf_core::config_edit::{Change, Edit, Problem};
 use sshelf_core::core::{AppData, Command, ConfigSnapshot, SshInfo};
-use sshelf_core::keygen::GeneratedKey;
+use sshelf_core::keygen::{FoundKey, GeneratedKey};
 use sshelf_core::rename;
 use sshelf_core::supervisor::{Snapshot, TunnelState};
 
@@ -211,6 +212,14 @@ struct Session {
     forwards: HashMap<(usize, usize), Forward>,
     /// A new host: the files it may go to (SPEC.md §4); `None` when editing.
     new: Option<Vec<PathBuf>>,
+    /// The ssh directory (the main config's), for `~/.ssh/…` key paths.
+    ssh_dir: PathBuf,
+    /// The key pairs found there, once core has listed them.
+    keys: Option<Arc<Vec<FoundKey>>>,
+    /// *Browse…* was picked: the editor asks core for the file dialog.
+    browse: bool,
+    /// The file dialog's request while it is open.
+    picking: Option<u64>,
 }
 
 impl Session {
@@ -242,6 +251,10 @@ impl Session {
             focus: None,
             forwards: HashMap::new(),
             new: Some(targets),
+            ssh_dir: ssh_dir(snapshot),
+            keys: None,
+            browse: false,
+            picking: None,
         };
         session.target(snapshot, file);
         Ok(session)
@@ -310,7 +323,22 @@ impl Session {
             focus: None,
             forwards: HashMap::new(),
             new: None,
+            ssh_dir: ssh_dir(snapshot),
+            keys: None,
+            browse: false,
+            picking: None,
         })
+    }
+
+    /// A key file chosen with *Browse…*: one more IdentityFile.
+    fn add_identity_file(&mut self, path: &Path) {
+        let value = tilde(path, &self.ssh_dir);
+        let mut files = edit::values(&self.text, "IdentityFile");
+        if !files.iter().any(|f| f.first() == Some(&value)) {
+            files.push(vec![value]);
+            self.text = edit::set_all(&self.text, "IdentityFile", &files);
+            self.focus = None;
+        }
     }
 
     fn dirty(&self) -> bool {
@@ -436,6 +464,15 @@ impl Session {
     }
 }
 
+/// The directory of the main config: where keys are looked for.
+fn ssh_dir(snapshot: &ConfigSnapshot) -> PathBuf {
+    snapshot
+        .path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_default()
+}
+
 /// The rename dialog for one alias.
 struct RenameDialog {
     alias: String,
@@ -454,6 +491,10 @@ pub struct HostEditor {
     /// A new host that was saved, for the host list to select.
     created: Option<String>,
     keys: KeyDialog,
+    /// The key pairs in `~/.ssh`, and whether they were asked for since an
+    /// editor opened (a new key may have appeared since).
+    found_keys: Option<Arc<Vec<FoundKey>>>,
+    keys_requested: bool,
 }
 
 impl HostEditor {
@@ -479,7 +520,25 @@ impl HostEditor {
         self.session = None;
     }
 
+    /// The key pairs core found in `~/.ssh`.
+    pub fn on_keys(&mut self, keys: Arc<Vec<FoundKey>>) {
+        self.found_keys = Some(keys);
+    }
+
+    /// The file chosen with *Browse…* (`None`: the dialog was cancelled).
+    pub fn on_key_file(&mut self, id: u64, path: Option<PathBuf>) {
+        if let Some(session) = &mut self.session
+            && session.picking == Some(id)
+        {
+            session.picking = None;
+            if let Some(path) = path {
+                session.add_identity_file(&path);
+            }
+        }
+    }
+
     pub fn open(&mut self, snapshot: &ConfigSnapshot, alias: &str) {
+        self.keys_requested = false;
         match Session::open(snapshot, alias) {
             Ok(session) => self.session = Some(session),
             Err(e) => self.status = Some((true, format!("cannot edit {alias}: {e}"))),
@@ -488,6 +547,7 @@ impl HostEditor {
 
     /// Starts a new host (SPEC.md §4: it goes before the first catch-all block).
     pub fn open_new(&mut self, snapshot: &ConfigSnapshot) {
+        self.keys_requested = false;
         match Session::new_host(snapshot) {
             Ok(session) => self.session = Some(session),
             Err(e) => self.status = Some((true, format!("cannot add a host: {e}"))),
@@ -635,6 +695,12 @@ impl HostEditor {
             return commands;
         };
         let name_problem = session.name_problem(snapshot);
+        // The keys in `~/.ssh` for "Add IdentityFile", listed by core.
+        if !self.keys_requested {
+            self.keys_requested = true;
+            commands.push(Command::FindKeys);
+        }
+        session.keys = self.found_keys.clone();
 
         // The footer first, so the body gets the space above it.
         egui::Panel::bottom("host_editor_footer")
@@ -698,6 +764,10 @@ impl HostEditor {
                     aside(ui, session, snapshot, name_problem.as_deref(), inset);
                 }
             });
+        if std::mem::take(&mut session.browse) {
+            session.picking = Some(id);
+            commands.push(Command::PickKeyFile { id });
+        }
         if !commands.is_empty() {
             self.next_id = id;
         }
@@ -718,15 +788,12 @@ impl HostEditor {
     /// Opens the "Generate key" window for `alias` (also from the host
     /// detail's health banner, without an editor).
     pub fn open_keys(&mut self, snapshot: &ConfigSnapshot, alias: &str) {
-        let ssh_dir = snapshot
-            .path
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_default();
-        self.keys.open(alias, &ssh_dir);
+        self.keys.open(alias, &ssh_dir(snapshot));
     }
 
     pub fn on_key_generated(&mut self, id: u64, result: Result<GeneratedKey, String>) {
+        // A new key may be in `~/.ssh` now.
+        self.keys_requested = false;
         self.keys.on_generated(id, result);
     }
 
@@ -1310,17 +1377,95 @@ fn list(
             }
         });
     }
-    let add = Button::new(format!("Add {keyword}"))
-        .icon(icons::PLUS)
-        .small();
-    if ui.add(add).clicked() {
+    if let Some(added) = add_key_menu(ui, session, keyword, example, &rows) {
         let mut all = rows.clone();
-        all.push(example.to_string());
+        all.push(added);
         new_rows = Some(all);
     }
     if let Some(all) = new_rows {
         let args: Vec<Vec<String>> = all.iter().filter_map(|r| words(r)).collect();
         session.text = edit::set_all(&session.text, keyword, &args);
+    }
+}
+
+/// "Add IdentityFile" as a menu: the key pairs found in `~/.ssh` (name,
+/// type and comment, from their `.pub` files), "Type a path", and
+/// *Browse…* for a key anywhere (the system file dialog, through core).
+/// Returns the value to add, if one was picked.
+fn add_key_menu(
+    ui: &mut Ui,
+    session: &mut Session,
+    keyword: &str,
+    example: &str,
+    rows: &[String],
+) -> Option<String> {
+    const TYPE: usize = usize::MAX - 1;
+    const BROWSE: usize = usize::MAX;
+    const NONE: usize = usize::MAX - 2;
+    let keys = session.keys.clone().unwrap_or_default();
+    let mut choices: Vec<Choice<usize>> = keys
+        .iter()
+        .enumerate()
+        .map(|(i, key)| {
+            let shown = tilde(&key.path, &session.ssh_dir);
+            let used = rows.iter().any(|r| *r == shown || Path::new(r) == key.path);
+            let detail = if key.comment.is_empty() {
+                key.kind.clone()
+            } else {
+                format!("{} · {}", key.kind, key.comment)
+            };
+            Choice {
+                value: i,
+                label: shown,
+                detail: Some(detail),
+                disabled: used.then(|| "already in this host".into()),
+            }
+        })
+        .collect();
+    choices.push(Choice {
+        value: TYPE,
+        label: "Type a path".into(),
+        detail: Some(format!("adds {example} to edit")),
+        disabled: None,
+    });
+    choices.push(Choice {
+        value: BROWSE,
+        label: "Browse…".into(),
+        detail: Some("choose a key file anywhere".into()),
+        disabled: session
+            .picking
+            .is_some()
+            .then(|| "the file dialog is open".into()),
+    });
+    let name = format!("Add {keyword}");
+    let trigger = if session.picking.is_some() {
+        "Choosing a file…".to_string()
+    } else {
+        name.clone()
+    };
+    match Dropdown::with_choices("add_identity_file", &name, choices, trigger).show(ui, NONE) {
+        Some(TYPE) => Some(example.to_string()),
+        Some(BROWSE) => {
+            session.browse = true;
+            None
+        }
+        Some(i) => keys.get(i).map(|k| tilde(&k.path, &session.ssh_dir)),
+        None => None,
+    }
+}
+
+/// `path` as `~/.ssh/…` when it is in the ssh directory (as keys are
+/// written in configs), otherwise as it is.
+fn tilde(path: &Path, ssh_dir: &Path) -> String {
+    match path.strip_prefix(ssh_dir) {
+        Ok(rest) if !ssh_dir.as_os_str().is_empty() => {
+            let rest: Vec<String> = rest
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                .collect();
+            format!("~/.ssh/{}", rest.join("/"))
+        }
+        _ => path.display().to_string(),
     }
 }
 
@@ -2374,6 +2519,55 @@ mod tests {
             );
             assert_eq!(problems.top() > form.bottom(), !beside, "{width}");
         }
+    }
+
+    #[test]
+    fn identity_files_come_from_the_keys_found_or_the_file_dialog() {
+        let mut harness = harness(CONFIG);
+        steps(&mut harness);
+        // Opening the editor asks core for the keys in `~/.ssh`.
+        assert!(harness.state().commands.contains(&Command::FindKeys));
+        let ssh_dir = harness
+            .state()
+            .snapshot
+            .path
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        harness.state_mut().editor.on_keys(Arc::new(vec![FoundKey {
+            path: ssh_dir.join("id_web"),
+            kind: "ssh-ed25519".into(),
+            comment: "me@laptop".into(),
+        }]));
+        steps(&mut harness);
+        harness.get_by_label("Add IdentityFile").click();
+        steps(&mut harness);
+        harness.get_by_label("~/.ssh/id_web").click();
+        steps(&mut harness);
+        assert!(text(&harness).contains("    IdentityFile ~/.ssh/id_web"));
+
+        // Used already: it can't be added twice.
+        harness.get_by_label("Add IdentityFile").click();
+        steps(&mut harness);
+        assert!(
+            harness
+                .get_by_label("~/.ssh/id_web")
+                .accesskit_node()
+                .is_disabled()
+        );
+        // Browse… asks core for the system dialog; its answer is added.
+        harness.get_by_label("Browse…").click();
+        steps(&mut harness);
+        let Some(Command::PickKeyFile { id }) = harness.state().commands.last().cloned() else {
+            panic!("no file dialog asked for");
+        };
+        let elsewhere = PathBuf::from("keys").join("work_key");
+        harness
+            .state_mut()
+            .editor
+            .on_key_file(id, Some(elsewhere.clone()));
+        steps(&mut harness);
+        assert!(text(&harness).contains(&format!("    IdentityFile {}", elsewhere.display())));
     }
 
     #[test]

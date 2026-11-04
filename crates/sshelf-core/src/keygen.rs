@@ -178,6 +178,48 @@ pub fn load_public(path: &Path) -> Result<GeneratedKey, String> {
     })
 }
 
+/// A key pair found in `~/.ssh`, for picking an IdentityFile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FoundKey {
+    /// The private key file (only its existence is checked).
+    pub path: PathBuf,
+    /// E.g. `ssh-ed25519`.
+    pub kind: String,
+    pub comment: String,
+}
+
+/// Key pairs in `dir`: every `<name>.pub` with a `<name>` next to it, by
+/// name. Only the public files are read, never a private key (SPEC.md §1).
+pub fn find_keys(dir: &Path) -> Vec<FoundKey> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut keys: Vec<FoundKey> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let public = entry.path();
+            let name = public
+                .file_name()?
+                .to_str()?
+                .strip_suffix(".pub")?
+                .to_string();
+            let path = public.with_file_name(name);
+            if !path.is_file() {
+                return None;
+            }
+            let text = fs::read_to_string(&public).ok()?;
+            let key = ssh_key::PublicKey::from_openssh(text.trim()).ok()?;
+            Some(FoundKey {
+                path,
+                kind: key.algorithm().as_str().to_string(),
+                comment: key.comment().to_string(),
+            })
+        })
+        .collect();
+    keys.sort_by(|a, b| a.path.cmp(&b.path));
+    keys
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyRequest {
     pub algorithm: KeyAlgorithm,
@@ -532,6 +574,29 @@ mod tests {
     }
 
     const KEY: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIO/867Gn6gWVC9L/2TosddbUBIfUwN1FA755XCQA20kG web (sshelf)";
+
+    #[test]
+    fn keys_are_found_by_their_public_halves() {
+        let dir = tempfile::tempdir().unwrap();
+        // A pair; its private file is not a key and is never read.
+        fs::write(dir.path().join("id_web"), "not a key").unwrap();
+        fs::write(dir.path().join("id_web.pub"), format!("{KEY}\n")).unwrap();
+        // A public key without its private half, a broken one, other files.
+        fs::write(dir.path().join("orphan.pub"), format!("{KEY}\n")).unwrap();
+        fs::write(dir.path().join("broken"), "x").unwrap();
+        fs::write(dir.path().join("broken.pub"), "not a key").unwrap();
+        fs::write(dir.path().join("config"), "Host x\n").unwrap();
+        let keys = find_keys(dir.path());
+        assert_eq!(
+            keys,
+            [FoundKey {
+                path: dir.path().join("id_web"),
+                kind: "ssh-ed25519".into(),
+                comment: "web (sshelf)".into(),
+            }]
+        );
+        assert!(find_keys(&dir.path().join("missing")).is_empty());
+    }
 
     #[test]
     fn the_install_command_carries_the_key_safely() {

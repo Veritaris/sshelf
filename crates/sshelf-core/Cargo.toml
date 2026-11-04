@@ -11,6 +11,11 @@ directories = { version = "6.0.0" }
 humantime = { version = "2.4.0" }
 # 9.x is still a release candidate.
 notify = { version = "8.2.1" }
+# The *Browse…* key file dialog (SPEC.md §10): native on Windows / macOS,
+# the xdg desktop portal on Linux (no GTK needed). Async, so macOS runs it
+# on the main thread's event loop; `pollster` waits for it on a worker.
+pollster = { version = "1.0.1" }
+rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] }
 serde = { version = "1.0.229", features = ["derive"] }
 # Key generation (SPEC.md §11): standard encrypted OpenSSH key files.
 # 0.7 is still a release candidate.
