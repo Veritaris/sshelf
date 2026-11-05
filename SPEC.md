@@ -565,6 +565,7 @@ A privacy switch for screen sharing and streaming: while it is on, sshelf masks 
   - **Cursor and tooltip:** the cursor is `Grab` on a token and `Grabbing` while held. After 400 ms of hover, the standard tooltip says "Hold to reveal" (it hides while held).
   - **Copy:** copy buttons and copy-on-hover rows copy the real value without showing it; the toast says "Copied HostName · not shown in streamer mode".
   - **Tray:** tokens in the tray menu can't be peeked. The native fallback menu shows "•••••".
+  - **Where peeking isn't possible:** clickable rows (host list and cards, tunnel and group rows) and tooltips that only take plain text show "•••••", or "host N" / `tag` for hidden names, without peeking: a press on a row selects it.
 - **Free-text filter:** one function used everywhere text from data is drawn: labels, tooltips, logs, toasts, the status bar, the tray menu and tooltip, the window title.
   - **What it knows:** every HostName, User, ProxyJump / ProxyCommand host, IdentityFile (and other file) path, forward bind address and target in the loaded config and tunnels; the home folder path; the local login (`ssh -G` reports it as `user` when the config sets none); and shapes: anything like an IPv4 or IPv6 address, paths under `~` or the home folder, key fingerprints (`SHA256:…`, the MD5 colon form) and public-key blobs (`AAAA…`), matched by pattern rather than by a list of keys shown.
   - **Ports in free text** are masked in context only: after "port ", after "-p ", and after a `:` that follows an address or a `]`. A bare number elsewhere ("14:02:22", "22 min") is left alone. Every structured port field is masked.
@@ -572,12 +573,12 @@ A privacy switch for screen sharing and streaming: while it is on, sshelf masks 
   - **Updates:** the list is rebuilt on every config load and tunnel change.
 - **Editors:** the host editor (form and raw text), *New host* and its *Where it goes* preview show a cover while streamer mode is on.
   - **Cover:** a 44 px Blue lock tile, "Hidden in streamer mode", and "The editor shows the raw config, so it stays covered while streamer mode is on. Hold to peek; turn streamer mode off to edit." Then *Hold to peek* (shows the editor while held) and *Close*.
-  - **Other inputs:** text typed into inputs elsewhere (search, a new tag) is shown as typed. Masking applies to data, not to the user's own input. The tunnel editor's command preview is masked.
-  - **Pre-filled inputs:** a field sshelf fills from stored data (an existing tunnel's bind address, ports and target in the tunnel editor) is masked until the user focuses it; from then on it is their input and shows as typed.
+  - **Other inputs:** text typed into inputs elsewhere (search, a new tag) is shown as typed. Masking applies to data, not to the user's own input. The tunnel editor's command preview is masked. Search still matches the real aliases and tags while they are hidden.
+  - **Pre-filled inputs:** a field sshelf fills from stored data (an existing tunnel's bind address, ports and target in the tunnel editor; the ssh binary override in Settings; the key generation fields below) is masked until the user focuses it; from then on it is their input and shows as typed, also after focus leaves.
   - **Notes:** shown through the free-text filter and read-only while streamer mode is on; editing them means turning it off (they are data, like the editor).
 - **Dialogs:**
-  - **Host key dialogs:** host, port and fingerprint are masked tokens; *Trust* / *Cancel* work as usual.
-  - **Key generation:** the file field, pre-filled with a path under the home folder, is masked until the user edits it; then it shows the typed path. The result window masks the fingerprint and public key; their copy buttons still work.
+  - **Host key dialogs:** host, port and fingerprint are masked tokens; *Trust* / *Cancel* work as usual. With hidden aliases the changed-key dialog asks to type "host N"; that or the real alias confirms.
+  - **Key generation:** the file field (a path under the home folder) and the comment ("<alias> (sshelf)") are pre-filled inputs: masked until the user focuses them, then shown as typed. The result window masks the fingerprint and public key; their copy buttons still work.
   - **Close dialog:** ports are masked.
 - **Settings › Privacy** (a card in the left column, below *Window & tray*):
   - **Streamer mode:** "Masks addresses, users, ports, paths and keys everywhere in sshelf. Hold a masked value to peek; copy still copies the real value." with a switch.
