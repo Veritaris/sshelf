@@ -4,42 +4,64 @@ use std::net::TcpListener;
 use std::sync::Mutex;
 
 /// The ports the OS hands out on its own (to any outgoing connection, or
-/// `bind(0)` anywhere on the machine): Linux says which in
-/// `ip_local_port_range` (CI runners may widen it); macOS and Windows use
-/// 49152–65535.
+/// `bind(0)` anywhere on the machine), as the machine is set up: CI runners
+/// may widen them. Linux: `ip_local_port_range`; macOS: the
+/// `net.inet.ip.portrange` sysctls; Windows: its default, 49152–65535.
 fn ephemeral() -> (u16, u16) {
-    #[cfg(target_os = "linux")]
-    if let Ok(text) = std::fs::read_to_string("/proc/sys/net/ipv4/ip_local_port_range") {
+    let pair = |text: &str| -> Option<(u16, u16)> {
         let mut ports = text.split_whitespace().filter_map(|p| p.parse().ok());
-        if let (Some(low), Some(high)) = (ports.next(), ports.next()) {
-            return (low, high);
-        }
+        Some((ports.next()?, ports.next()?))
+    };
+    #[cfg(target_os = "linux")]
+    if let Some(range) = std::fs::read_to_string("/proc/sys/net/ipv4/ip_local_port_range")
+        .ok()
+        .and_then(|text| pair(&text))
+    {
+        return range;
     }
+    #[cfg(target_os = "macos")]
+    if let Some(range) = std::process::Command::new("sysctl")
+        .args([
+            "-n",
+            "net.inet.ip.portrange.first",
+            "net.inet.ip.portrange.last",
+        ])
+        .output()
+        .ok()
+        .and_then(|out| pair(&String::from_utf8_lossy(&out.stdout)))
+    {
+        return range;
+    }
+    let _ = pair;
     (49_152, 65_535)
 }
 
 /// Where test ports come from: outside the ephemeral range, so a port a
 /// test released can't be handed to some other socket before the tunnel
 /// binds it. 20000–32000 when that is clear of it, else the larger span
-/// below or above it.
+/// below or above it; if neither has room, 20000–32000 anyway (best
+/// effort). The choice is printed: a failing test's output shows it.
 fn test_range() -> (u16, u16) {
     const FIRST: u16 = 20_000;
     const LAST: u16 = 32_000;
     let (low, high) = ephemeral();
-    if LAST <= low || FIRST > high {
-        return (FIRST, LAST);
-    }
+    let span = |(a, b): (u16, u16)| b.saturating_sub(a);
     let below = (1_024, low);
     let above = (high.saturating_add(1), u16::MAX);
-    let span = |(a, b): (u16, u16)| b.saturating_sub(a);
-    let range = if span(below) >= span(above) {
-        below
+    let range = if LAST <= low || FIRST > high {
+        (FIRST, LAST)
+    } else if span(below).max(span(above)) >= 200 {
+        if span(below) >= span(above) {
+            below
+        } else {
+            above
+        }
     } else {
-        above
+        (FIRST, LAST)
     };
-    assert!(
-        span(range) >= 200,
-        "no room for test ports outside the ephemeral range {low}–{high}"
+    eprintln!(
+        "test ports {}–{} (the OS hands out {low}–{high} on its own)",
+        range.0, range.1
     );
     range
 }
