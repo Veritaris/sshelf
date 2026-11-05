@@ -1,6 +1,6 @@
 //! Process trees: stopping a tunnel stops everything it started.
 
-use std::net::TcpListener;
+use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::process::Command;
 use std::thread;
@@ -19,8 +19,12 @@ fn free_port() -> u16 {
     common::hold_port().1
 }
 
-fn port_is_free(port: u16) -> bool {
-    TcpListener::bind(("127.0.0.1", port)).is_ok()
+/// Whether something listens on `port`. Probed by connecting, not binding:
+/// a probe that binds could take the port in the moment the grandchild
+/// binds it, which then fails (Windows refuses the second bind) and exits.
+fn listening(port: u16) -> bool {
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok()
 }
 
 fn wait_until(what: &str, limit: Duration, mut check: impl FnMut() -> bool) {
@@ -56,13 +60,13 @@ fn kill_stops_grandchildren_too() {
     wait_until(
         "the grandchild to hold the port",
         Duration::from_secs(10),
-        || !port_is_free(port),
+        || listening(port),
     );
 
     spawned.killer.kill();
     spawned.child.wait().unwrap();
     wait_until("the grandchild to exit", KILL_GRACE * 5, || {
-        port_is_free(port)
+        !listening(port)
     });
 }
 
@@ -76,11 +80,11 @@ fn dropping_the_killer_stops_the_tree() {
     wait_until(
         "the grandchild to hold the port",
         Duration::from_secs(10),
-        || !port_is_free(port),
+        || listening(port),
     );
     drop(killer);
     child.wait().unwrap();
     wait_until("the grandchild to exit", KILL_GRACE * 5, || {
-        port_is_free(port)
+        !listening(port)
     });
 }
