@@ -62,7 +62,7 @@ Location: the platform config directory for `sshelf` (via `directories`). Human-
 
 | File | Contents |
 |---|---|
-| `settings.toml` | ssh binary override, terminal template, close behavior choice, UI prefs, onboarding tour state (`tour`, M10) |
+| `settings.toml` | ssh binary override, terminal template, close behavior choice, UI prefs, onboarding tour state (`tour`, M10), streamer mode (`streamer_mode`, `streamer_hide_aliases`, M11) |
 | `hosts.toml` | Per-host metadata keyed by alias: tags, notes, favorite, color, display order |
 | `tunnels.toml` | Tunnel definitions and groups |
 | `history.toml` | Recent connections launched from the app (for the tray menu) |
@@ -534,6 +534,61 @@ A first-run tour of every main feature, played on the real UI against sample dat
   - The Tunnels rail item carries the same green status dot as the app icon while any tunnel runs.
   - A tunnel failure banner for "no key accepted" offers the same fixes as the health banner (*Generate key…* for the tunnel's host, *Load key into agent*).
 
+### Streamer mode (milestone 11)
+
+A privacy switch for screen sharing and streaming: while it is on, sshelf masks every value that could identify a machine, an account or the user. Reference boards: `Streamer-Mode` (playable: masking, hold to peek, the chip menu, Settings) and `Streamer-States` (every token state, what is masked, the tray, dialogs, limits). The Privacy card is also on `A-Settings`.
+
+- **Turning it on and off:**
+  - **On:** *Settings › Privacy › Streamer mode*, or the *Streamer mode* switch at the top of the sshelf tray menu (it works with the window hidden). There is no keyboard shortcut.
+  - **Off:** the same two places, or *Turn off streamer mode* in the drag-strip chip's menu.
+  - **Applies at once:** both Privacy switches take effect immediately, outside *Revert* / *Save*.
+  - **Toast:** turning it on shows "Streamer mode on · values are masked" (Lucide `eye-off`, Blue); off shows "Streamer mode off · values are visible" (`eye`, Light Yellow).
+  - **Stored:** `streamer_mode` and `streamer_hide_aliases` in `settings.toml`. Both default to off; a missing key is the default, so the file version stays the same. Remembered across restarts.
+- **The chip:** while it is on, the drag strip shows a chip: Blue `#61AFEF` on `#24303D`, 26 px, 8 px corners, Lucide `eye-off` 14, "Streamer mode", a chevron. With hidden aliases it adds "· names hidden" in `#8CC4F5`. It sits left of the tour chip when both apply.
+  - **Its menu** (340 px, the standard menu style): "Hide host aliases and tags" with a switch; a separator; *Turn off streamer mode* (Lucide `eye`); a note "Turning it off shows every value at once. Do it off stream."
+- **What is masked:**
+
+  | Masked | Kept visible | Also masked with *Hide host aliases and tags* |
+  |---|---|---|
+  | `HostName` and every address: IPv4, IPv6, DNS names from the config | Host aliases, unless the alias is an IP address or equals its HostName (then always masked) | Host aliases, shown as "host N" |
+  | `User`, `Port`, and every port number sshelf shows | Tunnel and group names | Tags, shown as a `tag` label |
+  | Paths: IdentityFile, config, `known_hosts`, key files, the ssh binary, app data, backups, the detected terminal | States, counts, health results and timings | Aliases inside free text (logs, errors) |
+  | ProxyJump / ProxyCommand values, tunnel bind addresses and targets | Option names and non-sensitive values (`30`, `no`) | |
+  | Fingerprints and public keys (host-key dialogs, key generation) | ssh version, agent state | |
+  | Notes, through the free-text filter | | |
+- **Masked tokens:** three looks for one widget (`widgets::masked`):
+  - **Field value** (detail cards, effective config, tunnel rows, Settings, dialogs): "•••••" (always five dots, never the real length). Mono 12, 18 px tall, 6 px horizontal padding, 8 px corners, background `#2C313A` (`#353B45` on cards), dots `#9AA1AD`, letter spacing 0.06 em.
+  - **Free text** (logs, errors, toasts, tooltips, notes): each match becomes a typed label in the same pill: `ip`, `host`, `user`, `port`, `path`, `key` (mono 11). The kind comes from what matched, so the sentence still reads: "connect to host `ip` port `port`".
+  - **Alias** (only with *Hide host aliases and tags*): "host N" in the normal text style with a 1 px dotted Blue underline. N is the host's position in the config, stable until the config changes. Tags show as a `tag` label.
+- **Hold to peek:**
+  - **Peeking:** pressing on a token shows the real value while the button is held, with the yellow tint (`#3B3527` background, `#E5C07B` text). Releasing, or the pointer leaving the token, hides it again. One token at a time. There is no click-to-reveal toggle and no reveal on hover.
+  - **Cursor and tooltip:** the cursor is `Grab` on a token and `Grabbing` while held. After 400 ms of hover, the standard tooltip says "Hold to reveal" (it hides while held).
+  - **Copy:** copy buttons and copy-on-hover rows copy the real value without showing it; the toast says "Copied HostName · not shown in streamer mode".
+  - **Tray:** tokens in the tray menu can't be peeked. The native fallback menu shows "•••••".
+- **Free-text filter:** one function used everywhere text from data is drawn: labels, tooltips, logs, toasts, the status bar, the tray menu and tooltip, the window title.
+  - **What it knows:** every HostName, User, ProxyJump / ProxyCommand host, IdentityFile (and other file) path, forward bind address and target in the loaded config and tunnels; the home folder path; the local login (`ssh -G` reports it as `user` when the config sets none); and shapes: anything like an IPv4 or IPv6 address, paths under `~` or the home folder, key fingerprints (`SHA256:…`, the MD5 colon form) and public-key blobs (`AAAA…`), matched by pattern rather than by a list of keys shown.
+  - **Ports in free text** are masked in context only: after "port ", after "-p ", and after a `:` that follows an address or a `]`. A bare number elsewhere ("14:02:22", "22 min") is left alone. Every structured port field is masked.
+  - **Matching:** longest match first, so `10.0.4.12` never leaves `.12` behind. Paths match before their parts.
+  - **Updates:** the list is rebuilt on every config load and tunnel change.
+- **Editors:** the host editor (form and raw text), *New host* and its *Where it goes* preview show a cover while streamer mode is on.
+  - **Cover:** a 44 px Blue lock tile, "Hidden in streamer mode", and "The editor shows the raw config, so it stays covered while streamer mode is on. Hold to peek; turn streamer mode off to edit." Then *Hold to peek* (shows the editor while held) and *Close*.
+  - **Other inputs:** text typed into inputs elsewhere (search, a new tag) is shown as typed. Masking applies to data, not to the user's own input. The tunnel editor's command preview is masked.
+  - **Pre-filled inputs:** a field sshelf fills from stored data (an existing tunnel's bind address, ports and target in the tunnel editor) is masked until the user focuses it; from then on it is their input and shows as typed.
+  - **Notes:** shown through the free-text filter and read-only while streamer mode is on; editing them means turning it off (they are data, like the editor).
+- **Dialogs:**
+  - **Host key dialogs:** host, port and fingerprint are masked tokens; *Trust* / *Cancel* work as usual.
+  - **Key generation:** the file field, pre-filled with a path under the home folder, is masked until the user edits it; then it shows the typed path. The result window masks the fingerprint and public key; their copy buttons still work.
+  - **Close dialog:** ports are masked.
+- **Settings › Privacy** (a card in the left column, below *Window & tray*):
+  - **Streamer mode:** "Masks addresses, users, ports, paths and keys everywhere in sshelf. Hold a masked value to peek; copy still copies the real value." with a switch.
+  - **Hide host aliases and tags:** "Shows them as host 1, host 2… Only while streamer mode is on." with a switch (dimmed while streamer mode is off).
+  - **Footnote:** "Applies at once, without Save. Not covered: the terminal that Connect opens and system file dialogs."
+  - **With streamer mode on,** Settings masks its own values: paths in *ssh*, *Connect* and *Files*.
+- **Limits:**
+  - **Outside sshelf:** the terminal that *Connect* opens, system file dialogs, and anything shown while streamer mode was off are not covered.
+  - **Unknown strings:** a hostname the filter can't know (inside a `ProxyCommand` script, in a remote error) is only caught if it looks like an IP address.
+- **Tour:** during the onboarding tour (§10 *Onboarding tour*) streamer mode stays as set; the sample data is fake, but masking still applies.
+
 ---
 
 ## 11. Key generation (milestone 7)
@@ -668,6 +723,20 @@ Each milestone ends with its acceptance criteria met, tests green on all three O
   - nothing outside the sandbox is touched, and it is deleted afterwards;
   - the tour and each chapter can be replayed from Settings;
   - CI passes on all three OSes.
+
+### M11 — Streamer mode
+- Everything in §10 *Streamer mode*. Reference boards: `docs/design/Streamer-Mode.dc.html` (playable), `docs/design/Streamer-States.dc.html`, and the Privacy card on `A-Settings.dc.html`.
+- Order:
+  1. Core: the `streamer_mode` / `streamer_hide_aliases` settings keys. A `Redactor` built from the loaded config, tunnels and home path: known values by kind, the IPv4/IPv6 patterns, alias numbering. It is rebuilt on every config load and tunnel change, and is pure and unit-tested.
+  2. UI plumbing: one place the views read the current redactor and state from. The `masked` widget (field, free text, alias) with hold to peek, the cursor and the tooltip. Copy paths that bypass masking.
+  3. Settings › Privacy, the drag-strip chip and its menu, the toasts, the tray switch and tray masking.
+  4. Structured fields everywhere (host detail, cards, effective config, tunnel rows and editor preview, groups, Settings, dialogs), then the free-text filter (logs, status bar, toasts, tooltips, notes, health results, window title), then the editor cover.
+  5. *Hide host aliases and tags*.
+- Tests:
+  - **Redactor:** unit tests: every kind, longest match first, IPv6 forms, an alias that is an IP, numbering stays stable.
+  - **Nothing leaks:** a kittest walk renders every main screen and dialog with streamer mode on, over a config whose sensitive values are all distinctive markers. It asserts that no marker appears in any rendered text (the egui output's text shapes), the tray menu model, the window title or the toasts.
+  - **Peek and copy:** pressing a token shows the value only while held; copy puts the real value on the clipboard.
+- **Done when:** with streamer mode on, no sensitive value from the config, tunnels or home path is visible anywhere in sshelf without holding it; turning it on or off works from Settings, the tray and the chip; the setting survives a restart; CI passes on all three OSes.
 
 ### M12 — Surviving a crash
 - Everything in §7 *Surviving a crash*: `running.toml`, taking tunnels over at start on macOS and Linux, watching their exit, the toast.
