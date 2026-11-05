@@ -344,13 +344,28 @@ impl HostDetail {
             self.tab = Tab::Config;
         }
         ui.add_space(8.0);
+        // The scroll bar floats over the content: keep its width free, so
+        // nothing at the right edge (*Refresh*) sits under it.
+        let scroll = &ui.spacing().scroll;
+        let gutter = scroll.bar_inner_margin + scroll.bar_width + scroll.bar_outer_margin;
         let response = egui::ScrollArea::vertical()
             .id_salt("host_detail")
             .auto_shrink([false, false])
-            .show(ui, |ui| match self.tab {
-                Tab::Overview => self.overview(ui, &alias, shown, narrow, &mut commands),
-                Tab::Config => self.effective(ui, &alias, generation, shown.inset, &mut commands),
-                Tab::Tunnels => self.tunnels(ui, &alias, &tunnels, shown.states, &mut commands),
+            .show(ui, |ui| {
+                Frame::NONE
+                    .inner_margin(Margin {
+                        right: gutter.ceil() as i8,
+                        ..Margin::ZERO
+                    })
+                    .show(ui, |ui| match self.tab {
+                        Tab::Overview => self.overview(ui, &alias, shown, narrow, &mut commands),
+                        Tab::Config => {
+                            self.effective(ui, &alias, generation, shown.inset, &mut commands)
+                        }
+                        Tab::Tunnels => {
+                            self.tunnels(ui, &alias, &tunnels, shown.states, &mut commands)
+                        }
+                    })
             });
         targets::register(
             ui.ctx(),
