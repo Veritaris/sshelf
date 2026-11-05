@@ -30,6 +30,14 @@ fn fake_ssh() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_fake-ssh"))
 }
 
+/// Whether something listens on `port`. Probed by connecting, never by
+/// binding: a probe that binds could take the port from the process meant
+/// to hold it.
+fn listening(port: u16) -> bool {
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok()
+}
+
 /// Waits for the first event `pick` accepts, skipping others.
 fn wait_for<T>(
     events: &Receiver<Event>,
@@ -315,7 +323,7 @@ fn tunnels_and_groups_through_the_core() {
         "removed from the group"
     );
     let deadline = Instant::now() + WAIT;
-    while std::net::TcpListener::bind(("127.0.0.1", port)).is_err() {
+    while listening(port) {
         assert!(Instant::now() < deadline, "the deleted tunnel kept running");
         std::thread::sleep(Duration::from_millis(25));
     }
@@ -334,10 +342,7 @@ fn tunnels_and_groups_through_the_core() {
     core.send(Command::StartTunnel("t-2".into()));
     tunnel_state(&events, "t-2", TunnelState::Running);
     drop(core);
-    assert!(
-        std::net::TcpListener::bind(("127.0.0.1", port)).is_ok(),
-        "tunnels must stop with the app"
-    );
+    assert!(!listening(port), "tunnels must stop with the app");
     assert_eq!(fingerprint(&paths.ssh_config), before);
 }
 

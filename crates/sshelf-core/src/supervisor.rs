@@ -1035,11 +1035,11 @@ mod tests {
     fn port_check_finds_taken_and_duplicate_ports() {
         let held = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let taken = held.local_addr().unwrap().port();
-        let free = TcpListener::bind(("127.0.0.1", 0))
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
+        // Below every OS's ephemeral range, so nothing else on the machine
+        // is handed it between this check and `check_ports`.
+        let free = (20_000..32_000)
+            .find(|p| TcpListener::bind(("127.0.0.1", *p)).is_ok())
+            .unwrap();
         let (a, b, c) = (tunnel("a", taken), tunnel("b", free), tunnel("c", free));
         let problems = check_ports(&[&a, &b, &c]);
         assert_eq!(problems.len(), 2, "{problems:?}");

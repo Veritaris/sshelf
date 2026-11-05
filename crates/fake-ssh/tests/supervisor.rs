@@ -2,7 +2,7 @@
 //! reference counting, port pre-checks, degraded groups, overlapping groups,
 //! failure reasons, logs, and stopping everything on shutdown.
 
-use std::net::TcpListener;
+use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver};
@@ -81,8 +81,12 @@ fn free_port() -> u16 {
     common::hold_port().1
 }
 
-fn port_is_free(port: u16) -> bool {
-    TcpListener::bind(("127.0.0.1", port)).is_ok()
+/// Whether something listens on `port`. Probed by connecting, never by
+/// binding: a probe that binds could take the port from the process meant
+/// to hold it.
+fn listening(port: u16) -> bool {
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok()
 }
 
 fn tunnel(id: &str, host: &str, port: u16) -> Tunnel {
@@ -135,7 +139,7 @@ fn starting_twice_shares_one_process() {
     });
     let pid = h.until("running", running("a")).tunnels["a"].pid;
     assert!(pid.is_some());
-    assert!(!port_is_free(port));
+    assert!(listening(port));
 
     let g = group("g", &[&t]);
     start_group(&h, &g, &[&t]);
@@ -157,7 +161,7 @@ fn starting_twice_shares_one_process() {
     });
     h.until("stopped", stopped("a"));
     let deadline = Instant::now() + WAIT;
-    while !port_is_free(port) {
+    while listening(port) {
         assert!(Instant::now() < deadline, "the port was not released");
         std::thread::sleep(Duration::from_millis(25));
     }
@@ -381,7 +385,7 @@ fn shutdown_stops_every_tunnel() {
     });
     drop(h);
     let deadline = Instant::now() + WAIT;
-    while !ports.iter().all(|p| port_is_free(*p)) {
+    while ports.iter().any(|p| listening(*p)) {
         assert!(Instant::now() < deadline, "tunnels survived shutdown");
         std::thread::sleep(Duration::from_millis(25));
     }
@@ -401,7 +405,7 @@ fn removing_a_running_tunnel_stops_it() {
     });
     h.until("gone", |s| !s.tunnels.contains_key("a"));
     let deadline = Instant::now() + WAIT;
-    while !port_is_free(port) {
+    while listening(port) {
         assert!(Instant::now() < deadline, "the process survived removal");
         std::thread::sleep(Duration::from_millis(25));
     }

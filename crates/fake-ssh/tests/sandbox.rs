@@ -9,6 +9,8 @@ use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
+mod common;
+
 use sshelf_core::core::{Command, Core, Event, SandboxOptions};
 use sshelf_core::paths::Paths;
 use sshelf_core::ssh::{Tool, ToolSource};
@@ -42,14 +44,6 @@ fn state_of(events: &Receiver<Event>, id: &str, want: fn(&TunnelState) -> bool) 
     })
 }
 
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
-}
-
 fn tunnel(id: &str, host: &str) -> Tunnel {
     Tunnel {
         id: id.into(),
@@ -58,7 +52,7 @@ fn tunnel(id: &str, host: &str) -> Tunnel {
         forwards: vec![Forward {
             kind: ForwardKind::L,
             bind: DEFAULT_BIND.into(),
-            listen: free_port(),
+            listen: common::hold_port().1,
             target: Some("localhost:80".into()),
         }],
         auto_reconnect: false,
