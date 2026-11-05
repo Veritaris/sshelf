@@ -103,8 +103,9 @@ fn the_core_generates_keys_in_the_background() {
 fn recorded(file: &Path) -> Vec<Vec<String>> {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
+        // The file exists before its line is written: wait for a whole one.
         if let Ok(text) = std::fs::read_to_string(file)
-            && !text.is_empty()
+            && text.ends_with('\n')
         {
             return text
                 .lines()

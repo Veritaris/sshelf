@@ -181,11 +181,16 @@ fn full_session_never_writes_the_ssh_config() {
         _ => None,
     });
     assert_eq!(data.history.entries[0].alias, "web");
+    // fake-ssh creates the file before it writes the line: wait for a whole
+    // line, not just the file.
     let deadline = Instant::now() + WAIT;
-    while !record.exists() && Instant::now() < deadline {
+    let launched = loop {
+        let text = fs::read_to_string(&record).unwrap_or_default();
+        if text.ends_with('\n') || Instant::now() > deadline {
+            break text;
+        }
         std::thread::sleep(Duration::from_millis(20));
-    }
-    let launched = fs::read_to_string(&record).expect("the launch was recorded");
+    };
     assert_eq!(launched.trim_end().split('\x1f').next_back(), Some("web"));
 
     // External edit: picked up by the watcher. (Storing web's host key

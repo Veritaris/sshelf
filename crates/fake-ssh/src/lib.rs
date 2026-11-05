@@ -213,7 +213,10 @@ pub fn run(mut args: Vec<String>) -> ExitCode {
             .append(true)
             .open(path)
             .expect("opening the record file");
-        writeln!(file, "{}", args.join("\x1f")).expect("writing the record file");
+        // One write per line, as below: a reader never sees half of it.
+        let line = format!("{}\n", args.join("\x1f"));
+        file.write_all(line.as_bytes())
+            .expect("writing the record file");
     }
     if let Ok(path) = env::var("FAKE_SSH_RECORD") {
         let mut file = OpenOptions::new()
