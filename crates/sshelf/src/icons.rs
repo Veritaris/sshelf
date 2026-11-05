@@ -2,6 +2,9 @@
 //! `lucide.ttf` (from `font/codepoints.json` of `lucide-static`, see
 //! `assets/fonts/README.md`) and helpers to show them. Icons are painted, so
 //! they never become part of a widget's accessible name.
+//!
+//! The bundled font holds only the icons named here: after adding one, run
+//! `assets/fonts/subset_lucide.py` and add it to [`ALL`] (tests check both).
 
 use egui::{Align2, Color32, FontFamily, FontId, Response, RichText, Sense, Ui};
 

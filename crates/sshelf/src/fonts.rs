@@ -93,4 +93,26 @@ mod tests {
         });
         harness.run();
     }
+
+    /// `icons::ALL` names every icon constant: the bundled Lucide subset is
+    /// built from those constants (`assets/fonts/subset_lucide.py`), and the
+    /// glyph check above runs over `ALL`. An icon added without rebuilding
+    /// the subset fails one of the two.
+    #[test]
+    fn all_names_every_icon_constant() {
+        let mut declared: Vec<char> = include_str!("icons.rs")
+            .lines()
+            .filter_map(|line| {
+                let rest = line.trim().strip_prefix("pub const ")?;
+                let (_, value) = rest.split_once(": char = '\\u{")?;
+                let hex = value.split('}').next()?;
+                char::from_u32(u32::from_str_radix(hex, 16).ok()?)
+            })
+            .collect();
+        let mut all = icons::ALL.to_vec();
+        declared.sort_unstable();
+        all.sort_unstable();
+        assert!(!declared.is_empty());
+        assert_eq!(declared, all, "icons::ALL and the icon constants differ");
+    }
 }
