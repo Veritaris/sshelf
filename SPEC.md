@@ -17,7 +17,7 @@ This document is the source of truth for scope and design. It describes the **MV
 1. **`ssh_config` is the source of truth for hosts.** The app never keeps its own list of connectable machines. A host exists if and only if it exists in the user's ssh config (including `Include`d files).
 2. **Everything else lives in the app's own data folder**, linked to hosts by alias. If app data references an alias that no longer exists, that is an *orphan* and is surfaced to the user (see §6), never silently deleted.
 3. **Lossless config editing.** Lines the user did not change are written back byte-for-byte: comments, blank lines, indentation, tabs, CRLF, ordering, unknown directives — all preserved.
-4. **Shell out to the system `ssh`.** No SSH library for connections or tunnels. This keeps agent, `ProxyJump`, `ProxyCommand`, `known_hosts` and all user config behavior identical to the command line.
+4. **Shell out to the system `ssh`.** No SSH library for connections or tunnels. This keeps agent, `ProxyJump`, `ProxyCommand`, `known_hosts` and all user config behavior identical to the command line. kubectl tunnels (M13) follow the same rule: they run the user's `kubectl`, never a Kubernetes client library, so kubeconfig, contexts and credential plugins behave as on the command line.
 5. **Never read existing private keys.** The app only references `IdentityFile` paths and defers to the agent. It never stores passwords or passphrases. It *may* generate new keys (milestone 7); key material exists only in memory during generation and is zeroized afterward.
 6. **Effective configuration comes from `ssh -G <alias>`**, not from reimplementing ssh's resolution rules.
 7. **Never bypass host key checks silently.** Unknown and changed host keys always go through an explicit user confirmation (see §9).
@@ -41,9 +41,9 @@ Cargo workspace with UI-independent core crates:
 | Crate | Responsibility | Depends on egui? |
 |---|---|---|
 | `sshconf` | Lossless `ssh_config` parser/editor (CST), `Include` resolution, write-back | No |
-| `sshelf-core` | App data model (metadata, tunnels, groups, settings, history), storage + migrations, ssh binary discovery, `ssh -G` resolution, host key checks, tunnel supervisor | No |
+| `sshelf-core` | App data model (metadata, tunnels, groups, settings, history), storage + migrations, ssh binary discovery, `ssh -G` resolution, host key checks, tunnel supervisor; kubectl discovery and lookups (M13) | No |
 | `sshelf` (app) | egui/eframe frontend; renders state, sends commands to core | Yes |
-| `fake-ssh` (lib + test bin) | Scriptable stand-in for `ssh`: used by supervisor tests, and (M10) by the onboarding tour, embedded in the app as `sshelf --fake-ssh` | No |
+| `fake-ssh` (lib + test bin) | Scriptable stand-in for `ssh`: used by supervisor tests, and (M10) by the onboarding tour, embedded in the app as `sshelf --fake-ssh`; (M13) also a stand-in for `kubectl` (`--as kubectl`) | No |
 
 Rules:
 - The UI never spawns processes or touches files directly; it sends commands to core and renders state/events from core.
@@ -62,9 +62,9 @@ Location: the platform config directory for `sshelf` (via `directories`). Human-
 
 | File | Contents |
 |---|---|
-| `settings.toml` | ssh binary override, terminal template, close behavior choice, UI prefs, onboarding tour state (`tour`, M10), streamer mode (`streamer_mode`, `streamer_hide_aliases`, M11) |
+| `settings.toml` | ssh binary override, terminal template, close behavior choice, UI prefs, onboarding tour state (`tour`, M10), streamer mode (`streamer_mode`, `streamer_hide_aliases`, M11), kubectl override (`kubectl_path`, M13) |
 | `hosts.toml` | Per-host metadata keyed by alias: tags, notes, favorite, color, display order |
-| `tunnels.toml` | Tunnel definitions and groups |
+| `tunnels.toml` | Tunnel definitions and groups (version 2 from M13, for kubectl tunnels) |
 | `history.toml` | Recent connections launched from the app (for the tray menu) |
 | `running.toml` | The tunnels running now: their ssh process (pid, start time, arguments) and owners. Written by the supervisor whenever that changes, empty after a clean quit; read once at start to take tunnels over after a crash (§7 *Surviving a crash*, M12) |
 
@@ -245,6 +245,63 @@ ssh -v -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o BatchMode=yes
 - **Toast:** "Took over N tunnels that kept running".
 - **Not covered:** the tour's sandbox keeps no record; ssh processes sshelf didn't record stay "port in use".
 
+### kubectl tunnels (milestone 13)
+
+A second tunnel type: `kubectl port-forward` to a pod, service or deployment, next to ssh tunnels and run by the same supervisor. UI: §10 *kubectl tunnels*.
+
+```toml
+version = 2
+
+[[tunnel]]
+id = "t-5c1e9b20"
+name = "web api"
+type = "kubectl"          # missing means "ssh"
+context = "dev-k3s"       # missing means the current context, looked up at each start
+namespace = "api"
+resource = "service/web"  # pod/<name>, service/<name> or deployment/<name>
+address = "127.0.0.1"     # kubectl --address, for every forward
+forwards = [
+  { listen = 18080, target = "80" },
+  { listen = 19090, target = "metrics" },
+]
+auto_reconnect = true
+```
+
+- **Model:** a kubectl tunnel is one context, one namespace, one resource and N forwards = **one `kubectl` process**. A forward is a local port and a port on the resource: a number, or a port name, passed as written. There are no `R` / `D` forwards and no remote host: kubectl forwards to the pod itself (for a service or deployment, kubectl picks one pod).
+  - `address` defaults to `127.0.0.1`; a non-loopback address gets the same warning as an ssh bind (§7 *Model*).
+  - `namespace` and `resource` are required. An empty `context` follows `kubectl config use-context`; a set one is pinned with `--context`.
+  - Ids, owners, groups and `auto_reconnect` work as for ssh tunnels. Groups mix both types freely.
+- **File version:** `tunnels.toml` becomes version 2. The v1 → v2 migration changes nothing but the version (with the usual backup, §3). It exists so an older sshelf treats a file with kubectl tunnels as newer and read-only, instead of misreading them as broken ssh tunnels.
+- **Command:**
+  ```
+  kubectl [--context <context>] --namespace <ns> port-forward <kind>/<name> <listen>:<target>… --address <address>
+  ```
+  - Spawned like ssh (§7 *Process*): `CREATE_NO_WINDOW` and the Job Object on Windows, its own process group on macOS / Linux, stdin closed, local ports pre-checked before spawning.
+  - **Environment:** sshelf's own, so `KUBECONFIG` and credential plugins work as in a terminal. On macOS (an app started from Finder has a short `PATH`), `PATH` for kubectl gets kubectl's own folder, `/opt/homebrew/bin` and `/usr/local/bin` added, so exec plugins such as cloud CLIs are found.
+- **Running:** kubectl prints `Forwarding from <address>:<listen> -> <target>` on stdout for each forward. The tunnel is *Starting* until every forward has printed it, then *Running*. stdout and stderr both go to the log (200 lines, as for ssh); `Handling connection for <port>` lines are hidden unless *show debug* is on.
+- **Drops:** a lost connection to the pod (pod restarted or deleted, cluster connection reset) makes kubectl exit. If a kubectl version keeps running after printing `lost connection to pod`, the supervisor ends it and treats it the same. With *Reconnect* on, the usual backoff applies (§12 M8: 2 s … 60 s); for a service or deployment the new process picks a new pod.
+- **Failures** (classified from kubectl's last error line; the friendly line, kubectl's own line and the fix are shown as for ssh):
+
+  | kubectl says | Shown as | Fix | Reconnects |
+  |---|---|---|---|
+  | `Error from server (NotFound): pods "…" not found` (also services, deployments) | The pod is gone / The service is gone … | *Pick another pod* (opens the editor on *Forward to*) | no |
+  | `error: You must be logged in to the server (Unauthorized)`, or an exec plugin error | Not logged in to `<context>` | "Log in with your cluster's tool in a terminal, then retry." · *Retry* | no |
+  | `Unable to connect to the server: …` | Can't reach the cluster | *Retry* | yes |
+  | `unable to listen on any of the requested ports` | Local port N is in use | *Edit* | yes (like a taken port for ssh) |
+  | `error: context "…" does not exist` | Context not in your kubeconfig | *Edit* | no |
+  | kubectl not found (no binary) | kubectl not found | *Settings › kubectl* | no |
+  | anything else | kubectl exited | *Show log* | yes |
+  - As built: "every forward" counts local ports: kubectl prints a line per address family (`127.0.0.1` and `[::1]` for `--address localhost`), and each port counts once. The log starts with `starting kubectl (pid N)`. Classification looks for `(NotFound)`; `You must be logged in`, `(Unauthorized)` or `getting credentials` (an exec plugin); `error: context "`; `unable to listen on any of the requested ports`; `Unable to connect to the server`, in that order. kubectl's own last line is the reason shown. Only *Can't reach the cluster*, *Local port in use* and *kubectl exited* reconnect.
+- **Crash survival (M12):** `running.toml` records the program (`ssh` or `kubectl`) with its arguments, so kubectl tunnels are taken over the same way; a missing `program` means `ssh`.
+  - As built: a record is taken over only if its program is the tunnel's type now. A taken-over kubectl that dies reads "kubectl exited".
+- **Lookups for the editor** run in core on a worker (the UI never spawns), each with `--request-timeout=5s`, and arrive as events:
+  - contexts: `kubectl config view -o json` (local; kubectl redacts secrets): context names, each one's cluster and server, the current context;
+  - namespaces: `kubectl [--context] get namespaces -o json`;
+  - resources: `kubectl [--context] --namespace <ns> get pods|services|deployments -o json` → names with their ports (service `spec.ports`; container ports of the pod or the deployment's template), pod phase, deployment ready / desired.
+  - A failed lookup (RBAC `Forbidden`, unreachable cluster) is shown in the list with kubectl's reason; a typed value is always accepted and checked when the tunnel starts.
+- **Not in scope:** starting or logging in to clusters, editing kubeconfig, `R` / `D` forwards, health checks, kubectl tunnels in the onboarding tour.
+- **Testing:** `fake-ssh --as kubectl` prints `Forwarding from` lines then waits, or prints a given error and exits, or prints `lost connection to pod` (exiting or not). Supervisor tests cover Starting → Running, each failure kind, the reconnect rules and the drop handling on all three OSes. No test talks to a real cluster.
+
 ### Testing
 
 - `fake-ssh` is a small Rust binary in the workspace that behaves according to arguments/env: sleep forever, exit with code X after Y ms, print given stderr, simulate host key failure, etc.
@@ -262,6 +319,11 @@ ssh -v -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o BatchMode=yes
 - **Windows agent:** detect when the `ssh-agent` Windows service is stopped or disabled and explain how to enable it (requires admin; the app does not do it itself).
 - **Tour sandbox (M10):** an ssh tool is a program plus prefix arguments and environment, not just a path; companions are found the same way. Only the onboarding tour's sandbox Core sets one: `[<sshelf executable>, "--fake-ssh"]` with `FAKE_SSH_SCENARIOS` pointing at the sample, and `--as ssh-add` for the agent tool. It never comes from `settings.toml` and Settings can't select it. The tour's toasts and fake servers are the only place §1 rule 4 does not apply, since nothing connects (§10 *Onboarding tour*).
 - **Auth under `BatchMode`:** when a tunnel fails because a key is not available in the agent, show a clear message ("key not loaded in agent") with a hint, not a raw error.
+- **kubectl (M13):** found on `PATH`; then, when not there, the usual install folders: Docker Desktop and Rancher Desktop on Windows and macOS (`~/.rd/bin` and the apps' `resources/bin`), and on macOS `/opt/homebrew/bin` and `/usr/local/bin` (an app started from Finder does not get the shell's `PATH`). Settings can override the path (`kubectl_path`, missing = detect). Detection runs at start, on *Refresh* and when the override is saved.
+  - Settings show: the binary and where it came from, `kubectl version --client -o json` (client and Kustomize versions), the kubeconfig files (`KUBECONFIG` or `~/.kube/config`) with the number of contexts, and the current context. Nothing there contacts a cluster.
+  - kubectl is optional: without it ssh tunnels and everything else work; kubectl tunnels can be edited and saved but not started.
+  - As built: the install folders are, on Windows, `%ProgramFiles%\Docker\Docker\resources\bin`, `~\.rd\bin` and `%LOCALAPPDATA%\Programs\Rancher Desktop\resources\resources\win32\bin`; on macOS `/Applications/Docker.app/Contents/Resources/bin`, `~/.rd/bin`, `/Applications/Rancher Desktop.app/Contents/Resources/resources/darwin/bin`, `/opt/homebrew/bin`, `/usr/local/bin`; Linux uses `PATH` only. The source chip names the folder's app ("Docker Desktop", "Homebrew"). A missing override is "the file set below doesn't exist", with no fallback (like ssh). Settings' *Refresh* re-detects kubectl alone; saving Settings re-detects both.
+  - As built (tests): `PATH`, `KUBECONFIG` and the install folders are read from the environment once, when sshelf finds its real paths (`Paths::detect`, `KubeEnv`). Every other `Paths` has none, so no test can find the user's kubectl or kubeconfig.
 
 ---
 
@@ -590,6 +652,48 @@ A privacy switch for screen sharing and streaming: while it is on, sshelf masks 
   - **Unknown strings:** a hostname the filter can't know (inside a `ProxyCommand` script, in a remote error) is only caught if it looks like an IP address.
 - **Tour:** during the onboarding tour (§10 *Onboarding tour*) streamer mode stays as set; the sample data is fake, but masking still applies.
 
+### kubectl tunnels (milestone 13)
+
+The UI for §7 *kubectl tunnels*. Reference boards: `Tunnel-Kubectl` (playable: list, filter, detail, editor), `Tunnel-Kubectl-New` (playable: creating one, with motion) and `Tunnel-Kubectl-New-Steps` (the same flow as static frames, with the rules), `Kubectl-States` (marks, row states, failures, pickers, Settings, tray, groups, streamer), and the updated `A-Tunnels`, `Tunnel-States`, `Tunnel-Edit`, `A-Settings`.
+
+- **Type marks:** every tunnel shows its type as a 24 px tile (8 px corners, `#2C313A`, icon 14): ssh is Lucide `terminal` in secondary grey, kubectl is Lucide `ship-wheel` in Blue `#61AFEF`. 28 px before the name in the detail header; 14 px without the tile in the tray menu and dropdown rows. The tooltip names the type.
+- **Tunnel list:** the mark starts each row. Second line for kubectl: `<context> / <namespace> · <kind>/<name> · <first local port>` ("current context" when the context is empty). States, marks and the one action are those of ssh tunnels. Above the rows, an *All / ssh / kubectl* segmented filter, shown only while both types exist and remembered for the session.
+  - As built: a row is the type tile, the status dot, then the two lines (as on `A-Tunnels`). A kubectl row's second line is the forward line above while stopped or running (a group's shows its owners, as for ssh), "Starting… waiting for “Forwarding from …”" while starting, "Failed · service not found" / "not logged in to <context>" / "can't reach the cluster" / "a local port is in use" / "context not in your kubeconfig" otherwise. While kubectl isn't found, a stopped kubectl row reads "kubectl not found", and its *Start* (row, header, menu) is disabled with the reason.
+- **Detail:** the header mark, name and status chip; "kubectl · context dev-k3s · namespace api · service/web" and the owners; the failure banner (§7 *kubectl tunnels*, *Failures*); a table *Listen on* / *Local port* / *Port on the service* (or *pod*; for a deployment "*pod (picked by kubectl)*"); the log. Right-click: *Copy ssh command* becomes *Copy command* for both types.
+  - As built: the failure banner's fixes are *Pick another <kind>* (opens the editor), *Retry* (not logged in, can't reach the cluster), *Edit* (port in use, no context) and *Settings › kubectl*, each with *Show log*; the plain "kubectl exited" has *Show log* only. A pod that is gone says a deleted pod doesn't come back under its name.
+- **Editor:** the existing tunnel editor with an **ssh | kubectl** segmented switch (icon and word) at the right of the title.
+  - A new tunnel starts as the type used last in this session (ssh at first); *New tunnel* from a host always starts as ssh with that host. Switching keeps the name and the local ports; the other type's fields are kept until Save, so switching back loses nothing. While kubectl is not found the switch stays usable (see below).
+  - kubectl fields, in order:
+    - **Name.**
+    - **Context:** a dropdown of the kubeconfig's contexts with each cluster as a dim note; searchable past ten. Empty (the default) shows the current context's name with the note "current context"; picking a context pins it. Footer: "From your kubeconfig · read locally, nothing connects". Changing it clears namespace, resource and forwards.
+    - **Namespace:** a searchable dropdown that lists the cluster's namespaces on open ("Listing namespaces on dev-k3s…" with the pulsing ring), footer "kubectl get namespaces · N · you can also type one". Required. Changing it clears resource and forwards.
+    - **Forward to:** *Pod / Service / Deployment* (segmented, Service by default) and a dropdown of that kind in the namespace with their ports (pods: phase; deployments: ready / desired), listed on open like namespaces, footer `kubectl get services -n api`. Disabled until a namespace is set ("Pick a namespace first"). Changing kind or resource clears the forwards.
+    - **Reconnect** switch, note "restarts the forward when the pod restarts or the connection drops, with growing delay".
+    - **Forwards:** *Listen on* (one address, "kubectl --address, for every forward"), then a card per forward: *Local port* → *Port on the service* (or pod) and the remove button. After a resource is picked one empty forward appears with the resource's ports as chips ("80 http"); a chip fills the port (the number) and suggests the local port: 18000 + port below 1024 (80 → 18080), port + 10000 below 10000 (5432 → 15432), otherwise the same port; if another tunnel already uses it, the next number up. *Add forward* adds a card with the remaining ports. A typed port name is kept as typed. Local ports are checked when the tunnel starts, as for ssh (no live check, §14).
+    - **Command:** the exact kubectl command, live; missing parts read `‹namespace›`, `‹name›`, `‹local:port›`.
+  - Footer: *Save* / *Save and start* / *Cancel*, disabled with "Missing: namespace, service, a port" until name, namespace, resource and one complete forward are set; then "Ready" in Green.
+  - As built:
+    - The context list's first row is the current context (note "current context"); picking it unpins a pinned context. The contexts come from the kubeconfig as kubectl detection read it (§8: at start, on *Refresh*, after Save), not from a lookup of their own.
+    - A lookup runs the first time its dropdown opens while the editor is open (cached until it closes, so a failed one is retried by reopening the editor); its error shows in the list ("Can't list namespaces: <kubectl's reason> · type a name instead").
+    - In the namespace and resource lists, typing something no row has offers "Use “…”" (also Enter).
+    - The resource dropdown is named *Resource*; its rows show the ports ("80/http · 9090/metrics") as the second line and the pod phase or "2/3 ready" as the note.
+    - A forward card's chips show the resource's ports that no other card uses, while its port is empty ("ports from kubectl").
+    - The ssh editor's footer is unchanged ("N problems"); "Missing: …" and "Ready" are kubectl's.
+    - The success toast's *Copy* copies the address (`127.0.0.1:18080`), only for kubectl tunnels.
+- **After Save:** the editor closes, the tunnel is added to the end of the list and selected; *Save and start* also starts it (*Starting…* with the yellow ring, then *Running*, and the success toast "web api is running on 127.0.0.1:18080" with *Copy*).
+- **kubectl not found:** the kubectl type stays selectable; under the switch a banner says "kubectl wasn't found, so this tunnel can be saved but not started." with a link to *Settings › kubectl*. *Save and start* is disabled with that reason, and so is *Start* on kubectl rows (the row reads "kubectl not found"). Lookups in the editor show the same reason.
+- **Settings › kubectl:** a card under *ssh*, same layout: Binary (path, source chip *from PATH* / *override* / the install folder found), Version, Kubeconfig (files and context count), Current context, Override ("path to a kubectl binary (empty: detect)"), *Refresh*. Not found: "not found on PATH" in Light Yellow and "kubectl tunnels can't start until kubectl is installed or its path is set above. ssh tunnels aren't affected." with *How to install kubectl* (the official install page). Also: override file missing, no kubeconfig, `KUBECONFIG` with several files. Waits for *Save* like the other settings.
+- **Status bar:** while any kubectl tunnel exists, the kubectl client version follows the ssh version, or "kubectl not found" in Light Yellow.
+- **Groups and tray:** the group editor's tunnel dropdown shows the mark and, for kubectl, "context / namespace" as the note; group rows and the tray menu list kubectl tunnels like ssh ones, with the mark (the native fallback menu has no icons).
+- **Streamer mode (M11):** masked: the context name (field and free text), cluster server URLs and kubeconfig user names (added to the free-text filter from the contexts lookup), every port, the address, the kubectl and kubeconfig paths. Namespace and resource names are treated like host aliases: visible, and "namespace N" / "resource N" with *Hide host aliases and tags*. The editor's prefilled values follow the pre-filled input rule.
+  - As built:
+    - Core masks the kubeconfig's context names and users and its servers' hosts as soon as kubectl detection has read them. It also masks every kubectl tunnel's context and address, kubectl's binary, the kubeconfig files and the override.
+    - Namespaces and resource names are numbered per kind in the order `tunnels.toml` lists them. A name no tunnel uses yet (one from a lookup) is "•••••" while names are hidden.
+    - Ports in kubectl's lines are masked in context: after "-> ", "forwarding ", "connection for ", "[{".
+    - The leak test (M11) covers the kubectl detail (failed and running, with debug lines), the editor, its context list and the Settings card.
+- **Tour (M10):** the tour stays ssh-only. In its sandbox the type switch's kubectl half is disabled with the tooltip "Not part of the tour", and the sandbox never runs kubectl.
+- **Motion:** as everywhere (§10 *Interaction and motion*): the type and kind switches slide, the dropdowns roll, a new row and new forward cards fade in with a 6 px drop over 180 ms, the list highlight slides to the new tunnel.
+
 ---
 
 ## 11. Key generation (milestone 7)
@@ -748,6 +852,26 @@ Each milestone ends with its acceptance criteria met, tests green on all three O
   - A clean quit leaves nothing recorded.
 - **Done when:** on macOS and Linux a tunnel survives `kill -9` of sshelf and shows as *Running* after the next start; *Stop* ends it; CI passes on all three OSes.
 
+### M13 — kubectl tunnels
+- Everything in §7 *kubectl tunnels*, §8 *kubectl* and §10 *kubectl tunnels*. Reference boards: `docs/design/Tunnel-Kubectl.dc.html`, `Tunnel-Kubectl-New.dc.html` (both playable), `Tunnel-Kubectl-New-Steps.dc.html`, `Kubectl-States.dc.html`, and the updated `A-Tunnels`, `Tunnel-States`, `Tunnel-Edit`, `A-Settings`.
+- Order:
+  1. Core model: the tunnel type, the kubectl fields, `tunnels.toml` v2 with its migration, `kubectl_path` in `settings.toml`, `program` in `running.toml`.
+  2. kubectl discovery and the Settings card; the status bar entry.
+  3. `fake-ssh --as kubectl`; the supervisor runs kubectl tunnels: command, Forwarding lines, failures, drops, reconnect, crash survival.
+  4. Tunnels view: marks, rows, filter, detail, *Copy command*.
+  5. The editor: the type switch, the lookups (core worker + events), the pickers, forwards with suggestions, the command preview, validation, the not-found state.
+  6. Groups and tray, streamer mode, the tour sandbox's disabled switch.
+- Tests:
+  - **Model:** v1 → v2 migration with backup; round trip of both types; an older version stays read-only.
+  - **Parsing:** command building; Forwarding lines (one and several forwards); every failure kind from fixture lines; the lookups' JSON (fixtures with made-up names).
+  - **Supervisor** (`crates/fake-ssh/tests/`): Starting → Running only after every forward; each failure; reconnect yes / no per kind; `lost connection to pod` with kubectl still running; a group mixing both types.
+  - **UI** (`egui_kittest`): create a kubectl tunnel through the editor from empty to *Running* against `fake-ssh --as kubectl` with canned lookups; the not-found state; the streamer walk extended with kubectl markers (context, server, ports, paths).
+  - **Tour isolation:** the M10 isolation test also puts a `kubectl` that panics on `PATH`.
+    - As built: a child process's panic can't fail the test by itself, so the panicking kubectl (fake-ssh copied as `kubectl` next to a `panic-if-run` file) first leaves a `ran` file, and the test checks it isn't there.
+    - The app-level isolation test puts it on the user's `PATH`, with a `kubectl_path` that doesn't exist (no fallback, as for ssh).
+    - `fake-ssh/tests/sandbox.rs` puts it on the sandbox Core's own `PATH` and checks detection ("Not part of the tour"), a lookup and a kubectl tunnel's start ("kubectl not found").
+- **Done when:** a kubectl tunnel to a real cluster (the owner checks with k3s) can be created, started, stopped, reconnects after its pod is deleted, and works in a group and from the tray; Settings shows kubectl found and not found; ssh tunnels behave as before; CI passes on all three OSes.
+
 ---
 
 ## 13. Final shape (summary)
@@ -761,7 +885,6 @@ A small, trustworthy desktop tool where:
 
 ## 14. Ideas parked for later (not scheduled)
 
-- `kubectl port-forward` profiles alongside SSH tunnels (k3s workflows).
 - Embedded terminal.
 - Support for alternative ssh distributions on Windows.
 - Re-detect a tray host appearing or disappearing on Linux without *Refresh* (watch `NameOwnerChanged` for `org.kde.StatusNotifierWatcher`).
