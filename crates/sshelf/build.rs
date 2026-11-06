@@ -1,12 +1,17 @@
+//! The version string (`src/build_version.rs`, read by `src/version.rs`) on
+//! every target.
+//!
 //! Windows: embeds the app icon and the version information that Explorer
 //! shows in the file's Properties (description, product, version,
 //! copyright). The icon is drawn by `src/icon_shape.rs`, the same shape as
 //! the window and tray icons, at every size Windows asks for, and written
 //! as an `.ico` into `OUT_DIR`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::{env, fs};
 
+#[path = "src/build_version.rs"]
+mod build_version;
 #[path = "src/icon_shape.rs"]
 mod icon_shape;
 
@@ -15,7 +20,9 @@ const SIZES: [u32; 9] = [16, 20, 24, 32, 40, 48, 64, 128, 256];
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=src/build_version.rs");
     println!("cargo:rerun-if-changed=src/icon_shape.rs");
+    version();
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
@@ -40,6 +47,25 @@ fn main() {
     resource
         .compile()
         .expect("embedding the icon and version information");
+}
+
+/// `SSHELF_BUILD_VERSION` / `SSHELF_BUILD_COMMIT` for `env!`, again when
+/// `HEAD` or a ref moves or an override changes.
+fn version() {
+    println!("cargo:rerun-if-env-changed=SSHELF_VERSION");
+    println!("cargo:rerun-if-env-changed=SSHELF_COMMIT");
+    let dir = env::var_os("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR");
+    let dir = Path::new(&dir);
+    for path in build_version::watched(dir) {
+        println!("cargo:rerun-if-changed={}", path.display());
+    }
+    let build = build_version::describe(
+        dir,
+        env::var("SSHELF_VERSION").ok(),
+        env::var("SSHELF_COMMIT").ok(),
+    );
+    println!("cargo:rustc-env=SSHELF_BUILD_VERSION={}", build.version);
+    println!("cargo:rustc-env=SSHELF_BUILD_COMMIT={}", build.commit);
 }
 
 /// An `.ico` file with one 32-bit image per size.

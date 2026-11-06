@@ -32,9 +32,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      # SSHELF_VERSION / SSHELF_COMMIT are what build.rs embeds (the
+      # checkout has no tags to describe).
       - name: Get the release version from the tag
         shell: bash
-        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> "$GITHUB_ENV"
+        run: |
+          echo "VERSION=${GITHUB_REF#refs/tags/}" >> "$GITHUB_ENV"
+          echo "SSHELF_VERSION=${GITHUB_REF#refs/tags/}" >> "$GITHUB_ENV"
+          echo "SSHELF_COMMIT=${GITHUB_SHA::7}" >> "$GITHUB_ENV"
 
       - name: Install Linux build dependencies
         if: matrix.platform.os == 'ubuntu-latest'

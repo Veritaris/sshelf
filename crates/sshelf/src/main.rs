@@ -4,6 +4,8 @@
 #![windows_subsystem = "windows"]
 
 mod app;
+#[cfg(test)]
+mod build_version;
 mod close_guard;
 mod fonts;
 mod groups_view;
@@ -31,6 +33,7 @@ mod tray;
 mod tray_menu;
 mod tunnels_view;
 mod util;
+mod version;
 mod widgets;
 mod window;
 
@@ -42,11 +45,17 @@ use sshelf_core::instance;
 use sshelf_core::paths::Paths;
 
 fn main() -> ExitCode {
-    // The onboarding tour's sandbox runs sshelf itself as its ssh (SPEC.md
-    // §8): as the first argument, before any window, tray or lock exists.
+    // As the first argument, before any window, tray or lock exists: the
+    // onboarding tour's sandbox runs sshelf itself as its ssh (SPEC.md §8),
+    // and `--version` (§10 *Update check*).
     let mut args = std::env::args().skip(1);
-    if args.next().as_deref() == Some(fake_ssh::EMBEDDED_FLAG) {
-        return fake_ssh::run(args.collect());
+    match args.next().as_deref() {
+        Some(fake_ssh::EMBEDDED_FLAG) => return fake_ssh::run(args.collect()),
+        Some("--version") => {
+            print_line(&version::line());
+            return ExitCode::SUCCESS;
+        }
+        _ => {}
     }
     match run() {
         Ok(()) => ExitCode::SUCCESS,
@@ -55,6 +64,31 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// `text` on stdout. On Windows a console that started this GUI-subsystem
+/// program hands it no stdout (unless redirected): then the line goes to
+/// that console.
+fn print_line(text: &str) {
+    #[cfg(target_os = "windows")]
+    {
+        use std::io::Write;
+        use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+        use windows_sys::Win32::System::Console::{
+            ATTACH_PARENT_PROCESS, AttachConsole, GetStdHandle, STD_OUTPUT_HANDLE,
+        };
+        // SAFETY: plain calls without pointers.
+        let handle = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) };
+        if (handle.is_null() || handle == INVALID_HANDLE_VALUE)
+            // SAFETY: as above.
+            && unsafe { AttachConsole(ATTACH_PARENT_PROCESS) } != 0
+            && let Ok(mut console) = std::fs::OpenOptions::new().write(true).open("CONOUT$")
+        {
+            let _ = writeln!(console, "{text}");
+            return;
+        }
+    }
+    println!("{text}");
 }
 
 /// The icon eframe starts with: the window icon, or on macOS the Dock icon
