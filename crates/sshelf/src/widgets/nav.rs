@@ -78,10 +78,42 @@ pub fn segmented_rect(
     labels: &[&str],
     selected: usize,
 ) -> (Option<usize>, Rect) {
+    let segments: Vec<Segment> = labels.iter().map(|&label| Segment::new(label)).collect();
+    segmented_with(ui, id, &segments, selected)
+}
+
+/// One segment of [`segmented_with`]: its word, an optional Lucide icon
+/// before it, and why it can't be picked (shown as a tooltip).
+pub struct Segment<'a> {
+    pub label: &'a str,
+    pub icon: Option<(char, egui::Color32)>,
+    pub disabled: Option<&'a str>,
+}
+
+impl<'a> Segment<'a> {
+    pub fn new(label: &'a str) -> Self {
+        Segment {
+            label,
+            icon: None,
+            disabled: None,
+        }
+    }
+}
+
+/// [`segmented`] with icons and disabled segments (the tunnel editor's
+/// *ssh | kubectl* switch).
+pub fn segmented_with(
+    ui: &mut Ui,
+    id: Id,
+    segments: &[Segment],
+    selected: usize,
+) -> (Option<usize>, Rect) {
     let p = &Palette::ONE_DARK;
     const HEIGHT: f32 = 28.0;
     const PADDING: f32 = 10.0;
+    const ICON: f32 = 14.0 + 6.0;
     let font = FontId::proportional(12.0);
+    let labels: Vec<&str> = segments.iter().map(|s| s.label).collect();
     let galleys: Vec<_> = labels
         .iter()
         .map(|l| {
@@ -89,7 +121,11 @@ pub fn segmented_rect(
                 .layout_no_wrap(l.to_string(), font.clone(), p.text)
         })
         .collect();
-    let widths: Vec<f32> = galleys.iter().map(|g| g.size().x + PADDING * 2.0).collect();
+    let widths: Vec<f32> = galleys
+        .iter()
+        .zip(segments)
+        .map(|(g, s)| g.size().x + PADDING * 2.0 + if s.icon.is_some() { ICON } else { 0.0 })
+        .collect();
     let total = widths.iter().sum::<f32>() + 2.0 * (labels.len() as f32 - 1.0) + 4.0;
     let (outer, _) = ui.allocate_exact_size(vec2(total, HEIGHT + 4.0), Sense::hover());
     ui.painter().rect_filled(outer, radius::CONTROL, p.bg_dark);
@@ -99,11 +135,25 @@ pub fn segmented_rect(
     for (index, (label, galley)) in labels.iter().zip(galleys).enumerate() {
         let rect = Rect::from_min_size(pos2(x, outer.top() + 2.0), vec2(widths[index], HEIGHT));
         x += widths[index] + 2.0;
-        let response = ui.interact(rect, id.with(index), Sense::click());
+        let segment = &segments[index];
+        let enabled = segment.disabled.is_none();
+        let sense = if enabled {
+            Sense::click()
+        } else {
+            Sense::hover()
+        };
+        let response = ui.interact(rect, id.with(index), sense);
         let is_selected = index == selected;
-        response.widget_info(|| {
-            WidgetInfo::selected(Role::Tab, response.enabled(), is_selected, *label)
-        });
+        response.widget_info(|| WidgetInfo::selected(Role::Tab, enabled, is_selected, *label));
+        let response = match segment.disabled {
+            Some(why) => {
+                let why = why.to_string();
+                crate::widgets::popup::tip(response, move |ui| {
+                    ui.label(why);
+                })
+            }
+            None => response,
+        };
         if is_selected {
             let target =
                 motion::tween_rect(ui.ctx(), id.with("highlight"), index, rect, timing::SLIDE);
@@ -119,18 +169,36 @@ pub fn segmented_rect(
             timing::SLIDE,
             motion::ease_in_out,
         );
+        let text_color = if enabled {
+            p.text.lerp_to_gamma(p.text_strong, active)
+        } else {
+            p.disabled_text
+        };
+        let mut left = rect.left() + PADDING;
+        if let Some((icon, color)) = segment.icon {
+            let color = if enabled { color } else { p.disabled_text };
+            ui.painter().text(
+                pos2(left + 7.0, rect.center().y),
+                egui::Align2::CENTER_CENTER,
+                icon,
+                crate::icons::font(14.0),
+                color,
+            );
+            left += ICON;
+        }
         ui.painter().galley_with_override_text_color(
-            pos2(
-                rect.left() + PADDING,
-                rect.center().y - galley.size().y / 2.0,
-            ),
+            pos2(left, rect.center().y - galley.size().y / 2.0),
             galley,
-            p.text.lerp_to_gamma(p.text_strong, active),
+            text_color,
         );
-        if response.clicked() && !is_selected {
+        if response.clicked() && !is_selected && enabled {
             clicked = Some(index);
         }
-        response.on_hover_cursor(CursorIcon::PointingHand);
+        if enabled {
+            response.on_hover_cursor(CursorIcon::PointingHand);
+        } else if response.hovered() {
+            ui.ctx().set_cursor_icon(CursorIcon::NotAllowed);
+        }
     }
     (clicked, outer)
 }

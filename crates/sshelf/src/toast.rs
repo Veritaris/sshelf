@@ -34,6 +34,8 @@ struct Toast {
     value: Option<String>,
     /// The icon before it and its colour (a green check by default).
     icon: (char, Color32),
+    /// A *Copy* link that copies the value.
+    copy: bool,
     /// Seconds it has been shown (not counting hovered time).
     age: f64,
     /// `egui` time of the last frame that drew it.
@@ -110,12 +112,23 @@ impl Toasts {
         self.add(text.into(), None, (icon, color));
     }
 
+    /// Like [`Toasts::push_value`], with *Copy* for the value (a kubectl
+    /// tunnel's "web api is running on 127.0.0.1:18080").
+    pub fn push_copy(&mut self, text: impl Into<String>, value: impl Into<String>) {
+        let check = (icons::CIRCLE_CHECK, Palette::ONE_DARK.green);
+        self.add(text.into(), Some(value.into()), check);
+        if let Some(toast) = self.items.last_mut() {
+            toast.copy = true;
+        }
+    }
+
     fn add(&mut self, text: String, value: Option<String>, icon: (char, Color32)) {
         self.items.push(Toast {
             id: self.next_id,
             text,
             value,
             icon,
+            copy: false,
             age: 0.0,
             last: None,
         });
@@ -169,6 +182,13 @@ impl Toasts {
                                     masked::text(ui, &text, &style, true);
                                 } else {
                                     ui.label(message(&toast.text, toast.value.as_deref()));
+                                }
+                                if toast.copy
+                                    && let Some(value) = &toast.value
+                                    && crate::widgets::button::link(ui, "Copy", 13.0).clicked()
+                                {
+                                    // The real value, also in streamer mode.
+                                    ui.ctx().copy_text(value.clone());
                                 }
                             });
                         });

@@ -34,6 +34,8 @@ use crate::tunnels_view::{KeyFix, TunnelsView};
 use crate::{motion, status_bar, window};
 
 #[cfg(test)]
+mod kube_flow;
+#[cfg(test)]
 mod leak;
 mod tour_run;
 
@@ -314,6 +316,7 @@ impl SshelfApp {
                 } => self.hosts.detail.on_resolved(alias, generation, result),
                 Event::Ssh(info) => self.ssh = Some(info),
                 Event::Kubectl(info) => self.kubectl = Some(info),
+                Event::KubeLookup { query, result } => self.tunnels.on_lookup(query, result),
                 Event::Launched { alias } => {
                     self.toasts.push_value("Opened a terminal for", alias);
                 }
@@ -689,6 +692,10 @@ impl eframe::App for SshelfApp {
         // A kubectl failure banner's *Settings › kubectl*.
         if self.tunnels.take_open_settings() {
             self.view = View::Settings;
+        }
+        // A kubectl tunnel saved and started is up (SPEC.md §10).
+        if let Some((text, address)) = self.tunnels.take_running_toast() {
+            self.toasts.push_copy(text, address);
         }
         // A group's tunnel row shows that tunnel.
         if let Some(id) = self.groups.take_open_tunnel() {

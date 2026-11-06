@@ -17,7 +17,9 @@ use sshelf_core::hints;
 use sshelf_core::kubectl::KubectlInfo;
 use sshelf_core::redact::DOTS;
 use sshelf_core::supervisor::{FailureKind, Owner, Snapshot, TunnelState, TunnelStatus};
-use sshelf_core::tunnels::{DEFAULT_BIND, Forward, ForwardKind, ResourceKind, Tunnel, TunnelsFile};
+use sshelf_core::tunnels::{
+    DEFAULT_BIND, Forward, ForwardKind, ResourceKind, Tunnel, TunnelType, TunnelsFile,
+};
 
 use crate::theme::{Palette, radius, timing};
 use crate::tour::steps;
@@ -27,7 +29,7 @@ use crate::widgets::dropdown::{Choice, Dropdown};
 use crate::widgets::field::TextField;
 use crate::widgets::switch::switch;
 use crate::widgets::{marks, masked, nav, popup, text};
-use crate::{fonts, icons, motion, privacy, tour};
+use crate::{fonts, icons, kube_editor, motion, privacy, tour};
 
 /// Width of the tunnel list.
 const LIST_WIDTH: f32 = 340.0;
@@ -55,6 +57,16 @@ pub struct TunnelsView {
     filter: TypeFilter,
     /// *Settings › kubectl* was clicked: the app opens Settings.
     open_settings: bool,
+    /// The type a new tunnel starts as: the one used last this session.
+    last_type: TunnelType,
+    /// The kubectl editor's lookups.
+    lookups: kube_editor::Lookups,
+    /// *Pick another pod*: the editor scrolls to *Forward to*.
+    scroll_to_resource: bool,
+    /// A kubectl tunnel just saved and started: its toast once it runs.
+    announce: Option<String>,
+    /// That toast, for the app: the text and the address to copy.
+    running_toast: Option<(String, String)>,
 }
 
 /// `(label, color)` for a tunnel state.
@@ -471,6 +483,21 @@ impl TunnelsView {
         std::mem::take(&mut self.open_settings)
     }
 
+    /// "web api is running on" and its `127.0.0.1:18080`, once (a kubectl
+    /// tunnel saved and started is up).
+    pub fn take_running_toast(&mut self) -> Option<(String, String)> {
+        self.running_toast.take()
+    }
+
+    /// Core answered a kubectl lookup.
+    pub fn on_lookup(
+        &mut self,
+        query: sshelf_core::kubectl::KubeQuery,
+        result: Result<Vec<sshelf_core::kubectl::KubeItem>, String>,
+    ) {
+        self.lookups.on_result(query, result);
+    }
+
     /// The editor is open.
     pub fn is_editing(&self) -> bool {
         self.editor.is_some()
@@ -479,6 +506,7 @@ impl TunnelsView {
     pub fn close_editor(&mut self) {
         self.editor = None;
         self.set_aside.clear();
+        self.lookups.clear();
     }
 
     /// The draft in the editor (the tour fills it in).
@@ -486,16 +514,27 @@ impl TunnelsView {
         self.editor.as_mut()
     }
 
-    /// Opens the editor for a new tunnel to `host` (host detail "New tunnel").
+    /// Opens the editor for a new ssh tunnel to `host` (host detail "New
+    /// tunnel" always starts as ssh with its host).
     pub fn new_tunnel(&mut self, host: &str, file: &TunnelsFile) {
         self.selected = None;
         self.confirm_delete = None;
+        self.lookups.clear();
         self.editor = Some(Tunnel::ssh(
             &file.new_tunnel_id(),
             "",
             host,
             vec![new_forward()],
         ));
+    }
+
+    /// The list's *New tunnel*: the type used last this session (ssh at
+    /// first).
+    fn new_tunnel_of_last_type(&mut self, file: &TunnelsFile) {
+        self.new_tunnel("", file);
+        if let Some(draft) = &mut self.editor {
+            kube_editor::switch_type(draft, self.last_type);
+        }
     }
 
     pub fn show(
@@ -516,6 +555,28 @@ impl TunnelsView {
         let kubectl_missing = kubectl.is_some_and(|k| k.kubectl.is_err());
         let empty = Snapshot::default();
         let states = states.unwrap_or(&empty);
+        // A kubectl tunnel saved and started: say where it runs once it does.
+        if let Some(id) = self.announce.clone() {
+            match states.state(&id) {
+                TunnelState::Running => {
+                    self.announce = None;
+                    if let Some(tunnel) = data.tunnels.tunnel(&id)
+                        && let Some((address, port)) = tunnel.local_ports().first().cloned()
+                    {
+                        self.running_toast = Some((
+                            format!("{} is running on", tunnel.name),
+                            format!("{address}:{port}"),
+                        ));
+                    }
+                }
+                TunnelState::Failed(_) | TunnelState::Stopped
+                    if states.tunnels.contains_key(&id) =>
+                {
+                    self.announce = None;
+                }
+                _ => {}
+            }
+        }
         let no_hosts = HostList::default();
         let hosts = config.and_then(|c| c.hosts()).unwrap_or(&no_hosts);
         if self
@@ -553,7 +614,7 @@ impl TunnelsView {
             }))
             .show(ui, |ui| {
                 if self.editor.is_some() {
-                    self.editor(ui, data, hosts, &mut commands);
+                    self.editor(ui, (data, hosts), (kubectl, kubectl_missing), &mut commands);
                 } else if let Some(tunnel) = self
                     .selected
                     .as_ref()
@@ -617,7 +678,7 @@ impl TunnelsView {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let response = ui.add(Button::icon_only(icons::PLUS, "New tunnel"));
                 if tour::targets::clicked(ui.ctx(), Target::NewTunnel, &response) {
-                    self.new_tunnel("", &data.tunnels);
+                    self.new_tunnel_of_last_type(&data.tunnels);
                 }
             });
         });
@@ -907,7 +968,10 @@ impl TunnelsView {
                     commands,
                     &mut self.show_log,
                 ) {
-                    Some(KubeFix::Edit) => self.editor = Some(tunnel.clone()),
+                    Some(KubeFix::Edit) => {
+                        self.editor = Some(tunnel.clone());
+                        self.scroll_to_resource = true;
+                    }
                     Some(KubeFix::Settings) => self.open_settings = true,
                     None => {}
                 }
@@ -945,8 +1009,8 @@ impl TunnelsView {
     fn editor(
         &mut self,
         ui: &mut Ui,
-        data: &AppData,
-        hosts: &HostList,
+        (data, hosts): (&AppData, &HostList),
+        (kubectl, kubectl_missing): (Option<&KubectlInfo>, bool),
         commands: &mut Vec<Command>,
     ) {
         let p = &Palette::ONE_DARK;
@@ -955,9 +1019,29 @@ impl TunnelsView {
         };
         let is_new = data.tunnels.tunnel(&draft.id).is_none();
         let mut problems = draft.validate();
-        if !draft.host.is_empty() && hosts.find(&draft.host).is_none() {
+        if !draft.is_kubectl() && !draft.host.is_empty() && hosts.find(&draft.host).is_none() {
             problems.push(format!("no host `{}` in the ssh config", draft.host));
         }
+        // kubectl: what is still missing, in short words (the footer).
+        let missing = if draft.is_kubectl() {
+            draft.missing()
+        } else {
+            Vec::new()
+        };
+        let missing_text =
+            (!missing.is_empty()).then(|| format!("Missing: {}", missing.join(", ")));
+        let last_type = &mut self.last_type;
+        let open_settings = &mut self.open_settings;
+        let lookups = &mut self.lookups;
+        let scroll_to_resource = std::mem::take(&mut self.scroll_to_resource);
+        // Local ports of the other tunnels: suggestions skip them.
+        let taken: Vec<u16> = data
+            .tunnels
+            .tunnels
+            .iter()
+            .filter(|t| t.id != draft.id)
+            .flat_map(Tunnel::listen_ports)
+            .collect();
         let general: Vec<&String> = problems
             .iter()
             .filter(|p| !p.starts_with("forward "))
@@ -977,27 +1061,42 @@ impl TunnelsView {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 8.0;
                     let ok = problems.is_empty();
-                    let why = problems.first().map(|p| capitalized(p));
+                    let why = missing_text
+                        .clone()
+                        .or_else(|| problems.first().map(|p| capitalized(p)));
+                    // A kubectl tunnel can be saved without kubectl, not started.
+                    let no_start =
+                        (draft.is_kubectl() && kubectl_missing).then_some(KUBECTL_MISSING);
                     let mut save_button = Button::new("Save").primary();
                     let mut start_button = Button::new("Save and start");
                     if let Some(why) = &why {
                         save_button = save_button.tip(why);
                         start_button = start_button.tip(why);
                     }
+                    if let Some(why) = no_start {
+                        start_button = start_button.tip(why);
+                    }
                     let response = ui.add_enabled(ok, save_button);
                     if tour::targets::clicked(ui.ctx(), Target::TunnelSave, &response) && ok {
                         save = Some(false);
                     }
-                    if ui.add_enabled(ok, start_button).clicked() {
+                    if ui
+                        .add_enabled(ok && no_start.is_none(), start_button)
+                        .clicked()
+                    {
                         save = Some(true);
                     }
                     close = ui.add(Button::new("Cancel").ghost()).clicked();
-                    if !problems.is_empty() {
+                    if let Some(missing) = &missing_text {
+                        ui.label(RichText::new(missing).size(12.0).color(p.dim));
+                    } else if !problems.is_empty() {
                         let count = match problems.len() {
                             1 => "1 problem".to_string(),
                             n => format!("{n} problems"),
                         };
                         ui.label(RichText::new(count).size(12.0).color(p.red));
+                    } else if draft.is_kubectl() {
+                        ui.label(RichText::new("Ready").size(12.0).color(p.green));
                     }
                 });
                 ui.add_space(16.0);
@@ -1009,11 +1108,50 @@ impl TunnelsView {
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 10.0;
-                ui.label(
-                    RichText::new(if is_new { "New tunnel" } else { "Edit tunnel" })
-                        .font(fonts::semibold(20.0))
-                        .color(p.text_strong),
-                );
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(if is_new { "New tunnel" } else { "Edit tunnel" })
+                            .font(fonts::semibold(20.0))
+                            .color(p.text_strong),
+                    );
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let kinds = [TunnelType::Ssh, TunnelType::Kubectl];
+                        let segments = [
+                            nav::Segment {
+                                icon: Some((icons::TERMINAL, p.dim)),
+                                ..nav::Segment::new("ssh")
+                            },
+                            nav::Segment {
+                                icon: Some((icons::SHIP_WHEEL, p.blue)),
+                                ..nav::Segment::new("kubectl")
+                            },
+                        ];
+                        let at = kinds.iter().position(|k| *k == draft.kind).unwrap_or(0);
+                        if let (Some(picked), _) =
+                            nav::segmented_with(ui, Id::unique("tunnel_type"), &segments, at)
+                        {
+                            kube_editor::switch_type(draft, kinds[picked]);
+                            *last_type = kinds[picked];
+                        }
+                    });
+                });
+                if draft.is_kubectl() && kubectl_missing {
+                    marks::banner(ui, p.yellow_tint, |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            icons::show(ui, icons::TRIANGLE_ALERT, icons::INLINE, p.yellow);
+                            ui.label(
+                                RichText::new(
+                                    "kubectl wasn't found, so this tunnel can be saved but not \
+                                     started.",
+                                )
+                                .color(p.yellow),
+                            );
+                            if button::link(ui, "Settings › kubectl", 13.0).clicked() {
+                                *open_settings = true;
+                            }
+                        });
+                    });
+                }
                 ui.add_space(4.0);
                 let errors_for = |prefix: &str| -> Vec<String> {
                     general
@@ -1033,6 +1171,16 @@ impl TunnelsView {
                     .labelled_by(label);
                     field_errors(ui, &errors);
                 });
+                if draft.is_kubectl() {
+                    let env = kube_editor::Env {
+                        info: kubectl,
+                        taken: taken.clone(),
+                        problems: &problems,
+                        scroll_to_resource,
+                    };
+                    kube_editor::form(ui, draft, lookups, &env, commands);
+                    return;
+                }
                 editor_row(ui, ("Host", true, LABEL), |ui, _| {
                     let mut errors = errors_for("no host");
                     // Hidden aliases: "host N" here too (and in the search).
@@ -1153,13 +1301,17 @@ impl TunnelsView {
             commands.push(Command::SaveTunnel(draft.clone()));
             if start {
                 commands.push(Command::StartTunnel(draft.id.clone()));
+                // kubectl: "web api is running on 127.0.0.1:18080" once up.
+                if draft.is_kubectl() {
+                    self.announce = Some(draft.id.clone());
+                }
             }
+            self.last_type = draft.kind;
             self.selected = Some(draft.id.clone());
             close = true;
         }
         if close {
-            self.editor = None;
-            self.set_aside.clear();
+            self.close_editor();
         }
     }
 
@@ -1242,7 +1394,7 @@ pub fn field_errors(ui: &mut Ui, errors: &[String]) {
 }
 
 /// Label width of the tunnel editor's rows.
-const LABEL: f32 = 110.0;
+pub const LABEL: f32 = 110.0;
 
 /// An editor row: the label (`label_width` wide), then `add`, given the
 /// label's id. `named_by_field`: the field (a dropdown, a switch) carries
@@ -1478,7 +1630,7 @@ fn forward_card(
     remove
 }
 
-fn exposed_hint(kind: ForwardKind) -> &'static str {
+pub fn exposed_hint(kind: ForwardKind) -> &'static str {
     match kind {
         ForwardKind::R => {
             "listens on a non-loopback address of the server: other machines can reach it"
@@ -2589,6 +2741,209 @@ mod tests {
         assert_eq!(saved.host, "bastion");
         assert!(saved.id.starts_with("t-"));
         assert_eq!(started, &saved.id);
+    }
+
+    /// A new kubectl tunnel from empty, with the lookups answered by hand:
+    /// the switch, Missing, the namespace (listed on open, with the loading
+    /// row), the service and its port chips, the suggested local port,
+    /// Ready, *Save and start*, then the toast once it runs.
+    #[test]
+    fn a_kubectl_tunnel_is_made_in_the_editor() {
+        use sshelf_core::kubectl::{KubeItem, KubeList, KubePort, KubeQuery};
+        let f = kube_fixture(TunnelState::Stopped, None, true);
+        let mut view = TunnelsView::default();
+        view.new_tunnel("", &f.data.tunnels);
+        let mut harness = harness(f, view);
+        harness.step();
+        // The editor's switch (the list's type filter is first).
+        harness.get_all_by_label("kubectl").last().unwrap().click();
+        harness.step();
+        harness.step();
+        harness.get_by_label("Missing: name, namespace, service, a port");
+        assert!(harness.get_by_label("Save").accesskit_node().is_disabled());
+        harness.state_mut().0.editor.as_mut().unwrap().name = "web api 2".into();
+
+        // The namespaces are listed when the dropdown opens.
+        harness.get_by_label("Namespace").click();
+        harness.step();
+        harness.step();
+        let namespaces = KubeQuery {
+            context: String::new(),
+            what: KubeList::Namespaces,
+        };
+        assert_eq!(harness.state().1, [Command::KubeLookup(namespaces.clone())]);
+        assert!(test_util::drawn_text(&harness).contains("Listing namespaces on"));
+        let item = |name: &str, ports: &[(u16, &str)]| KubeItem {
+            name: name.into(),
+            ports: ports
+                .iter()
+                .map(|&(port, name)| KubePort {
+                    port,
+                    name: (!name.is_empty()).then(|| name.into()),
+                })
+                .collect(),
+            status: None,
+        };
+        harness
+            .state_mut()
+            .0
+            .on_lookup(namespaces, Ok(vec![item("api", &[]), item("ops", &[])]));
+        harness.step();
+        harness.step();
+        assert!(
+            test_util::drawn_text(&harness)
+                .contains("kubectl get namespaces · 2 · you can also type one")
+        );
+        harness.get_by_label("ops").click();
+        harness.step();
+        harness.step();
+        assert_eq!(
+            harness.state().0.editor.as_ref().unwrap().kube.namespace,
+            "ops"
+        );
+
+        // Then the services in it, with their ports.
+        harness.state_mut().1.clear();
+        harness.get_by_label("Resource").click();
+        harness.step();
+        harness.step();
+        let services = KubeQuery {
+            context: String::new(),
+            what: KubeList::Resources {
+                namespace: "ops".into(),
+                kind: ResourceKind::Service,
+            },
+        };
+        assert_eq!(harness.state().1, [Command::KubeLookup(services.clone())]);
+        harness.state_mut().0.on_lookup(
+            services,
+            Ok(vec![item("grafana", &[(80, "http"), (9090, "metrics")])]),
+        );
+        harness.step();
+        harness.step();
+        harness.get_by_label("grafana").click();
+        harness.step();
+        harness.step();
+        // One empty forward with the ports as chips; 18080 is taken by
+        // `web api`, so the suggestion is the next one up.
+        harness.get_by_label("80 http").click();
+        harness.step();
+        harness.step();
+        let draft = harness.state().0.editor.clone().unwrap();
+        assert_eq!(draft.kube.resource.to_string(), "service/grafana");
+        assert_eq!(
+            draft.kube.forwards,
+            [sshelf_core::tunnels::KubeForward {
+                listen: 18081,
+                target: "80".into()
+            }]
+        );
+        harness.get_by_label("Ready");
+        harness.get_by_label_contains(
+            "kubectl --namespace ops port-forward service/grafana 18081:80 --address 127.0.0.1",
+        );
+
+        harness.state_mut().1.clear();
+        harness.get_by_label("Save and start").click();
+        harness.step();
+        let id = draft.id.clone();
+        assert_eq!(
+            harness.state().1,
+            [
+                Command::SaveTunnel(draft.clone()),
+                Command::StartTunnel(id.clone())
+            ]
+        );
+        assert!(!harness.state().0.is_editing());
+        assert_eq!(harness.state_mut().0.take_running_toast(), None);
+    }
+
+    #[test]
+    fn a_typed_namespace_is_used_and_a_failed_lookup_says_why() {
+        use sshelf_core::kubectl::{KubeList, KubeQuery};
+        let f = kube_fixture(TunnelState::Stopped, None, true);
+        let mut view = TunnelsView::default();
+        view.new_tunnel("", &f.data.tunnels);
+        kube_editor::switch_type(view.editor.as_mut().unwrap(), TunnelType::Kubectl);
+        let mut harness = harness(f, view);
+        harness.step();
+        harness.get_by_label("Namespace").click();
+        harness.step();
+        harness.step();
+        let query = KubeQuery {
+            context: String::new(),
+            what: KubeList::Namespaces,
+        };
+        harness
+            .state_mut()
+            .0
+            .on_lookup(query, Err("Error from server (Forbidden)".into()));
+        harness.step();
+        harness.step();
+        assert!(
+            test_util::drawn_text(&harness)
+                .contains("Can't list namespaces: Error from server (Forbidden)")
+        );
+        harness.event(egui::Event::Text("lab-ns".into()));
+        harness.step();
+        harness.step();
+        harness.get_by_label("Use \u{201c}lab-ns\u{201d}");
+        harness.key_press(egui::Key::Enter);
+        harness.step();
+        harness.step();
+        assert_eq!(
+            harness.state().0.editor.as_ref().unwrap().kube.namespace,
+            "lab-ns"
+        );
+        // The resource can be picked now (it was disabled before).
+        assert!(
+            !harness
+                .get_by_label("Resource")
+                .accesskit_node()
+                .is_disabled()
+        );
+    }
+
+    #[test]
+    fn without_kubectl_a_kubectl_tunnel_saves_but_doesnt_start() {
+        let f = kube_fixture(TunnelState::Stopped, None, false);
+        let view = TunnelsView {
+            editor: Some(kube_tunnel()),
+            ..TunnelsView::default()
+        };
+        let mut harness = harness(f, view);
+        harness.step();
+        harness.get_by_label_contains("kubectl wasn't found, so this tunnel can be saved");
+        harness.get_by_label("Ready");
+        assert!(!harness.get_by_label("Save").accesskit_node().is_disabled());
+        assert!(
+            harness
+                .get_by_label("Save and start")
+                .accesskit_node()
+                .is_disabled()
+        );
+        harness.get_by_label("Settings › kubectl").click();
+        harness.step();
+        assert!(harness.state_mut().0.take_open_settings());
+    }
+
+    /// Once a kubectl tunnel saved and started runs, the app gets its toast.
+    #[test]
+    fn a_started_kubectl_tunnel_announces_where_it_runs() {
+        let f = kube_fixture(TunnelState::Running, None, true);
+        let view = TunnelsView {
+            announce: Some("t-k".into()),
+            ..TunnelsView::default()
+        };
+        let mut harness = harness(f, view);
+        harness.step();
+        assert_eq!(
+            harness.state_mut().0.take_running_toast(),
+            Some((
+                "web api is running on".to_string(),
+                "127.0.0.1:18080".to_string()
+            ))
+        );
     }
 
     #[test]

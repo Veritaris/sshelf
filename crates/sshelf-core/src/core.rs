@@ -24,7 +24,7 @@ use crate::health::{self, Health, HealthReport, HealthSnapshot};
 use crate::history::History;
 use crate::hostkeys::{self, ChangedKey, Keygen, KnownHostsWriter, UnknownKey};
 use crate::keygen::{self, FoundKey, GeneratedKey, KeyRequest};
-use crate::kubectl::{self, KubectlInfo};
+use crate::kubectl::{self, KubeItem, KubeQuery, KubectlInfo};
 use crate::metadata::{HostMeta, HostsFile};
 use crate::orphans::{self, GroupOrphan, Orphan, TunnelOrphan};
 use crate::paths::Paths;
@@ -101,6 +101,9 @@ pub enum Command {
     RefreshSsh,
     /// Re-detect kubectl, its version and the kubeconfig (M13).
     RefreshKubectl,
+    /// List namespaces or resources for the tunnel editor (M13); answered
+    /// by [`Event::KubeLookup`].
+    KubeLookup(KubeQuery),
     /// Open a terminal session for an alias.
     Connect(String),
     /// Create or update a tunnel (refused while it runs).
@@ -268,6 +271,11 @@ pub enum Event {
     Ssh(Arc<SshInfo>),
     /// kubectl's binary, version and kubeconfig (M13), after each detection.
     Kubectl(Arc<KubectlInfo>),
+    /// What a [`Command::KubeLookup`] found, or why it couldn't.
+    KubeLookup {
+        query: KubeQuery,
+        result: Result<Vec<KubeItem>, String>,
+    },
     Launched {
         alias: String,
     },
@@ -756,6 +764,7 @@ impl Worker {
                 Command::SetStreamer { on, hide_aliases } => self.set_streamer(on, hide_aliases),
                 Command::RefreshSsh => self.refresh_ssh(),
                 Command::RefreshKubectl => self.refresh_kubectl(),
+                Command::KubeLookup(query) => self.kube_lookup(query),
                 Command::Connect(alias) => self.connect(&alias),
                 Command::SaveTunnel(tunnel) => self.save_tunnel(tunnel),
                 Command::DeleteTunnel(id) => self.delete_tunnel(&id),
@@ -1699,6 +1708,28 @@ impl Worker {
         thread::spawn(move || {
             let info = KubectlInfo::check(kubectl, &env, &home);
             emitter.emit(Event::Kubectl(Arc::new(info)));
+        });
+    }
+
+    /// Lists what the tunnel editor asks for on a worker (kubectl may wait
+    /// on the cluster); the sandbox never runs kubectl.
+    fn kube_lookup(&self, query: KubeQuery) {
+        let emitter = self.emitter.clone();
+        let Some(tool) = self.kubectl.clone().filter(|_| self.sandbox.is_none()) else {
+            let why = if self.sandbox.is_some() {
+                kubectl::NOT_IN_TOUR
+            } else {
+                "kubectl wasn't found"
+            };
+            emitter.emit(Event::KubeLookup {
+                query,
+                result: Err(why.to_string()),
+            });
+            return;
+        };
+        thread::spawn(move || {
+            let result = kubectl::lookup(&tool, &query);
+            emitter.emit(Event::KubeLookup { query, result });
         });
     }
 

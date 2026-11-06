@@ -96,7 +96,20 @@ struct Outcome {
     picked: Option<usize>,
     /// *Clear* (multi).
     clear: bool,
+    /// A typed value was used ([`Dropdown::show_typed`]).
+    typed: Option<String>,
 }
+
+/// What [`Dropdown::show_typed`] returns: an option, or the text typed into
+/// the search.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Picked<T> {
+    Choice(T),
+    Typed(String),
+}
+
+/// The caption under the rows ([`Dropdown::with_caption`]).
+const CAPTION: f32 = 30.0;
 
 /// A dropdown over `options`; [`Dropdown::show`] for single-select,
 /// [`Dropdown::show_multi`] for multi-select.
@@ -117,6 +130,13 @@ pub struct Dropdown<'a, T> {
     /// Searchable: what the options are, for "No hosts match".
     search: Option<&'a str>,
     multi: bool,
+    /// A row above the options: still listing them (`true`, with the
+    /// pulsing ring), or why they couldn't be listed.
+    status: Option<(String, bool)>,
+    /// A dim caption under the rows (where the options come from).
+    caption: Option<String>,
+    /// The search text can be used as a value ([`Dropdown::show_typed`]).
+    typed: bool,
 }
 
 impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
@@ -153,7 +173,38 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
             panel_width: 180.0,
             search: None,
             multi: false,
+            status: None,
+            caption: None,
+            typed: false,
         }
+    }
+
+    /// The options are still being listed: a row with the pulsing ring and
+    /// `text` above them (SPEC.md §10 *kubectl tunnels*).
+    pub fn loading(mut self, text: impl Into<String>) -> Self {
+        self.status = Some((text.into(), true));
+        self
+    }
+
+    /// The options couldn't be listed: `reason` in a row above them; typing
+    /// still works with [`Dropdown::show_typed`].
+    pub fn error(mut self, reason: impl Into<String>) -> Self {
+        self.status = Some((reason.into(), false));
+        self
+    }
+
+    /// A dim caption under the rows (e.g. where the options come from).
+    pub fn with_caption(mut self, text: impl Into<String>) -> Self {
+        self.caption = Some(text.into());
+        self
+    }
+
+    /// The trimmed search text, if it can be used as typed: not empty and
+    /// no option's label exactly.
+    fn usable_query(&self, query: &str) -> Option<String> {
+        let query = query.trim();
+        (self.typed && !query.is_empty() && !self.choices.iter().any(|c| c.label == query))
+            .then(|| query.to_string())
     }
 
     /// A search field at the top, focused on open; typing filters by
@@ -235,6 +286,24 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
         outcome.picked.map(|i| self.choices[i].value)
     }
 
+    /// Single-select whose search text can also be used as the value: a row
+    /// "Use “…”", and Enter while nothing matches.
+    pub fn show_typed(mut self, ui: &mut Ui, selected: T) -> Option<Picked<T>> {
+        self.typed = true;
+        let selected: Vec<usize> = self
+            .choices
+            .iter()
+            .position(|c| c.value == selected)
+            .into_iter()
+            .collect();
+        let outcome = self.run(ui, &selected, &[]);
+        match (outcome.typed, outcome.picked) {
+            (Some(text), _) => Some(Picked::Typed(text)),
+            (None, Some(i)) => Some(Picked::Choice(self.choices[i].value)),
+            (None, None) => None,
+        }
+    }
+
     /// Multi-select: rows with checkboxes; toggling keeps the panel open.
     /// The closed control shows `selected` as chips (the rest as "+N").
     /// Returns whether `selected` changed.
@@ -308,8 +377,13 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
                     let next = at.map_or(0, |at| at.saturating_sub(1));
                     state.highlight = visible.get(next).copied().unwrap_or(state.highlight);
                 }
-                if i.consume_key(Modifiers::NONE, Key::Enter) && pickable {
-                    outcome.picked = Some(state.highlight);
+                if i.consume_key(Modifiers::NONE, Key::Enter) {
+                    // A match is picked; with nothing matching, the text.
+                    if pickable {
+                        outcome.picked = Some(state.highlight);
+                    } else if let Some(text) = self.usable_query(&state.query) {
+                        outcome.typed = Some(text);
+                    }
                 }
                 // Space toggles in a multi-select (with a search, it types).
                 if self.multi
@@ -347,7 +421,18 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
                 self.choices.iter().filter(|c| c.group.is_some()).count()
             };
             let search = if self.search.is_some() { SEARCH } else { 0.0 };
-            let footer = if self.multi { FOOTER } else { 0.0 };
+            let mut footer = if self.multi { FOOTER } else { 0.0 };
+            if self.caption.is_some() {
+                footer += CAPTION;
+            }
+            // The status row and the "Use “…”" row.
+            let extra = usize::from(self.status.is_some())
+                + usize::from(self.usable_query(&state.query).is_some());
+            let rows = if visible.is_empty() && extra > 0 {
+                extra
+            } else {
+                rows + extra
+            };
             let height = rows as f32 * row + groups as f32 * GROUP + search + footer + 8.0;
             let width = trigger.rect.width().max(self.panel_width);
             let below = trigger.rect.bottom() + GAP;
@@ -383,10 +468,16 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
                                 self.search_field(ui, &mut state);
                             }
                             let rows_height = height - 8.0 - search - footer;
-                            if let Some(index) =
-                                self.rows(ui, &mut state, (selected, &visible), rows_height)
-                            {
+                            if let Some(index) = self.rows(
+                                ui,
+                                &mut state,
+                                (selected, &visible),
+                                (rows_height, &mut outcome.typed),
+                            ) {
                                 outcome.picked = Some(index);
+                            }
+                            if let Some(caption) = &self.caption {
+                                self.caption(ui, caption);
                             }
                             if self.multi {
                                 let shown_count = self.search.map(|_| visible.len());
@@ -407,11 +498,35 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
                 state.open = false;
             }
         }
-        if close || (outcome.picked.is_some() && !self.multi) {
+        if close || ((outcome.picked.is_some() || outcome.typed.is_some()) && !self.multi) {
             state.open = false;
         }
         ctx.data_mut(|d| d.insert_temp(self.id, state));
         outcome
+    }
+
+    /// The caption under the rows, below a line.
+    fn caption(&self, ui: &mut Ui, caption: &str) {
+        let p = &Palette::ONE_DARK;
+        let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), CAPTION), Sense::hover());
+        ui.painter().hline(
+            (rect.left() - 4.0)..=(rect.right() + 4.0),
+            rect.top() + 4.0,
+            Stroke::new(1.0, p.selection),
+        );
+        let font = FontId::proportional(11.0);
+        let (shown, _) = text::elide(ui.painter(), caption, &font, rect.width() - 20.0);
+        let mut child = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(Rect::from_min_max(
+                    pos2(rect.left() + 10.0, rect.top() + 5.0),
+                    rect.max,
+                ))
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        );
+        child.add(
+            egui::Label::new(egui::RichText::new(shown).font(font).color(p.dim)).selectable(false),
+        );
     }
 
     /// "N selected · M shown", *Clear* and *Done*; returns whether each was
@@ -668,13 +783,14 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
         });
     }
 
-    /// The option rows; returns the one clicked.
+    /// The option rows; returns the one clicked (`typed` gets the search
+    /// text when its "Use “…”" row is).
     fn rows(
         &self,
         ui: &mut Ui,
         state: &mut State,
         (selected, visible): (&[usize], &[usize]),
-        max_height: f32,
+        (max_height, typed): (f32, &mut Option<String>),
     ) -> Option<usize> {
         let p = &Palette::ONE_DARK;
         let row = self.row_height();
@@ -687,7 +803,36 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
                 let slot = ui.painter().add(Shape::Noop);
                 let mut highlighted = None;
                 let searching = !state.query.trim().is_empty();
-                if visible.is_empty() {
+                if let Some((text, loading)) = &self.status {
+                    let (rect, _) =
+                        ui.allocate_exact_size(vec2(ui.available_width(), row), Sense::hover());
+                    let mut child = ui.new_child(
+                        egui::UiBuilder::new()
+                            .max_rect(rect.shrink2(vec2(10.0, 0.0)))
+                            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                    );
+                    child.spacing_mut().item_spacing.x = 8.0;
+                    let color = if *loading {
+                        crate::widgets::marks::pulsing_ring(&mut child, 10.0, p.yellow);
+                        p.dim
+                    } else {
+                        child.label(
+                            egui::RichText::new(icons::TRIANGLE_ALERT.to_string())
+                                .font(icons::font(12.0))
+                                .color(p.yellow),
+                        );
+                        p.yellow
+                    };
+                    let font = FontId::proportional(12.0);
+                    let (shown, _) =
+                        text::elide(child.painter(), text, &font, child.available_width());
+                    child.add(
+                        egui::Label::new(egui::RichText::new(shown).font(font).color(color))
+                            .selectable(false),
+                    );
+                }
+                let usable = self.usable_query(&state.query);
+                if visible.is_empty() && self.status.is_none() && usable.is_none() {
                     let (rect, _) =
                         ui.allocate_exact_size(vec2(ui.available_width(), row), Sense::hover());
                     let what = self.search.unwrap_or("options");
@@ -847,6 +992,28 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
                         ui.ctx().set_cursor_icon(CursorIcon::NotAllowed);
                     }
                 }
+                // The search text as a value of its own.
+                if let Some(text) = usable {
+                    let (rect, response) =
+                        ui.allocate_exact_size(vec2(ui.available_width(), row), Sense::click());
+                    let label = format!("Use \u{201c}{text}\u{201d}");
+                    response.widget_info(|| {
+                        WidgetInfo::selected(Role::ListBoxOption, true, false, &label)
+                    });
+                    if response.hovered() {
+                        highlighted = Some((usize::MAX, rect));
+                    }
+                    ui.painter().text(
+                        pos2(rect.left() + 10.0, rect.center().y),
+                        Align2::LEFT_CENTER,
+                        label,
+                        self.label_font(),
+                        p.text,
+                    );
+                    if response.on_hover_cursor(CursorIcon::PointingHand).clicked() {
+                        *typed = Some(text);
+                    }
+                }
                 nav::hover_highlight(
                     ui,
                     self.id.with("highlight"),
@@ -857,6 +1024,12 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
             });
         picked
     }
+}
+
+/// Whether the dropdown made with `id` is open (its options load on open).
+pub fn is_open(ctx: &egui::Context, id: impl std::hash::Hash + std::fmt::Debug) -> bool {
+    ctx.data(|d| d.get_temp::<State>(Id::unique(id)))
+        .is_some_and(|s| s.open)
 }
 
 /// A 16 px checkbox at `center`, `ticked` 0 → 1: the outline gives way to a

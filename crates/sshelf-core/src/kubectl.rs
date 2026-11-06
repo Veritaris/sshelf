@@ -11,7 +11,8 @@ use serde_json::Value;
 
 use crate::paths::KubeEnv;
 use crate::process;
-use crate::ssh::{QUICK_TIMEOUT, Tool, find_in_path};
+use crate::ssh::{QUICK_TIMEOUT, RESOLVE_TIMEOUT, Tool, find_in_path};
+use crate::tunnels::ResourceKind;
 
 /// Why the tour's sandbox has no kubectl (SPEC.md §10 *kubectl tunnels*).
 pub const NOT_IN_TOUR: &str = "Not part of the tour";
@@ -271,6 +272,149 @@ pub fn config_view(tool: &Tool) -> Result<KubeConfigView, String> {
     )?)
 }
 
+/// How long a lookup may take on the cluster's side (`--request-timeout`).
+pub const LOOKUP_TIMEOUT: &str = "5s";
+
+/// What the tunnel editor asks the cluster for (SPEC.md §7 *kubectl
+/// tunnels*, *Lookups for the editor*).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct KubeQuery {
+    /// Empty: the current context.
+    pub context: String,
+    pub what: KubeList,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum KubeList {
+    Namespaces,
+    Resources {
+        namespace: String,
+        kind: ResourceKind,
+    },
+}
+
+impl KubeQuery {
+    /// kubectl's arguments.
+    pub fn args(&self) -> Vec<String> {
+        let mut args = Vec::new();
+        if !self.context.is_empty() {
+            args.extend(["--context".to_string(), self.context.clone()]);
+        }
+        match &self.what {
+            KubeList::Namespaces => args.extend(["get".into(), "namespaces".into()]),
+            KubeList::Resources { namespace, kind } => args.extend([
+                "--namespace".to_string(),
+                namespace.clone(),
+                "get".into(),
+                kind.plural().into(),
+            ]),
+        }
+        args.extend([
+            "-o".to_string(),
+            "json".into(),
+            format!("--request-timeout={LOOKUP_TIMEOUT}"),
+        ]);
+        args
+    }
+
+    /// As the editor's footer shows it: `kubectl get services -n api`.
+    pub fn describe(&self) -> String {
+        match &self.what {
+            KubeList::Namespaces => "kubectl get namespaces".into(),
+            KubeList::Resources { namespace, kind } => {
+                format!("kubectl get {} -n {namespace}", kind.plural())
+            }
+        }
+    }
+}
+
+/// A port a resource offers: its number and name, if named.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KubePort {
+    pub port: u16,
+    pub name: Option<String>,
+}
+
+/// One namespace, pod, service or deployment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KubeItem {
+    pub name: String,
+    pub ports: Vec<KubePort>,
+    /// A pod's phase ("Running"), a deployment's "2/2 ready".
+    pub status: Option<String>,
+}
+
+/// The items of `kubectl get … -o json` for `what`.
+pub fn parse_list(what: &KubeList, json: &str) -> Result<Vec<KubeItem>, String> {
+    let value: Value = serde_json::from_str(json).map_err(|e| format!("unexpected output: {e}"))?;
+    let items = value
+        .get("items")
+        .and_then(Value::as_array)
+        .ok_or("no items in kubectl's output")?;
+    let text = |v: &Value, path: &str| v.pointer(path).and_then(Value::as_str).map(String::from);
+    let ports = |list: Option<&Value>, key: &str| -> Vec<KubePort> {
+        list.and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|p| {
+                Some(KubePort {
+                    port: u16::try_from(p.get(key)?.as_u64()?).ok()?,
+                    name: text(p, "/name"),
+                })
+            })
+            .collect()
+    };
+    let container_ports = |spec: Option<&Value>| -> Vec<KubePort> {
+        spec.and_then(|s| s.get("containers"))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .flat_map(|c| ports(c.get("ports"), "containerPort"))
+            .collect()
+    };
+    let mut parsed: Vec<KubeItem> = items
+        .iter()
+        .filter_map(|item| {
+            let name = text(item, "/metadata/name")?;
+            let (ports, status) = match what {
+                KubeList::Namespaces => (Vec::new(), None),
+                KubeList::Resources { kind, .. } => match kind {
+                    ResourceKind::Service => (ports(item.pointer("/spec/ports"), "port"), None),
+                    ResourceKind::Pod => (
+                        container_ports(item.get("spec")),
+                        text(item, "/status/phase"),
+                    ),
+                    ResourceKind::Deployment => {
+                        let desired = item.pointer("/spec/replicas").and_then(Value::as_u64);
+                        let ready = item
+                            .pointer("/status/readyReplicas")
+                            .and_then(Value::as_u64)
+                            .unwrap_or(0);
+                        (
+                            container_ports(item.pointer("/spec/template/spec")),
+                            desired.map(|d| format!("{ready}/{d} ready")),
+                        )
+                    }
+                },
+            };
+            Some(KubeItem {
+                name,
+                ports,
+                status,
+            })
+        })
+        .collect();
+    parsed.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(parsed)
+}
+
+/// Runs `query` (blocks: call on a worker thread).
+pub fn lookup(tool: &Tool, query: &KubeQuery) -> Result<Vec<KubeItem>, String> {
+    let args: Vec<String> = query.args();
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    parse_list(&query.what, &run_json(tool, &args, RESOLVE_TIMEOUT)?)
+}
+
 /// The kubeconfig files kubectl reads: `KUBECONFIG`'s, else `~/.kube/config`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct KubeconfigFiles {
@@ -498,6 +642,87 @@ mod tests {
         let files = kubeconfig_files(&env, tmp.path());
         assert_eq!(files.files, [(home_config, true), (other, false)]);
         assert!(files.from_env);
+    }
+
+    #[test]
+    fn lookup_commands() {
+        let query = KubeQuery {
+            context: "lab".into(),
+            what: KubeList::Resources {
+                namespace: "api".into(),
+                kind: ResourceKind::Service,
+            },
+        };
+        assert_eq!(
+            query.args(),
+            [
+                "--context",
+                "lab",
+                "--namespace",
+                "api",
+                "get",
+                "services",
+                "-o",
+                "json",
+                "--request-timeout=5s"
+            ]
+        );
+        assert_eq!(query.describe(), "kubectl get services -n api");
+        let namespaces = KubeQuery {
+            context: String::new(),
+            what: KubeList::Namespaces,
+        };
+        assert_eq!(namespaces.args()[..2], ["get", "namespaces"]);
+    }
+
+    /// Fixtures shaped like kubectl's output, with made-up names.
+    #[test]
+    fn lookups_parse() {
+        let namespaces = r#"{"kind":"NamespaceList","items":[
+            {"metadata":{"name":"zz-ops"}},{"metadata":{"name":"aa-api"}},{"spec":{}}]}"#;
+        let names: Vec<String> = parse_list(&KubeList::Namespaces, namespaces)
+            .unwrap()
+            .into_iter()
+            .map(|i| i.name)
+            .collect();
+        assert_eq!(names, ["aa-api", "zz-ops"]);
+
+        let resources = |kind| KubeList::Resources {
+            namespace: "n".into(),
+            kind,
+        };
+        let services = r#"{"items":[{"metadata":{"name":"web"},"spec":{"ports":[
+            {"name":"http","port":80,"targetPort":8080,"protocol":"TCP"},{"port":9090}]}}]}"#;
+        let web = &parse_list(&resources(ResourceKind::Service), services).unwrap()[0];
+        assert_eq!(
+            web.ports,
+            [
+                KubePort {
+                    port: 80,
+                    name: Some("http".into())
+                },
+                KubePort {
+                    port: 9090,
+                    name: None
+                }
+            ]
+        );
+        let pods = r#"{"items":[{"metadata":{"name":"web-0"},"spec":{"containers":[
+            {"name":"a","ports":[{"containerPort":8080,"name":"http"}]},{"name":"b"}]},
+            "status":{"phase":"Pending"}}]}"#;
+        let pod = &parse_list(&resources(ResourceKind::Pod), pods).unwrap()[0];
+        assert_eq!(pod.status.as_deref(), Some("Pending"));
+        assert_eq!(pod.ports[0].port, 8080);
+        let deployments = r#"{"items":[{"metadata":{"name":"web"},"spec":{"replicas":3,
+            "template":{"spec":{"containers":[{"ports":[{"containerPort":3000}]}]}}},
+            "status":{"readyReplicas":2}},
+            {"metadata":{"name":"idle"},"spec":{"replicas":1},"status":{}}]}"#;
+        let list = parse_list(&resources(ResourceKind::Deployment), deployments).unwrap();
+        assert_eq!(list[0].name, "idle");
+        assert_eq!(list[0].status.as_deref(), Some("0/1 ready"));
+        assert_eq!(list[1].status.as_deref(), Some("2/3 ready"));
+        assert_eq!(list[1].ports[0].port, 3000);
+        assert!(parse_list(&KubeList::Namespaces, "{}").is_err());
     }
 
     #[test]

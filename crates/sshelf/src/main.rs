@@ -15,6 +15,7 @@ mod icon;
 mod icon_shape;
 mod icons;
 mod key_dialog;
+mod kube_editor;
 mod motion;
 mod orphans_window;
 mod privacy;
