@@ -603,7 +603,7 @@ impl eframe::App for SshelfApp {
                         self.config.as_deref(),
                         self.data.as_deref(),
                         self.tunnel_states.as_deref(),
-                        self.ssh.as_deref(),
+                        (self.ssh.as_deref(), self.kubectl.as_deref()),
                     );
                 }
                 View::Groups => {
@@ -685,6 +685,10 @@ impl eframe::App for SshelfApp {
         if let Some(alias) = self.tunnels.take_open_host() {
             self.view = View::Hosts;
             self.hosts.select(&alias);
+        }
+        // A kubectl failure banner's *Settings › kubectl*.
+        if self.tunnels.take_open_settings() {
+            self.view = View::Settings;
         }
         // A group's tunnel row shows that tunnel.
         if let Some(id) = self.groups.take_open_tunnel() {

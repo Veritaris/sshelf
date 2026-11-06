@@ -47,9 +47,11 @@ pub const SERVER: char = '\u{e153}';
 pub const SETTINGS: char = '\u{e154}';
 pub const SHIELD_ALERT: char = '\u{e1fe}';
 pub const SHIELD_CHECK: char = '\u{e1ff}';
+pub const SHIP_WHEEL: char = '\u{e502}';
 pub const SQUARE: char = '\u{e167}';
 pub const SQUARE_TERMINAL: char = '\u{e20a}';
 pub const STAR: char = '\u{e176}';
+pub const TERMINAL: char = '\u{e181}';
 pub const TRIANGLE_ALERT: char = '\u{e193}';
 pub const X: char = '\u{e1b2}';
 
@@ -89,9 +91,11 @@ pub const ALL: &[char] = &[
     SETTINGS,
     SHIELD_ALERT,
     SHIELD_CHECK,
+    SHIP_WHEEL,
     SQUARE,
     SQUARE_TERMINAL,
     STAR,
+    TERMINAL,
     TRIANGLE_ALERT,
     X,
 ];

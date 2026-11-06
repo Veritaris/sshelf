@@ -14,9 +14,10 @@ use egui::{
 use sshconf::HostList;
 use sshelf_core::core::{AppData, Command, ConfigSnapshot, SshInfo};
 use sshelf_core::hints;
+use sshelf_core::kubectl::KubectlInfo;
 use sshelf_core::redact::DOTS;
 use sshelf_core::supervisor::{FailureKind, Owner, Snapshot, TunnelState, TunnelStatus};
-use sshelf_core::tunnels::{DEFAULT_BIND, Forward, ForwardKind, Tunnel, TunnelsFile};
+use sshelf_core::tunnels::{DEFAULT_BIND, Forward, ForwardKind, ResourceKind, Tunnel, TunnelsFile};
 
 use crate::theme::{Palette, radius, timing};
 use crate::tour::steps;
@@ -50,6 +51,10 @@ pub struct TunnelsView {
     set_aside: HashMap<usize, String>,
     /// A key fix the failure banner asked for, for the app.
     key_fix: Option<KeyFix>,
+    /// The list's type filter, kept for the session.
+    filter: TypeFilter,
+    /// *Settings › kubectl* was clicked: the app opens Settings.
+    open_settings: bool,
 }
 
 /// `(label, color)` for a tunnel state.
@@ -170,10 +175,53 @@ fn join_target(host: &str, port: &str) -> String {
     }
 }
 
-/// `ssh …` as the supervisor runs it (the binary shown as `ssh`).
+/// `<context> / <namespace> · <kind>/<name>` for a kubectl tunnel ("current
+/// context" when none is pinned); the context is masked in streamer mode.
+fn kube_where(tunnel: &Tunnel, masked: bool) -> String {
+    let kube = &tunnel.kube;
+    let context = match (kube.context.as_str(), masked) {
+        ("", _) => "current context",
+        (_, true) => DOTS,
+        (context, false) => context,
+    };
+    format!("{context} / {} · {}", kube.namespace, kube.resource)
+}
+
+/// The list's second line for a kubectl tunnel: where it forwards to and its
+/// first local port.
+fn kube_short(tunnel: &Tunnel, masked: bool) -> String {
+    let place = kube_where(tunnel, masked);
+    match tunnel.kube.forwards.first() {
+        Some(_) if masked => format!("{place} · {DOTS}"),
+        Some(f) => format!("{place} · {}", f.listen),
+        None => place,
+    }
+}
+
+/// A failure in a few words, for list rows: kubectl's kinds (SPEC.md §7
+/// *kubectl tunnels*, *Failures*); `None` for the rest.
+fn kube_why(tunnel: &Tunnel, failure: Option<FailureKind>, masked: bool) -> Option<String> {
+    let kind = tunnel.kube.resource.kind.word();
+    let context = match (tunnel.kube.context.as_str(), masked) {
+        ("", _) => "the current context",
+        (_, true) => DOTS,
+        (context, false) => context,
+    };
+    Some(match failure? {
+        FailureKind::ResourceGone => format!("{kind} not found"),
+        FailureKind::NotLoggedIn => format!("not logged in to {context}"),
+        FailureKind::ClusterUnreachable => "can't reach the cluster".into(),
+        FailureKind::PortInUse => "a local port is in use".into(),
+        FailureKind::NoContext => "context not in your kubeconfig".into(),
+        FailureKind::KubectlMissing => "kubectl not found".into(),
+        _ => return None,
+    })
+}
+
+/// The command as the supervisor runs it (the binary shown by its name).
 fn command_line(tunnel: &Tunnel) -> String {
     let args: Vec<String> = tunnel
-        .ssh_args()
+        .args()
         .into_iter()
         .map(|a| {
             if a.contains(char::is_whitespace) {
@@ -183,7 +231,7 @@ fn command_line(tunnel: &Tunnel) -> String {
             }
         })
         .collect();
-    format!("ssh {}", args.join(" "))
+    format!("{} {}", tunnel.kind.program(), args.join(" "))
 }
 
 /// What a list row offers for its state (SPEC.md §10, Tunnel-States).
@@ -257,6 +305,16 @@ impl Action {
     }
 }
 
+/// Why the row's `action` can't run: a kubectl tunnel can't start while
+/// kubectl isn't found (SPEC.md §10 *kubectl tunnels*).
+fn blocked(tunnel: &Tunnel, action: Option<Action>, kubectl_missing: bool) -> Option<&'static str> {
+    let starts = matches!(action, Some(Action::Start | Action::Retry));
+    (starts && kubectl_missing && tunnel.is_kubectl()).then_some(KUBECTL_MISSING)
+}
+
+/// The reason kubectl tunnels can't start.
+const KUBECTL_MISSING: &str = "kubectl wasn't found (Settings › kubectl)";
+
 /// The status mark: filled when settled, a pulsing ring in transition.
 pub fn mark(ui: &mut Ui, state: &TunnelState) {
     let p = &Palette::ONE_DARK;
@@ -269,16 +327,21 @@ pub fn mark(ui: &mut Ui, state: &TunnelState) {
     };
 }
 
-/// A row's second line and its colour.
+/// A row's second line and its colour. `kubectl_missing`: kubectl wasn't
+/// found, so a kubectl tunnel can't start.
 fn sub_line(
     ctx: &egui::Context,
     tunnel: &Tunnel,
     status: Option<&TunnelStatus>,
     file: &TunnelsFile,
+    kubectl_missing: bool,
 ) -> (String, Color32) {
     let p = &Palette::ONE_DARK;
     let state = status.map_or(TunnelState::Stopped, |s| s.state.clone());
     let masked = privacy::get(ctx).on;
+    if tunnel.is_kubectl() {
+        return kube_sub_line(ctx, tunnel, status, file, kubectl_missing);
+    }
     let forward = tunnel.forwards.first().map(|f| forward_short(f, masked));
     let with_forward = |text: String| match &forward {
         Some(f) => format!("{text} · {f}"),
@@ -316,6 +379,75 @@ fn sub_line(
     }
 }
 
+/// [`sub_line`] for a kubectl tunnel (SPEC.md §10 *kubectl tunnels*: where
+/// it forwards to, else its state).
+fn kube_sub_line(
+    ctx: &egui::Context,
+    tunnel: &Tunnel,
+    status: Option<&TunnelStatus>,
+    file: &TunnelsFile,
+    kubectl_missing: bool,
+) -> (String, Color32) {
+    let p = &Palette::ONE_DARK;
+    let state = status.map_or(TunnelState::Stopped, |s| s.state.clone());
+    let masked = privacy::get(ctx).on;
+    match &state {
+        TunnelState::Starting => (
+            "Starting… waiting for \u{201c}Forwarding from …\u{201d}".into(),
+            p.yellow,
+        ),
+        TunnelState::Stopping => ("Stopping…".into(), p.dim),
+        TunnelState::Stopped if kubectl_missing => ("kubectl not found".into(), p.yellow),
+        TunnelState::Stopped => (kube_short(tunnel, masked), p.dim),
+        TunnelState::Running => {
+            let status = status.expect("running has a status");
+            if status.owners.contains(&Owner::Manual) {
+                (kube_short(tunnel, masked), p.dim)
+            } else {
+                let owners: Vec<&Owner> = status.owners.iter().collect();
+                (format!("Running · {}", owners_text(&owners, file)), p.dim)
+            }
+        }
+        TunnelState::Failed(reason) => {
+            if let Some(text) = reconnect_text(ctx, status) {
+                return (text, p.yellow);
+            }
+            let why = kube_why(tunnel, status.and_then(|s| s.failure), masked)
+                .unwrap_or_else(|| reason.clone());
+            (format!("Failed · {why}"), p.red)
+        }
+    }
+}
+
+/// Which tunnels the list shows (the *All / ssh / kubectl* filter).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum TypeFilter {
+    #[default]
+    All,
+    Ssh,
+    Kubectl,
+}
+
+impl TypeFilter {
+    const ALL: [TypeFilter; 3] = [TypeFilter::All, TypeFilter::Ssh, TypeFilter::Kubectl];
+
+    fn shows(self, tunnel: &Tunnel) -> bool {
+        match self {
+            TypeFilter::All => true,
+            TypeFilter::Ssh => !tunnel.is_kubectl(),
+            TypeFilter::Kubectl => tunnel.is_kubectl(),
+        }
+    }
+}
+
+/// A fix the kubectl failure banner asked for.
+enum KubeFix {
+    /// *Edit*, *Pick another pod*: the editor.
+    Edit,
+    /// *Settings › kubectl*.
+    Settings,
+}
+
 impl TunnelsView {
     /// Shows tunnel `id` (from a host's *Tunnels* tab).
     pub fn select(&mut self, id: &str) {
@@ -332,6 +464,11 @@ impl TunnelsView {
     /// A key fix the failure banner asked for, once.
     pub fn take_key_fix(&mut self) -> Option<KeyFix> {
         self.key_fix.take()
+    }
+
+    /// *Settings › kubectl* was clicked, once.
+    pub fn take_open_settings(&mut self) -> bool {
+        std::mem::take(&mut self.open_settings)
     }
 
     /// The editor is open.
@@ -367,7 +504,7 @@ impl TunnelsView {
         config: Option<&ConfigSnapshot>,
         data: Option<&AppData>,
         states: Option<&Snapshot>,
-        ssh: Option<&SshInfo>,
+        (ssh, kubectl): (Option<&SshInfo>, Option<&KubectlInfo>),
     ) -> Vec<Command> {
         let p = &Palette::ONE_DARK;
         let mut commands = Vec::new();
@@ -375,6 +512,8 @@ impl TunnelsView {
             ui.spinner();
             return commands;
         };
+        // Only once detection says so: no flash of "not found" at start.
+        let kubectl_missing = kubectl.is_some_and(|k| k.kubectl.is_err());
         let empty = Snapshot::default();
         let states = states.unwrap_or(&empty);
         let no_hosts = HostList::default();
@@ -403,7 +542,7 @@ impl TunnelsView {
                 if self.editor.is_some() {
                     ui.multiply_opacity(0.55);
                 }
-                self.list(ui, data, states, &mut commands);
+                self.list(ui, data, states, kubectl_missing, &mut commands);
             });
         egui::CentralPanel::default()
             .frame(Frame::NONE.inner_margin(Margin {
@@ -421,7 +560,13 @@ impl TunnelsView {
                     .and_then(|id| data.tunnels.tunnel(id))
                     .cloned()
                 {
-                    self.detail(ui, &tunnel, data, states, ssh, &mut commands);
+                    self.detail(
+                        ui,
+                        &tunnel,
+                        (data, states),
+                        (ssh, kubectl_missing),
+                        &mut commands,
+                    );
                 } else {
                     ui.add_space(48.0);
                     ui.vertical_centered(|ui| {
@@ -442,14 +587,21 @@ impl TunnelsView {
         ui: &mut Ui,
         data: &AppData,
         states: &Snapshot,
+        kubectl_missing: bool,
         commands: &mut Vec<Command>,
     ) {
         let p = &Palette::ONE_DARK;
-        let tunnels = &data.tunnels.tunnels;
-        let running = tunnels
+        let all = &data.tunnels.tunnels;
+        let running = all
             .iter()
             .filter(|t| states.state(&t.id) == TunnelState::Running)
             .count();
+        // The type filter, only while both types exist.
+        let both = all.iter().any(Tunnel::is_kubectl) && all.iter().any(|t| !t.is_kubectl());
+        if !both {
+            self.filter = TypeFilter::All;
+        }
+        let tunnels: Vec<&Tunnel> = all.iter().filter(|t| self.filter.shows(t)).collect();
         ui.horizontal(|ui| {
             ui.add_space(4.0);
             ui.label(
@@ -458,7 +610,7 @@ impl TunnelsView {
                     .color(p.text_strong),
             );
             ui.label(
-                RichText::new(format!("{running} of {} running", tunnels.len()))
+                RichText::new(format!("{running} of {} running", all.len()))
                     .size(13.0)
                     .color(p.dim),
             );
@@ -469,6 +621,18 @@ impl TunnelsView {
                 }
             });
         });
+        if both {
+            ui.add_space(8.0);
+            let at = TypeFilter::ALL.iter().position(|f| *f == self.filter);
+            if let Some(picked) = nav::segmented(
+                ui,
+                Id::unique("tunnel_type_filter"),
+                &["All", "ssh", "kubectl"],
+                at.unwrap_or(0),
+            ) {
+                self.filter = TypeFilter::ALL[picked];
+            }
+        }
         ui.add_space(12.0);
         egui::ScrollArea::vertical()
             .id_salt("tunnels")
@@ -491,7 +655,7 @@ impl TunnelsView {
                 let hover_slot = ui.painter().add(Shape::Noop);
                 let mut hovered = None;
                 let mut selected_rect = None;
-                for (index, tunnel) in tunnels.iter().enumerate() {
+                for (index, &tunnel) in tunnels.iter().enumerate() {
                     let status = states.tunnels.get(&tunnel.id);
                     let state = states.state(&tunnel.id);
                     let (rect, response) =
@@ -516,8 +680,10 @@ impl TunnelsView {
                             .layout(Layout::left_to_right(Align::Center)),
                     );
                     row.spacing_mut().item_spacing.x = 10.0;
+                    marks::type_mark(&mut row, tunnel.kind, Some(24.0));
                     mark(&mut row, &state);
                     let action = Action::of(&state, status);
+                    let blocked = blocked(tunnel, action, kubectl_missing);
                     let button_width = if action.is_some() { 84.0 } else { 0.0 };
                     let text_width = (row.available_width() - button_width).max(40.0);
                     row.allocate_ui_with_layout(
@@ -539,7 +705,8 @@ impl TunnelsView {
                                 egui::Label::new(RichText::new(name).size(14.0).color(color))
                                     .selectable(false),
                             );
-                            let (line, color) = sub_line(ui.ctx(), tunnel, status, &data.tunnels);
+                            let (line, color) =
+                                sub_line(ui.ctx(), tunnel, status, &data.tunnels, kubectl_missing);
                             // Clicks go to the row: no tokens to peek here.
                             let line = privacy::get(ui.ctx()).plain(&line).into_owned();
                             let font = FontId::monospace(11.0);
@@ -557,8 +724,10 @@ impl TunnelsView {
                     if let Some(action) = action {
                         row.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             let tip = (action == Action::Start && state == TunnelState::Running)
-                                .then_some("Started by a group; Start also keeps it up on its own");
-                            let response = ui.add(action.button(true, tip));
+                                .then_some("Started by a group; Start also keeps it up on its own")
+                                .or(blocked);
+                            let response =
+                                ui.add_enabled(blocked.is_none(), action.button(true, tip));
                             let clicked = match tour_id {
                                 Some(id) => tour::targets::clicked(
                                     ui.ctx(),
@@ -572,14 +741,17 @@ impl TunnelsView {
                             }
                         });
                     }
-                    if let Some(chosen) = tunnel_menu(&response, &tunnel.id, &state, status) {
+                    let startable = !(kubectl_missing && tunnel.is_kubectl());
+                    if let Some(chosen) =
+                        tunnel_menu(&response, (&tunnel.id, startable), &state, status)
+                    {
                         match chosen {
                             MenuAction::Command(command) => commands.push(*command),
                             MenuAction::Edit => {
                                 self.select(&tunnel.id);
                                 self.editor = Some(tunnel.clone());
                             }
-                            MenuAction::CopySsh => ui.ctx().copy_text(command_line(tunnel)),
+                            MenuAction::CopyCommand => ui.ctx().copy_text(command_line(tunnel)),
                             MenuAction::Delete => self.confirm_delete = Some(tunnel.id.clone()),
                         }
                     }
@@ -609,14 +781,12 @@ impl TunnelsView {
             });
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn detail(
         &mut self,
         ui: &mut Ui,
         tunnel: &Tunnel,
-        data: &AppData,
-        states: &Snapshot,
-        ssh: Option<&SshInfo>,
+        (data, states): (&AppData, &Snapshot),
+        (ssh, kubectl_missing): (Option<&SshInfo>, bool),
         commands: &mut Vec<Command>,
     ) {
         let p = &Palette::ONE_DARK;
@@ -631,6 +801,7 @@ impl TunnelsView {
                 ui.spacing_mut().item_spacing.y = 6.0;
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 10.0;
+                    marks::type_mark(ui, tunnel.kind, Some(28.0));
                     ui.label(
                         RichText::new(&tunnel.name)
                             .font(fonts::semibold(22.0))
@@ -653,10 +824,14 @@ impl TunnelsView {
                 });
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
-                    ui.label(RichText::new("via").size(13.0).color(p.dim));
-                    let host = privacy::get(ui.ctx()).alias_text(&tunnel.host).into_owned();
-                    if button::link(ui, &host, 13.0).clicked() {
-                        self.open_host = Some(tunnel.host.clone());
+                    if tunnel.is_kubectl() {
+                        kube_line(ui, tunnel);
+                    } else {
+                        ui.label(RichText::new("via").size(13.0).color(p.dim));
+                        let host = privacy::get(ui.ctx()).alias_text(&tunnel.host).into_owned();
+                        if button::link(ui, &host, 13.0).clicked() {
+                            self.open_host = Some(tunnel.host.clone());
+                        }
                     }
                     if let Some(status) = status.filter(|s| !s.owners.is_empty()) {
                         let owners: Vec<&Owner> = status.owners.iter().collect();
@@ -683,9 +858,14 @@ impl TunnelsView {
                 // Right to left: the state's action ends up rightmost.
                 let manual = status.is_some_and(|s| s.owners.contains(&Owner::Manual));
                 if let Some(action) = Action::of(&state, status) {
+                    let blocked = blocked(tunnel, Some(action), kubectl_missing);
                     let tip = (action == Action::Start && state == TunnelState::Running)
-                        .then_some("Started by a group; Start also keeps it up on its own");
-                    if ui.add(action.button(false, tip)).clicked() {
+                        .then_some("Started by a group; Start also keeps it up on its own")
+                        .or(blocked);
+                    if ui
+                        .add_enabled(blocked.is_none(), action.button(false, tip))
+                        .clicked()
+                    {
                         commands.push(action.command(&tunnel.id));
                     }
                 }
@@ -720,13 +900,26 @@ impl TunnelsView {
         });
 
         if let TunnelState::Failed(reason) = &state {
-            failure_banner(
-                ui,
-                (tunnel, status, reason),
-                ssh,
-                commands,
-                (&mut self.show_log, &mut self.key_fix),
-            );
+            if tunnel.is_kubectl() {
+                match kube_failure_banner(
+                    ui,
+                    (tunnel, status, reason),
+                    commands,
+                    &mut self.show_log,
+                ) {
+                    Some(KubeFix::Edit) => self.editor = Some(tunnel.clone()),
+                    Some(KubeFix::Settings) => self.open_settings = true,
+                    None => {}
+                }
+            } else {
+                failure_banner(
+                    ui,
+                    (tunnel, status, reason),
+                    ssh,
+                    commands,
+                    (&mut self.show_log, &mut self.key_fix),
+                );
+            }
         }
         if let Some(orphan) = data
             .tunnel_orphans
@@ -740,7 +933,11 @@ impl TunnelsView {
                 });
             });
         }
-        forwards_table(ui, tunnel);
+        if tunnel.is_kubectl() {
+            kube_forwards_table(ui, tunnel);
+        } else {
+            forwards_table(ui, tunnel);
+        }
         let scroll_to_log = std::mem::take(&mut self.show_log);
         log(ui, status, &state, &mut self.show_debug, scroll_to_log);
     }
@@ -1294,15 +1491,16 @@ fn exposed_hint(kind: ForwardKind) -> &'static str {
 enum MenuAction {
     Command(Box<Command>),
     Edit,
-    CopySsh,
+    CopyCommand,
     Delete,
 }
 
-/// The row's right-click menu: Start, Stop, Edit, Copy ssh command,
-/// Delete… (SPEC.md §10, only existing actions).
+/// The row's right-click menu: Start, Stop, Edit, Copy command, Delete…
+/// (SPEC.md §10, only existing actions). `startable`: Start can run (not
+/// a kubectl tunnel while kubectl is missing).
 fn tunnel_menu(
     response: &egui::Response,
-    tunnel_id: &str,
+    (tunnel_id, startable): (&str, bool),
     state: &TunnelState,
     status: Option<&TunnelStatus>,
 ) -> Option<MenuAction> {
@@ -1310,7 +1508,11 @@ fn tunnel_menu(
     let active = !matches!(state, TunnelState::Stopped | TunnelState::Failed(_));
     let mut chosen = None;
     popup::context_menu(response, |menu| {
-        if menu.item(Some(icons::PLAY), "Start", !manual || !active) {
+        if menu.item(
+            Some(icons::PLAY),
+            "Start",
+            startable && (!manual || !active),
+        ) {
             chosen = Some(MenuAction::Command(Box::new(Command::StartTunnel(
                 tunnel_id.into(),
             ))));
@@ -1324,8 +1526,8 @@ fn tunnel_menu(
         if menu.item(None, "Edit", !active) {
             chosen = Some(MenuAction::Edit);
         }
-        if menu.item(None, "Copy ssh command", true) {
-            chosen = Some(MenuAction::CopySsh);
+        if menu.item(None, "Copy command", true) {
+            chosen = Some(MenuAction::CopyCommand);
         }
         menu.separator();
         if menu.item(None, "Delete…", true) {
@@ -1559,6 +1761,216 @@ fn failure_banner(
     tour::targets::register(ui.ctx(), Target::FailureBanner, rect);
 }
 
+/// `value` in mono, or as a masked token in streamer mode.
+fn mono_value(ui: &mut Ui, value: &str, color: Color32) {
+    let font = FontId::monospace(13.0);
+    if privacy::get(ui.ctx()).on {
+        let style = masked::Style {
+            font,
+            color,
+            on_card: false,
+        };
+        masked::value(ui, value, &style);
+    } else {
+        ui.label(RichText::new(value).font(font).color(color));
+    }
+}
+
+/// "kubectl · context dev-k3s · namespace api · service/web" under a kubectl
+/// tunnel's name.
+fn kube_line(ui: &mut Ui, tunnel: &Tunnel) {
+    let p = &Palette::ONE_DARK;
+    let dim = |ui: &mut Ui, text: &str| {
+        ui.label(RichText::new(text).size(13.0).color(p.dim));
+    };
+    let kube = &tunnel.kube;
+    dim(ui, "kubectl · context");
+    if kube.context.is_empty() {
+        dim(ui, "current");
+    } else {
+        mono_value(ui, &kube.context, p.text);
+    }
+    dim(ui, "· namespace");
+    ui.label(
+        RichText::new(&kube.namespace)
+            .font(FontId::monospace(13.0))
+            .color(p.text),
+    );
+    dim(ui, "·");
+    ui.label(
+        RichText::new(kube.resource.to_string())
+            .font(FontId::monospace(13.0))
+            .color(p.text),
+    );
+}
+
+/// *Port on the service* / *pod* / *pod (picked by kubectl)*: where a
+/// forward's remote port is.
+fn kube_port_label(tunnel: &Tunnel) -> &'static str {
+    match tunnel.kube.resource.kind {
+        ResourceKind::Service => "Port on the service",
+        ResourceKind::Pod => "Port on the pod",
+        ResourceKind::Deployment => "Port on the pod (picked by kubectl)",
+    }
+}
+
+/// A kubectl tunnel's forwards: *Listen on*, *Local port*, the port on the
+/// resource.
+fn kube_forwards_table(ui: &mut Ui, tunnel: &Tunnel) {
+    let p = &Palette::ONE_DARK;
+    let exposed = tunnel.kube.is_exposed();
+    let address_color = if exposed { p.yellow } else { p.text };
+    let response = Frame::new()
+        .fill(p.surface)
+        .corner_radius(radius::CONTROL)
+        .inner_margin(Margin::symmetric(16, 10))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            egui::Grid::new(Id::unique("kube_forwards"))
+                .num_columns(3)
+                .min_col_width(140.0)
+                .spacing(vec2(16.0, 10.0))
+                .show(ui, |ui| {
+                    for title in ["Listen on", "Local port", kube_port_label(tunnel)] {
+                        ui.label(
+                            RichText::new(title.to_uppercase())
+                                .font(fonts::semibold(11.0))
+                                .color(p.dim),
+                        );
+                    }
+                    ui.end_row();
+                    for forward in &tunnel.kube.forwards {
+                        mono_value(ui, &tunnel.kube.address, address_color);
+                        mono_value(ui, &forward.listen.to_string(), p.text);
+                        mono_value(ui, &forward.target, p.text);
+                        ui.end_row();
+                    }
+                });
+        })
+        .response;
+    if exposed {
+        popup::tip_below(response, |ui| {
+            ui.label(exposed_hint(ForwardKind::L));
+        });
+    }
+}
+
+/// The kubectl failure banner (SPEC.md §7 *kubectl tunnels*, *Failures*):
+/// the friendly line, kubectl's own line, the fix and *Show log*.
+fn kube_failure_banner(
+    ui: &mut Ui,
+    (tunnel, status, reason): (&Tunnel, Option<&TunnelStatus>, &str),
+    commands: &mut Vec<Command>,
+    show_log: &mut bool,
+) -> Option<KubeFix> {
+    let p = &Palette::ONE_DARK;
+    let failure = status.and_then(|s| s.failure);
+    let kind = tunnel.kube.resource.kind.word();
+    let masked = privacy::get(ui.ctx()).on;
+    let context = match (tunnel.kube.context.as_str(), masked) {
+        ("", _) => "the current context",
+        (_, true) => DOTS,
+        (context, false) => context,
+    };
+    let port = tunnel
+        .kube
+        .forwards
+        .iter()
+        .map(|f| f.listen.to_string())
+        .find(|port| {
+            reason.contains(&format!("port {port}")) || reason.contains(&format!("{{{port} "))
+        });
+    let title = match failure {
+        Some(FailureKind::ResourceGone) => format!("The {kind} is gone"),
+        Some(FailureKind::NotLoggedIn) => format!("Not logged in to {context}"),
+        Some(FailureKind::ClusterUnreachable) => "Can't reach the cluster".into(),
+        Some(FailureKind::PortInUse) => match &port {
+            Some(_) if masked => format!("Local port {DOTS} is in use"),
+            Some(port) => format!("Local port {port} is in use"),
+            None => "A local port is in use".into(),
+        },
+        Some(FailureKind::NoContext) => "Context not in your kubeconfig".into(),
+        Some(FailureKind::KubectlMissing) => "kubectl not found".into(),
+        _ => "kubectl exited".into(),
+    };
+    let body = match failure {
+        Some(FailureKind::NotLoggedIn) => {
+            Some("Log in with your cluster's tool in a terminal, then retry.")
+        }
+        Some(FailureKind::ResourceGone) if tunnel.kube.resource.kind == ResourceKind::Pod => {
+            Some("A pod that is deleted doesn't come back under its name: pick another one.")
+        }
+        Some(FailureKind::KubectlMissing) => {
+            Some("kubectl tunnels can't start until kubectl is installed or its path is set.")
+        }
+        _ => None,
+    };
+    let mut fix = None;
+    let top = ui.cursor().top();
+    marks::banner(ui, p.red_tint, |ui| {
+        ui.label(
+            RichText::new(title)
+                .font(fonts::semibold(14.0))
+                .color(p.red),
+        );
+        // kubectl's own words: free text through the filter.
+        let style = masked::Style {
+            font: FontId::monospace(12.0),
+            color: p.text_strong,
+            on_card: true,
+        };
+        masked::text(ui, reason, &style, true);
+        if let Some(body) = body {
+            ui.label(RichText::new(body).size(13.0).color(p.text));
+        }
+        if let Some(text) = reconnect_text(ui.ctx(), status) {
+            ui.label(RichText::new(text).size(13.0).color(p.yellow));
+        }
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            // The fix: a button, and what it does (`None`: retry).
+            let action = match failure {
+                Some(FailureKind::ResourceGone) => Some((
+                    Button::new(format!("Pick another {kind}"))
+                        .small()
+                        .tip("Opens the editor on Forward to"),
+                    Some(KubeFix::Edit),
+                )),
+                Some(FailureKind::NotLoggedIn | FailureKind::ClusterUnreachable) => Some((
+                    Button::new("Retry")
+                        .name("Retry from the banner")
+                        .icon(icons::ROTATE_CW)
+                        .small(),
+                    None,
+                )),
+                Some(FailureKind::PortInUse | FailureKind::NoContext) => Some((
+                    Button::new("Edit").name("Edit from the banner").small(),
+                    Some(KubeFix::Edit),
+                )),
+                Some(FailureKind::KubectlMissing) => Some((
+                    Button::new("Settings › kubectl").small(),
+                    Some(KubeFix::Settings),
+                )),
+                _ => None,
+            };
+            if let Some((button, then)) = action
+                && ui.add(button).clicked()
+            {
+                match then {
+                    Some(then) => fix = Some(then),
+                    None => commands.push(Command::StartTunnel(tunnel.id.clone())),
+                }
+            }
+            if ui.add(Button::new("Show log")).clicked() {
+                *show_log = true;
+            }
+        });
+    });
+    let rect = ui.min_rect().with_min_y(top);
+    tour::targets::register(ui.ctx(), Target::FailureBanner, rect);
+    fix
+}
+
 /// A fix the failure banner asks the app for: the key window and the agent
 /// live outside this view.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1663,6 +2075,7 @@ mod tests {
         data: Arc<AppData>,
         states: Arc<Snapshot>,
         ssh: Option<SshInfo>,
+        kubectl: Option<KubectlInfo>,
     }
 
     fn tunnel() -> Tunnel {
@@ -1721,7 +2134,267 @@ mod tests {
                 tunnels: [("t-1".to_string(), status)].into(),
             }),
             ssh: None,
+            kubectl: None,
         }
+    }
+
+    fn kube_tunnel() -> Tunnel {
+        use sshelf_core::tunnels::{Kube, KubeForward, Resource};
+        Tunnel::kubectl(
+            "t-k",
+            "web api",
+            Kube {
+                context: "lab-kq".into(),
+                namespace: "api".into(),
+                resource: Resource::parse("service/web").unwrap(),
+                address: DEFAULT_BIND.into(),
+                forwards: vec![
+                    KubeForward {
+                        listen: 18080,
+                        target: "80".into(),
+                    },
+                    KubeForward {
+                        listen: 19090,
+                        target: "metrics".into(),
+                    },
+                ],
+            },
+        )
+    }
+
+    /// The ssh fixture plus kubectl tunnel `t-k` in `state` (failing with
+    /// `failure`), and kubectl found or not.
+    fn kube_fixture(state: TunnelState, failure: Option<FailureKind>, found: bool) -> Fixture {
+        let mut f = fixture(TunnelState::Stopped);
+        let mut data = (*f.data).clone();
+        data.tunnels.upsert_tunnel(kube_tunnel());
+        f.data = Arc::new(data);
+        let mut states = (*f.states).clone();
+        let mut status = states.tunnels["t-1"].clone();
+        status.running_since = (state == TunnelState::Running).then(Instant::now);
+        status.state = state;
+        status.failure = failure;
+        states.tunnels.insert("t-k".into(), status);
+        f.states = Arc::new(states);
+        f.kubectl = Some(KubectlInfo {
+            kubectl: if found {
+                Ok(sshelf_core::kubectl::Kubectl {
+                    tool: sshelf_core::ssh::Tool::new("kubectl"),
+                    source: sshelf_core::kubectl::KubectlSource::Path,
+                })
+            } else {
+                Err("kubectl not found".into())
+            },
+            version: None,
+            files: Default::default(),
+            view: None,
+        });
+        f
+    }
+
+    fn kube_selected() -> TunnelsView {
+        TunnelsView {
+            selected: Some("t-k".into()),
+            ..TunnelsView::default()
+        }
+    }
+
+    #[test]
+    fn kubectl_rows_have_their_mark_line_and_a_filter() {
+        let mut harness = harness(
+            kube_fixture(TunnelState::Running, None, true),
+            kube_selected(),
+        );
+        harness.step();
+        // The row's line, cut to the list's width (in full below).
+        // Cut in the middle to fit the list.
+        let drawn = test_util::drawn_text(&harness);
+        assert!(drawn.contains("lab-kq / ap…web · 18080"), "{drawn}");
+        // Both types exist: the filter, and only kubectl rows under it.
+        harness.get_by_label("kubectl").click();
+        harness.step();
+        harness.step();
+        assert!(harness.query_by_label("Prod DB").is_none());
+        harness.get_by_label("ssh").click();
+        harness.step();
+        harness.step();
+        let drawn = test_util::drawn_text(&harness);
+        assert!(drawn.contains("Prod DB"), "{drawn}");
+        assert!(!drawn.contains("lab-kq / ap"), "{drawn}");
+    }
+
+    /// The rows' second lines in full (the list cuts them to its width).
+    #[test]
+    fn row_lines_per_type_and_state() {
+        let ctx = egui::Context::default();
+        let file = TunnelsFile::default();
+        let line = |tunnel: &Tunnel, state: TunnelState, failure, missing| {
+            let mut status = fixture(TunnelState::Stopped).states.tunnels["t-1"].clone();
+            status.running_since = (state == TunnelState::Running)
+                .then(|| Instant::now() - Duration::from_secs(2 * 3600 + 14 * 60));
+            status.state = state;
+            status.failure = failure;
+            sub_line(&ctx, tunnel, Some(&status), &file, missing).0
+        };
+        let (ssh, kube) = (tunnel(), kube_tunnel());
+        assert_eq!(
+            line(&ssh, TunnelState::Running, None, false),
+            "Running · 2 h 14 m · L 5432"
+        );
+        let failed = TunnelState::Failed("why".into());
+        assert_eq!(
+            line(&ssh, failed.clone(), Some(FailureKind::Auth), false),
+            "Failed · key not accepted"
+        );
+        assert_eq!(
+            line(&kube, TunnelState::Running, None, false),
+            "lab-kq / api · service/web · 18080"
+        );
+        assert_eq!(
+            line(&kube, TunnelState::Stopped, None, true),
+            "kubectl not found"
+        );
+        assert_eq!(
+            line(
+                &kube,
+                failed.clone(),
+                Some(FailureKind::ResourceGone),
+                false
+            ),
+            "Failed · service not found"
+        );
+        assert_eq!(
+            line(&kube, failed.clone(), Some(FailureKind::NotLoggedIn), false),
+            "Failed · not logged in to lab-kq"
+        );
+        assert_eq!(
+            line(&kube, failed, Some(FailureKind::Other), false),
+            "Failed · why"
+        );
+        let mut current = kube_tunnel();
+        current.kube.context.clear();
+        assert_eq!(
+            line(&current, TunnelState::Stopped, None, false),
+            "current context / api · service/web · 18080"
+        );
+    }
+
+    #[test]
+    fn the_kubectl_detail_names_where_it_forwards() {
+        let mut harness = harness(
+            kube_fixture(TunnelState::Running, None, true),
+            kube_selected(),
+        );
+        harness.step();
+        harness.get_by_label("kubectl · context");
+        harness.get_by_label("lab-kq");
+        harness.get_by_label("service/web");
+        harness.get_by_label("PORT ON THE SERVICE");
+        harness.get_by_label("metrics");
+        harness.get_by_label("19090");
+        assert!(harness.query_by_label("via").is_none());
+    }
+
+    #[test]
+    fn kubectl_failures_offer_their_fix() {
+        let cases = [
+            (
+                FailureKind::ResourceGone,
+                "The service is gone",
+                "Pick another service",
+            ),
+            (
+                FailureKind::NotLoggedIn,
+                "Not logged in to lab-kq",
+                "Retry from the banner",
+            ),
+            (
+                FailureKind::ClusterUnreachable,
+                "Can't reach the cluster",
+                "Retry from the banner",
+            ),
+            (
+                FailureKind::NoContext,
+                "Context not in your kubeconfig",
+                "Edit from the banner",
+            ),
+            (
+                FailureKind::KubectlMissing,
+                "kubectl not found",
+                "Settings › kubectl",
+            ),
+        ];
+        for (failure, title, fix) in cases {
+            let state = TunnelState::Failed("kubectl said so".into());
+            let mut harness = harness(kube_fixture(state, Some(failure), true), kube_selected());
+            harness.step();
+            harness.get_by_label(title);
+            harness.get_by_label("kubectl said so");
+            harness.get_by_label(fix).click();
+            harness.step();
+            let view = &mut harness.state_mut().0;
+            match failure {
+                FailureKind::NotLoggedIn | FailureKind::ClusterUnreachable => {
+                    assert_eq!(harness.state().1, [Command::StartTunnel("t-k".into())]);
+                }
+                FailureKind::KubectlMissing => assert!(view.take_open_settings()),
+                _ => assert!(view.is_editing(), "{title}"),
+            }
+        }
+    }
+
+    #[test]
+    fn without_kubectl_its_tunnels_cant_start() {
+        let mut harness = harness(
+            kube_fixture(TunnelState::Stopped, None, false),
+            kube_selected(),
+        );
+        harness.step();
+        harness.get_by_label("kubectl not found");
+        let starts: Vec<_> = harness.get_all_by_label("Start").collect();
+        // The row's and the header's, both disabled; the ssh row's isn't.
+        assert_eq!(
+            starts
+                .iter()
+                .filter(|s| s.accesskit_node().is_disabled())
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn copy_command_copies_kubectls_command() {
+        let mut harness = harness(
+            kube_fixture(TunnelState::Stopped, None, true),
+            kube_selected(),
+        );
+        harness.step();
+        // The row (the detail's title has the name too).
+        harness
+            .get_all_by_label("web api")
+            .next()
+            .unwrap()
+            .click_secondary();
+        harness.step();
+        harness.step();
+        harness.get_by_label("Copy command").click();
+        harness.step();
+        let copied = harness
+            .output()
+            .platform_output
+            .commands
+            .iter()
+            .find_map(|c| match c {
+                egui::OutputCommand::CopyText(text) => Some(text.clone()),
+                _ => None,
+            });
+        assert_eq!(
+            copied.as_deref(),
+            Some(
+                "kubectl --context lab-kq --namespace api port-forward service/web 18080:80 \
+                 19090:metrics --address 127.0.0.1"
+            )
+        );
     }
 
     fn harness(f: Fixture, view: TunnelsView) -> Harness<'static, (TunnelsView, Vec<Command>)> {
@@ -1734,7 +2407,7 @@ mod tests {
                         Some(&f.config),
                         Some(&f.data),
                         Some(&f.states),
-                        f.ssh.as_ref(),
+                        (f.ssh.as_ref(), f.kubectl.as_ref()),
                     ));
                 },
                 (view, Vec::new()),
@@ -1782,7 +2455,8 @@ mod tests {
         });
         let mut harness = harness(f, selected());
         harness.step();
-        harness.get_by_label("Failed · key not accepted");
+        // Cut to the list's width (in full in `row_lines_per_type_and_state`).
+        assert!(test_util::drawn_text(&harness).contains("Failed · key"));
         harness.get_by_label_contains("ssh-add");
         harness.get_by_label_contains("no keys loaded");
         // The health banner's fixes, for the tunnel's host.
@@ -1804,7 +2478,8 @@ mod tests {
     fn running_tunnel_shows_uptime_owners_and_a_timed_log() {
         let mut harness = harness(fixture(TunnelState::Running), selected());
         harness.step();
-        harness.get_by_label("Running · 2 h 14 m · L 5432");
+        // Cut to the list's width (in full in `row_lines_per_type_and_state`).
+        assert!(test_util::drawn_text(&harness).contains("Running · 2 h"));
         harness.get_by_label("· owners: manual start");
         harness.get_by_label_contains("  Authenticated to bastion");
         assert!(harness.query_by_label_contains("debug1: hidden").is_none());

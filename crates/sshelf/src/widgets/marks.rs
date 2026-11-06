@@ -8,6 +8,7 @@ use egui::{
     Color32, CursorIcon, Painter, Pos2, Response, RichText, Role, Sense, Stroke, StrokeKind, Ui,
     Vec2, WidgetInfo, vec2,
 };
+use sshelf_core::tunnels::TunnelType;
 
 use crate::icons;
 use crate::motion;
@@ -145,6 +146,33 @@ pub fn tile(ui: &mut Ui, icon: char, fill: Color32, color: Color32) {
         icons::font(18.0),
         color,
     );
+}
+
+/// A tunnel's type (SPEC.md §10 *kubectl tunnels*): ssh is Lucide `terminal`
+/// in secondary grey, kubectl `ship-wheel` in Blue; on a `tile`-sized
+/// `#2C313A` tile (8 px corners, icon 14), or bare at 14 px with `None`.
+/// The tooltip names the type.
+pub fn type_mark(ui: &mut Ui, kind: TunnelType, tile: Option<f32>) -> Response {
+    let p = &Palette::ONE_DARK;
+    let (icon, color, name) = match kind {
+        TunnelType::Ssh => (icons::TERMINAL, p.dim, "ssh tunnel"),
+        TunnelType::Kubectl => (icons::SHIP_WHEEL, p.blue, "kubectl tunnel"),
+    };
+    let size = tile.unwrap_or(icons::INLINE);
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
+    if tile.is_some() {
+        ui.painter().rect_filled(rect, radius::CONTROL, p.surface);
+    }
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        icon,
+        icons::font(icons::INLINE),
+        color,
+    );
+    crate::widgets::popup::tip(response, |ui| {
+        ui.label(name);
+    })
 }
 
 /// An outline around `rect` inside it, e.g. a row whose menu is open.
