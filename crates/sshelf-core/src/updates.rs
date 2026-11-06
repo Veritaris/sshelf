@@ -4,9 +4,10 @@
 //! version). It never downloads anything.
 //!
 //! The [`Checker`] is a thread of its own, started by core when the app
-//! asks (never in the tour's sandbox): one request about 5 s after start,
-//! then every 24 h, 1 h after a failure, at GitHub's reset time after a
-//! rate limit, and on *Check now*. The request goes through a
+//! asks (never in the tour's sandbox): at most one answered request per
+//! 24 h, across starts too (about 5 s after start once the last answer is a
+//! day old), 1 h after a failure, at GitHub's reset time after a rate
+//! limit, and on *Check now*. The request goes through a
 //! [`Transport`] ([`Ureq`] for real; tests inject their own or point it at a
 //! local server). Waiting is `recv_timeout` until the next check is due.
 
@@ -180,13 +181,18 @@ impl UpdateStatus {
     }
 }
 
-/// When the next automatic check is due; `None` while they are off.
-/// `started`: when the checker started; `last`: this run's last check.
+/// When the next automatic check is due; `None` while they are off. At most
+/// one successful check per [`DAILY`], across starts too.
+///
+/// `started`: when the checker started; `last`: this run's last check;
+/// `succeeded`: the last check that got an answer, in any run; `failure`:
+/// the last check's failure, in any run.
 pub fn next_check(
     auto: bool,
     started: SystemTime,
     first: Duration,
     last: Option<SystemTime>,
+    succeeded: Option<SystemTime>,
     failure: Option<&Failure>,
 ) -> Option<SystemTime> {
     if !auto {
@@ -197,9 +203,15 @@ pub fn next_check(
         return Some((*until).max(earliest));
     }
     Some(match last {
-        None => earliest,
         Some(at) if failure.is_some() => at + RETRY,
         Some(at) => at + DAILY,
+        // The first check of a run: a day after the last answer (a failure
+        // since doesn't hold it back), never more than a day after start (a
+        // clock set back).
+        None => match succeeded {
+            Some(at) if failure.is_none() => (at + DAILY).clamp(earliest, earliest + DAILY),
+            _ => earliest,
+        },
     })
 }
 
@@ -471,6 +483,7 @@ impl Worker {
             self.started,
             self.options.first,
             self.last,
+            self.file.succeeded_at,
             self.file.failure.as_ref(),
         )
     }
@@ -793,43 +806,109 @@ mod tests {
     #[test]
     fn the_schedule_runs_on_a_fake_clock() {
         let start = at(0);
+        let hours = |h: u64| Duration::from_secs(h * 3600);
         // Off (or dev, or the note not shown): never.
-        assert_eq!(next_check(false, start, FIRST, None, None), None);
-        // 5 s after start, then daily.
-        assert_eq!(next_check(true, start, FIRST, None, None), Some(at(5)));
+        assert_eq!(next_check(false, start, FIRST, None, None, None), None);
+        // Never checked: 5 s after start, then daily.
         assert_eq!(
-            next_check(true, start, FIRST, Some(at(5)), None),
+            next_check(true, start, FIRST, None, None, None),
+            Some(at(5))
+        );
+        assert_eq!(
+            next_check(true, start, FIRST, Some(at(5)), Some(at(5)), None),
+            Some(at(5) + DAILY)
+        );
+        // An earlier run's answer: a day after it, also across starts…
+        let earlier = at(0) - hours(3);
+        assert_eq!(
+            next_check(true, start, FIRST, None, Some(earlier), None),
+            Some(earlier + DAILY)
+        );
+        // …at once (5 s) when that day is over…
+        let yesterday = at(0) - hours(30);
+        assert_eq!(
+            next_check(true, start, FIRST, None, Some(yesterday), None),
+            Some(at(5))
+        );
+        // …and never more than a day after start (a clock set back).
+        let ahead = at(0) + hours(100);
+        assert_eq!(
+            next_check(true, start, FIRST, None, Some(ahead), None),
             Some(at(5) + DAILY)
         );
         // A failure: an hour later.
         let offline = Failure::Offline;
         assert_eq!(
-            next_check(true, start, FIRST, Some(at(5)), Some(&offline)),
+            next_check(
+                true,
+                start,
+                FIRST,
+                Some(at(5)),
+                Some(earlier),
+                Some(&offline)
+            ),
             Some(at(5) + RETRY)
+        );
+        // An earlier run's failure: the first check isn't held back by the
+        // last answer.
+        assert_eq!(
+            next_check(true, start, FIRST, None, Some(earlier), Some(&offline)),
+            Some(at(5))
         );
         // A rate limit: its reset time, also one stored by an earlier run,
         // but never before the first 5 s.
         let limited = Failure::RateLimited { until: at(900) };
         assert_eq!(
-            next_check(true, start, FIRST, Some(at(5)), Some(&limited)),
+            next_check(true, start, FIRST, Some(at(5)), None, Some(&limited)),
             Some(at(900))
         );
         assert_eq!(
-            next_check(true, start, FIRST, None, Some(&limited)),
+            next_check(true, start, FIRST, None, Some(earlier), Some(&limited)),
             Some(at(900))
         );
         let past = Failure::RateLimited {
             until: at(0) - DAILY,
         };
         assert_eq!(
-            next_check(true, start, FIRST, None, Some(&past)),
+            next_check(true, start, FIRST, None, None, Some(&past)),
             Some(at(5))
         );
-        // An earlier run's failure doesn't delay the first check.
-        assert_eq!(
-            next_check(true, start, FIRST, None, Some(&offline)),
-            Some(at(5))
+    }
+
+    #[test]
+    fn a_restart_within_a_day_does_not_check_again() {
+        let canned = Canned::new(vec![Ok(ok(RELEASE_JSON))]);
+        let run = run("0.3.2", true, true, canned.clone());
+        let first = run.until("the first check", |s| s.checked_this_run && !s.checking);
+        let dir = run.dir.clone();
+        drop(run.checker);
+        // The same folder, a new start: no request, the next one a day after
+        // the first.
+        let (tx, statuses) = mpsc::channel();
+        let _again = Checker::start(
+            dir,
+            Options {
+                version: "0.3.2".into(),
+                url: "http://127.0.0.1:9/never".into(),
+                first: Duration::ZERO,
+                enabled: true,
+                noted: true,
+            },
+            Box::new(canned.clone()),
+            move |status| {
+                let _ = tx.send(status);
+            },
         );
+        let status = statuses.recv_timeout(Duration::from_secs(10)).unwrap();
+        // `updates.toml` keeps whole seconds.
+        let due = first.succeeded_at.unwrap() + DAILY;
+        let next = status.next_check.unwrap();
+        let apart = next.max(due).duration_since(next.min(due)).unwrap();
+        assert!(apart < Duration::from_secs(1), "{next:?} vs {due:?}");
+        // Still announced from the stored release.
+        assert_eq!(status.announced().unwrap().version, "0.4.0");
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(canned.requests().len(), 1);
     }
 
     #[test]
