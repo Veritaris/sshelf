@@ -645,18 +645,17 @@ mod tests {
         let hosts = HostList::from_set(&set);
         let mut file = TunnelsFile::default();
         for (n, (bind, target)) in tunnels.iter().enumerate() {
-            file.upsert_tunnel(Tunnel {
-                id: format!("t-{n}"),
-                name: format!("tunnel {n}"),
-                host: "web".into(),
-                forwards: vec![Forward {
+            file.upsert_tunnel(Tunnel::ssh(
+                &format!("t-{n}"),
+                &format!("tunnel {n}"),
+                "web",
+                vec![Forward {
                     kind: ForwardKind::L,
                     bind: bind.to_string(),
                     listen: 15432,
                     target: Some(target.to_string()),
                 }],
-                auto_reconnect: false,
-            });
+            ));
         }
         let r = Redactor::build(Sources {
             set: Some(&set),

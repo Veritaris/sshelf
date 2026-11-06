@@ -45,18 +45,17 @@ fn state_of(events: &Receiver<Event>, id: &str, want: fn(&TunnelState) -> bool) 
 }
 
 fn tunnel(id: &str, host: &str) -> Tunnel {
-    Tunnel {
-        id: id.into(),
-        name: id.into(),
-        host: host.into(),
-        forwards: vec![Forward {
+    Tunnel::ssh(
+        id,
+        id,
+        host,
+        vec![Forward {
             kind: ForwardKind::L,
             bind: DEFAULT_BIND.into(),
             listen: common::hold_port().1,
             target: Some("localhost:80".into()),
         }],
-        auto_reconnect: false,
-    }
+    )
 }
 
 struct Sandbox {

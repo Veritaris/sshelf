@@ -116,18 +116,17 @@ fn app(root: &Path, streamer: bool, hide: bool) -> Harness<'static, SshelfApp> {
         .unwrap();
     store
         .save(&TunnelsFile {
-            tunnels: vec![Tunnel {
-                id: "t-web".into(),
-                name: "web admin".into(),
-                host: WEB.into(),
-                forwards: vec![Forward {
+            tunnels: vec![Tunnel::ssh(
+                "t-web",
+                "web admin",
+                WEB,
+                vec![Forward {
                     kind: ForwardKind::L,
                     bind: "127.0.0.1".into(),
                     listen: 54123,
                     target: Some("lkq-target.internal:54321".into()),
                 }],
-                auto_reconnect: false,
-            }],
+            )],
             groups: vec![Group {
                 id: "g-work".into(),
                 name: "Work".into(),

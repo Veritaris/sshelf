@@ -87,7 +87,8 @@ pub fn find_tunnel_orphans(tunnels: &TunnelsFile, hosts: &HostList) -> Vec<Tunne
     tunnels
         .tunnels
         .iter()
-        .filter(|t| hosts.find(&t.host).is_none())
+        // A kubectl tunnel has no host to lose.
+        .filter(|t| !t.is_kubectl() && hosts.find(&t.host).is_none())
         .map(|t| TunnelOrphan {
             tunnel_id: t.id.clone(),
             name: t.name.clone(),
@@ -332,15 +333,14 @@ mod tests {
 
     fn tunnels_file() -> TunnelsFile {
         use crate::tunnels::{Group, Tunnel};
-        let tunnel = |id: &str, host: &str| Tunnel {
-            id: id.into(),
-            name: format!("tunnel {id}"),
-            host: host.into(),
-            forwards: Vec::new(),
-            auto_reconnect: false,
-        };
+        let tunnel =
+            |id: &str, host: &str| Tunnel::ssh(id, &format!("tunnel {id}"), host, Vec::new());
         TunnelsFile {
-            tunnels: vec![tunnel("t1", "db1"), tunnel("t2", "gone-host")],
+            tunnels: vec![
+                tunnel("t1", "db1"),
+                tunnel("t2", "gone-host"),
+                Tunnel::kubectl("t3", "web api", crate::tunnels::Kube::default()),
+            ],
             groups: vec![Group {
                 id: "g".into(),
                 name: "Work".into(),

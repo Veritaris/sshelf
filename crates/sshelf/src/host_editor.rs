@@ -3097,13 +3097,12 @@ mod tests {
         use sshelf_core::tunnels::Tunnel;
 
         let mut harness = harness("Host web\nHost db\n");
-        harness.state_mut().data.tunnels.tunnels.push(Tunnel {
-            id: "t-1".into(),
-            name: "dev cluster".into(),
-            host: "web".into(),
-            forwards: Vec::new(),
-            auto_reconnect: false,
-        });
+        harness.state_mut().data.tunnels.tunnels.push(Tunnel::ssh(
+            "t-1",
+            "dev cluster",
+            "web",
+            Vec::new(),
+        ));
         let mut tunnels = BTreeMap::new();
         tunnels.insert(
             "t-1".to_string(),

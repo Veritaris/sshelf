@@ -90,18 +90,17 @@ fn listening(port: u16) -> bool {
 }
 
 fn tunnel(id: &str, host: &str, port: u16) -> Tunnel {
-    Tunnel {
-        id: id.into(),
-        name: format!("tunnel {id}"),
-        host: host.into(),
-        forwards: vec![Forward {
+    Tunnel::ssh(
+        id,
+        &format!("tunnel {id}"),
+        host,
+        vec![Forward {
             kind: ForwardKind::L,
             bind: DEFAULT_BIND.into(),
             listen: port,
             target: Some("localhost:80".into()),
         }],
-        auto_reconnect: false,
-    }
+    )
 }
 
 fn group(id: &str, tunnels: &[&Tunnel]) -> Group {

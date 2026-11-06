@@ -950,13 +950,8 @@ mod tests {
     fn data() -> Arc<AppData> {
         let mut data = AppData::new(PathBuf::from("app"));
         for (id, name) in [("t-a", "API"), ("t-b", "DB")] {
-            data.tunnels.upsert_tunnel(Tunnel {
-                id: id.into(),
-                name: name.into(),
-                host: "h".into(),
-                forwards: Vec::new(),
-                auto_reconnect: false,
-            });
+            data.tunnels
+                .upsert_tunnel(Tunnel::ssh(id, name, "h", Vec::new()));
         }
         data.tunnels.upsert_group(Group {
             id: "g-1".into(),

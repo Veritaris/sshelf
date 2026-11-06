@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::storage::Versioned;
 use crate::supervisor::Owner;
+use crate::tunnels::TunnelType;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -20,7 +21,15 @@ impl Versioned for RunningFile {
     const VERSION: u32 = 1;
 }
 
-/// One running ssh: enough to tell it apart from a process that only got
+impl RunningTunnel {
+    /// The tunnel type that ran it; `None` for a program this sshelf doesn't
+    /// know.
+    pub fn tunnel_type(&self) -> Option<TunnelType> {
+        TunnelType::from_program(self.program.as_deref().unwrap_or("ssh"))
+    }
+}
+
+/// One running ssh or kubectl: enough to tell it apart from a process that only got
 /// its pid later, and to see whether the tunnel changed since.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunningTunnel {
@@ -29,7 +38,10 @@ pub struct RunningTunnel {
     pub pid: u32,
     /// The process's start time as the OS reports it (`child::start_time`).
     pub started: u64,
-    /// ssh's arguments (`Tunnel::ssh_args`), without the program.
+    /// `ssh` or `kubectl` (M13; missing means `ssh`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program: Option<String>,
+    /// The program's arguments (`Tunnel::args`), without the program.
     pub args: Vec<String>,
     /// `manual`, or `group:<id>`.
     pub owners: Vec<String>,
@@ -74,11 +86,32 @@ mod tests {
                 id: "t-1".into(),
                 pid: 4242,
                 started: 1_234_567,
+                program: Some("kubectl".into()),
                 args: vec!["-N".into(), "--".into(), "web".into()],
                 owners: vec!["manual".into(), "group:g-1".into()],
             }],
         };
         store.save(&file).unwrap();
         assert_eq!(store.load::<RunningFile>().data, file);
+        assert_eq!(file.tunnels[0].tunnel_type(), Some(TunnelType::Kubectl));
+    }
+
+    /// M12's records have no `program`: they are ssh.
+    #[test]
+    fn records_without_a_program_are_ssh() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut store = crate::storage::Store::new(tmp.path());
+        std::fs::write(
+            store.path::<RunningFile>(),
+            "version = 1\n[[tunnel]]\nid = \"t\"\npid = 1\nstarted = 2\nargs = []\nowners = []\n",
+        )
+        .unwrap();
+        let file = store.load::<RunningFile>().data;
+        assert_eq!(file.tunnels[0].tunnel_type(), Some(TunnelType::Ssh));
+        let unknown = RunningTunnel {
+            program: Some("helm".into()),
+            ..file.tunnels[0].clone()
+        };
+        assert_eq!(unknown.tunnel_type(), None);
     }
 }

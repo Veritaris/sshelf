@@ -238,18 +238,17 @@ impl SshelfApp {
             .tour
             .as_ref()
             .map_or(SAMPLE_PORTS[4], |run| run.sandbox.port(SAMPLE_PORTS[4]));
-        Tunnel {
-            id: TOUR_WEB_ADMIN.into(),
-            name: "web admin".into(),
-            host: "staging-api".into(),
-            forwards: vec![Forward {
+        Tunnel::ssh(
+            TOUR_WEB_ADMIN,
+            "web admin",
+            "staging-api",
+            vec![Forward {
                 kind: ForwardKind::L,
                 bind: DEFAULT_BIND.into(),
                 listen: port,
                 target: Some("localhost:443".into()),
             }],
-            auto_reconnect: false,
-        }
+        )
     }
 
     /// An event from the sandbox Core the tour learns from.

@@ -17,6 +17,9 @@ pub struct Settings {
     /// Overrides the detected ssh binary; companion tools come from its directory.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ssh_path: Option<PathBuf>,
+    /// Overrides the detected kubectl binary (SPEC.md §8 *kubectl*, M13).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kubectl_path: Option<PathBuf>,
     /// Command template for "Connect" (see [`crate::terminal`]).
     pub terminal_command: String,
     /// What closing the window does while tunnels run (SPEC.md §10).
@@ -113,6 +116,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             ssh_path: None,
+            kubectl_path: None,
             terminal_command: DEFAULT_TERMINAL_COMMAND.to_string(),
             close_behavior: CloseBehavior::Ask,
             host_list_style: HostListStyle::List,
@@ -143,6 +147,7 @@ mod tests {
         let mut store = Store::new(tmp.path());
         let settings = Settings {
             ssh_path: Some(PathBuf::from("/opt/ssh/bin/ssh")),
+            kubectl_path: Some(PathBuf::from("/opt/k8s/kubectl")),
             terminal_command: "alacritty -e {ssh} {alias}".into(),
             close_behavior: CloseBehavior::StopAndQuit,
             host_list_style: HostListStyle::Cards,
@@ -166,6 +171,7 @@ mod tests {
             "streamer_mode = true",
             "streamer_hide_aliases = true",
             "tour = \"done\"",
+            "kubectl_path = \"/opt/k8s/kubectl\"",
         ] {
             assert!(text.contains(line), "{line}: {text}");
         }
@@ -211,5 +217,7 @@ mod tests {
         assert!(!loaded.data.streamer_hide_aliases);
         // No `tour` key: the welcome screen is due.
         assert_eq!(loaded.data.tour, None);
+        // No `kubectl_path` (M13): kubectl is detected.
+        assert_eq!(loaded.data.kubectl_path, None);
     }
 }

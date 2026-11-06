@@ -205,13 +205,7 @@ fn rename_data(store: &Store, paths: &Paths) {
     );
     store.save(&hosts).unwrap();
     let mut tunnels = TunnelsFile::default();
-    tunnels.upsert_tunnel(Tunnel {
-        id: "t-web".into(),
-        name: "web".into(),
-        host: "ok-web".into(),
-        forwards: Vec::new(),
-        auto_reconnect: false,
-    });
+    tunnels.upsert_tunnel(Tunnel::ssh("t-web", "web", "ok-web", Vec::new()));
     store.save(&tunnels).unwrap();
     let mut history = History::default();
     history.record("ok-web", SystemTime::now());

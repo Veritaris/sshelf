@@ -254,18 +254,17 @@ fn tunnels_and_groups_through_the_core() {
 
     let free = || common::hold_port().1;
     let port = free();
-    let tunnel = Tunnel {
-        id: "t-1".into(),
-        name: "API".into(),
-        host: "ok-a".into(),
-        forwards: vec![Forward {
+    let tunnel = Tunnel::ssh(
+        "t-1",
+        "API",
+        "ok-a",
+        vec![Forward {
             kind: ForwardKind::L,
             bind: DEFAULT_BIND.into(),
             listen: port,
             target: Some("localhost:6443".into()),
         }],
-        auto_reconnect: false,
-    };
+    );
 
     let (core, events) = Core::start(paths.clone(), Arc::new(|| {}));
     wait_for(&events, "the config", host_aliases);
@@ -373,18 +372,17 @@ fn host_key_session(
         .unwrap();
     let mut tunnels = sshelf_core::tunnels::TunnelsFile::default();
     for alias in aliases {
-        tunnels.upsert_tunnel(Tunnel {
-            id: format!("t-{alias}"),
-            name: format!("to {alias}"),
-            host: alias.to_string(),
-            forwards: vec![Forward {
+        tunnels.upsert_tunnel(Tunnel::ssh(
+            &format!("t-{alias}"),
+            &format!("to {alias}"),
+            alias,
+            vec![Forward {
                 kind: ForwardKind::L,
                 bind: DEFAULT_BIND.into(),
                 listen: common::hold_port().1,
                 target: Some("localhost:80".into()),
             }],
-            auto_reconnect: false,
-        });
+        ));
     }
     store.save(&tunnels).unwrap();
     let (core, events) = Core::start(paths.clone(), Arc::new(|| {}));
@@ -616,18 +614,17 @@ fn groups_marked_for_launch_start_with_sshelf() {
         .unwrap();
     let mut file = sshelf_core::tunnels::TunnelsFile::default();
     for (id, host) in [("t-a", "ok-a"), ("t-b", "ok-b")] {
-        file.upsert_tunnel(Tunnel {
-            id: id.into(),
-            name: id.into(),
-            host: host.into(),
-            forwards: vec![Forward {
+        file.upsert_tunnel(Tunnel::ssh(
+            id,
+            id,
+            host,
+            vec![Forward {
                 kind: ForwardKind::L,
                 bind: DEFAULT_BIND.into(),
                 listen: common::hold_port().1,
                 target: Some("localhost:80".into()),
             }],
-            auto_reconnect: false,
-        });
+        ));
     }
     file.upsert_group(Group {
         id: "g-launch".into(),

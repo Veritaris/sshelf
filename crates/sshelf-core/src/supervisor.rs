@@ -313,7 +313,7 @@ pub fn check_ports(tunnels: &[&Tunnel]) -> Vec<String> {
     let mut problems = Vec::new();
     let mut wanted: Vec<(String, u16, &str)> = Vec::new();
     for tunnel in tunnels {
-        for (addr, port) in tunnel.forwards.iter().filter_map(|f| f.local_listen()) {
+        for (addr, port) in tunnel.local_ports() {
             if let Some((_, _, other)) = wanted.iter().find(|(a, p, _)| *a == addr && *p == port) {
                 problems.push(format!(
                     "port {port} is used by both \"{other}\" and \"{}\"",
@@ -430,7 +430,8 @@ impl Worker {
                         id: id.clone(),
                         pid: e.status.pid?,
                         started: process.started.unwrap_or(0),
-                        args: e.tunnel.ssh_args(),
+                        program: Some(e.tunnel.kind.program().to_string()),
+                        args: e.tunnel.args(),
                         owners: e.status.owners.iter().map(running::owner_key).collect(),
                     })
                 })
@@ -475,13 +476,14 @@ impl Worker {
     }
 
     /// Takes over `recorded` if it is still the same process (same start
-    /// time) running what its tunnel runs now (same arguments).
+    /// time) running what its tunnel runs now (same program and arguments).
     fn adopt_one(&mut self, recorded: &RunningTunnel, tunnels: &[Tunnel]) -> bool {
         let Some(tunnel) = tunnels.iter().find(|t| t.id == recorded.id) else {
             return false;
         };
         let same = !self.entries.contains_key(&recorded.id)
-            && tunnel.ssh_args() == recorded.args
+            && recorded.tunnel_type() == Some(tunnel.kind)
+            && tunnel.args() == recorded.args
             && child::start_time(recorded.pid) == Some(recorded.started);
         if !same {
             return false;
@@ -965,18 +967,17 @@ mod tests {
     use crate::tunnels::{DEFAULT_BIND, Forward, ForwardKind};
 
     fn tunnel(id: &str, port: u16) -> Tunnel {
-        Tunnel {
-            id: id.into(),
-            name: format!("tunnel {id}"),
-            host: "h".into(),
-            forwards: vec![Forward {
+        Tunnel::ssh(
+            id,
+            &format!("tunnel {id}"),
+            "h",
+            vec![Forward {
                 kind: ForwardKind::L,
                 bind: DEFAULT_BIND.into(),
                 listen: port,
                 target: Some("localhost:1".into()),
             }],
-            auto_reconnect: false,
-        }
+        )
     }
 
     fn status(state: TunnelState, owners: &[&Owner]) -> TunnelStatus {

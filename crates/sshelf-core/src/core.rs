@@ -1058,9 +1058,12 @@ impl Worker {
         if self.is_active(&tunnel.id) {
             return self.error(format!("stop \"{}\" before editing it", tunnel.name));
         }
+        // The other type's fields (kept by the editor's switch) aren't saved.
+        let tunnel = tunnel.cleaned();
         self.change_tunnels(|file, hosts| {
             let mut problems = tunnel.validate();
-            if !tunnel.host.is_empty() && hosts.find(&tunnel.host).is_none() {
+            if !tunnel.is_kubectl() && !tunnel.host.is_empty() && hosts.find(&tunnel.host).is_none()
+            {
                 problems.push(format!("no host `{}`", tunnel.host));
             }
             if !problems.is_empty() {
@@ -1106,8 +1109,12 @@ impl Worker {
         });
     }
 
-    /// The tunnel's definition, if its host exists.
+    /// The tunnel's definition, if its host exists (kubectl tunnels have
+    /// none; the supervisor reports a missing kubectl).
     fn startable(&self, tunnel: &Tunnel) -> Result<(), String> {
+        if tunnel.is_kubectl() {
+            return Ok(());
+        }
         let exists = self
             .config
             .hosts()
@@ -1172,11 +1179,18 @@ impl Worker {
     fn destinations(&self, start: &StartRequest) -> Result<Vec<String>, String> {
         let mut destinations = match start {
             StartRequest::Connect(alias) | StartRequest::Review(alias) => vec![alias.clone()],
+            // kubectl tunnels have no host keys.
             StartRequest::Tunnel(_) | StartRequest::Group(_) => match self.launch_request(start)? {
-                Request::Start { tunnel, .. } => vec![tunnel.host],
-                Request::StartGroup { tunnels, .. } => {
-                    tunnels.into_iter().map(|t| t.host).collect()
-                }
+                Request::Start { tunnel, .. } => vec![tunnel]
+                    .into_iter()
+                    .filter(|t| !t.is_kubectl())
+                    .map(|t| t.host)
+                    .collect(),
+                Request::StartGroup { tunnels, .. } => tunnels
+                    .into_iter()
+                    .filter(|t| !t.is_kubectl())
+                    .map(|t| t.host)
+                    .collect(),
                 _ => Vec::new(),
             },
         };
@@ -1214,8 +1228,8 @@ impl Worker {
             Ok(destinations) => destinations,
             Err(e) => return self.error(e),
         };
-        if self.sandbox.is_some() {
-            // Fake servers: no host keys to check.
+        if self.sandbox.is_some() || destinations.is_empty() {
+            // Fake servers, or only kubectl tunnels: no host keys to check.
             return self.key_checked(start, Ok(None));
         }
         let (tools, keygen) = match self.keygen() {
@@ -1300,6 +1314,9 @@ impl Worker {
     fn review_changed(&mut self, review: KeyFor) {
         let host = match &review {
             KeyFor::Tunnel(id) => match self.data.tunnels.tunnel(id) {
+                Some(tunnel) if tunnel.is_kubectl() => {
+                    return self.error(format!("\"{}\" has no host keys", tunnel.name));
+                }
                 Some(tunnel) => tunnel.host.clone(),
                 None => return self.error(format!("no tunnel `{id}`")),
             },

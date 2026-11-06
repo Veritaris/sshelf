@@ -129,13 +129,7 @@ mod tests {
         meta.hosts.insert("db".into(), HostMeta::default());
         let mut tunnels = TunnelsFile::default();
         for (id, host) in [("t-1", "web"), ("t-2", "db"), ("t-3", "web")] {
-            tunnels.tunnels.push(Tunnel {
-                id: id.into(),
-                name: id.into(),
-                host: host.into(),
-                forwards: Vec::new(),
-                auto_reconnect: false,
-            });
+            tunnels.tunnels.push(Tunnel::ssh(id, id, host, Vec::new()));
         }
         let mut history = History::default();
         history.record("web", SystemTime::now());

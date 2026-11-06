@@ -697,18 +697,17 @@ mod tests {
             ("t-b", "DB", "db"),
             ("t-c", "Cache", "db"),
         ] {
-            data.tunnels.tunnels.push(Tunnel {
-                id: id.into(),
-                name: name.into(),
-                host: host.into(),
-                forwards: vec![Forward {
+            data.tunnels.tunnels.push(Tunnel::ssh(
+                id,
+                name,
+                host,
+                vec![Forward {
                     kind: ForwardKind::L,
                     bind: "127.0.0.1".into(),
                     listen: 6443,
                     target: Some("localhost:6443".into()),
                 }],
-                auto_reconnect: false,
-            });
+            ));
         }
         data.tunnels.groups.push(Group {
             id: "g-1".into(),

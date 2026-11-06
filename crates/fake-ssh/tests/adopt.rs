@@ -67,18 +67,17 @@ impl Harness {
 }
 
 fn tunnel(id: &str, port: u16) -> Tunnel {
-    Tunnel {
-        id: id.into(),
-        name: format!("tunnel {id}"),
-        host: "ok".into(),
-        forwards: vec![Forward {
+    Tunnel::ssh(
+        id,
+        &format!("tunnel {id}"),
+        "ok",
+        vec![Forward {
             kind: ForwardKind::L,
             bind: DEFAULT_BIND.into(),
             listen: port,
             target: Some("localhost:80".into()),
         }],
-        auto_reconnect: false,
-    }
+    )
 }
 
 fn record(dir: &Path) -> RunningFile {
@@ -140,6 +139,7 @@ fn entries_that_no_longer_run_as_recorded_are_dropped() {
             id: "a".into(),
             pid: std::process::id(),
             started: 1,
+            program: None,
             args: t.ssh_args(),
             owners: vec!["manual".into()],
         }],

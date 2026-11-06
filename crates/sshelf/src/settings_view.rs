@@ -60,6 +60,7 @@ impl SettingsView {
         let path = self.ssh_path.trim();
         Settings {
             ssh_path: (!path.is_empty()).then(|| PathBuf::from(path)),
+            kubectl_path: self.base.as_ref().and_then(|b| b.kubectl_path.clone()),
             terminal_command: self.terminal_command.clone(),
             close_behavior: self.close_behavior,
             host_list_style: self.host_list_style,

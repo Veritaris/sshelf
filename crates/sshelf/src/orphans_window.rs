@@ -334,13 +334,8 @@ mod tests {
             relink_targets: vec!["db".into()],
             ..AppData::new(PathBuf::from("app"))
         };
-        data.tunnels.upsert_tunnel(Tunnel {
-            id: "t-1".into(),
-            name: "Old".into(),
-            host: "old-host".into(),
-            forwards: Vec::new(),
-            auto_reconnect: false,
-        });
+        data.tunnels
+            .upsert_tunnel(Tunnel::ssh("t-1", "Old", "old-host", Vec::new()));
         data.tunnels.upsert_group(Group {
             id: "g-1".into(),
             name: "Work".into(),

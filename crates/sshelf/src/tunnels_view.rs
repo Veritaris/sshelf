@@ -353,13 +353,12 @@ impl TunnelsView {
     pub fn new_tunnel(&mut self, host: &str, file: &TunnelsFile) {
         self.selected = None;
         self.confirm_delete = None;
-        self.editor = Some(Tunnel {
-            id: file.new_tunnel_id(),
-            name: String::new(),
-            host: host.to_string(),
-            forwards: vec![new_forward()],
-            auto_reconnect: false,
-        });
+        self.editor = Some(Tunnel::ssh(
+            &file.new_tunnel_id(),
+            "",
+            host,
+            vec![new_forward()],
+        ));
     }
 
     pub fn show(
@@ -575,7 +574,7 @@ impl TunnelsView {
                     }
                     if let Some(chosen) = tunnel_menu(&response, &tunnel.id, &state, status) {
                         match chosen {
-                            MenuAction::Command(command) => commands.push(command),
+                            MenuAction::Command(command) => commands.push(*command),
                             MenuAction::Edit => {
                                 self.select(&tunnel.id);
                                 self.editor = Some(tunnel.clone());
@@ -1293,7 +1292,7 @@ fn exposed_hint(kind: ForwardKind) -> &'static str {
 
 /// What the row menu asked for.
 enum MenuAction {
-    Command(Command),
+    Command(Box<Command>),
     Edit,
     CopySsh,
     Delete,
@@ -1312,10 +1311,14 @@ fn tunnel_menu(
     let mut chosen = None;
     popup::context_menu(response, |menu| {
         if menu.item(Some(icons::PLAY), "Start", !manual || !active) {
-            chosen = Some(MenuAction::Command(Command::StartTunnel(tunnel_id.into())));
+            chosen = Some(MenuAction::Command(Box::new(Command::StartTunnel(
+                tunnel_id.into(),
+            ))));
         }
         if menu.item(Some(icons::SQUARE), "Stop", manual) {
-            chosen = Some(MenuAction::Command(Command::StopTunnel(tunnel_id.into())));
+            chosen = Some(MenuAction::Command(Box::new(Command::StopTunnel(
+                tunnel_id.into(),
+            ))));
         }
         menu.separator();
         if menu.item(None, "Edit", !active) {
@@ -1663,18 +1666,17 @@ mod tests {
     }
 
     fn tunnel() -> Tunnel {
-        Tunnel {
-            id: "t-1".into(),
-            name: "Prod DB".into(),
-            host: "bastion".into(),
-            forwards: vec![Forward {
+        Tunnel::ssh(
+            "t-1",
+            "Prod DB",
+            "bastion",
+            vec![Forward {
                 kind: ForwardKind::L,
                 bind: DEFAULT_BIND.into(),
                 listen: 5432,
                 target: Some("db:5432".into()),
             }],
-            auto_reconnect: false,
-        }
+        )
     }
 
     fn fixture(state: TunnelState) -> Fixture {
