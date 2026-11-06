@@ -27,7 +27,8 @@ This document is the source of truth for scope and design. It describes the **MV
 ### Non-goals
 
 - Embedded terminal emulator (sessions open in the user's terminal app).
-- Cloud sync, accounts, or any network service of our own.
+- Cloud sync, accounts, or any network service of our own. The one request sshelf makes itself is the update check (§10 *Update check*, M14): it asks GitHub's public API for the latest release, can be turned off, and sends nothing about the user.
+- Downloading or installing updates.
 - Password storage or password-based auth automation.
 - PuTTY/plink, WSL, Cygwin, MSYS2 or Git-for-Windows ssh support (see §8).
 - Features depending on `ControlMaster` / `ControlPersist` (unsupported by Windows OpenSSH).
@@ -62,10 +63,11 @@ Location: the platform config directory for `sshelf` (via `directories`). Human-
 
 | File | Contents |
 |---|---|
-| `settings.toml` | ssh binary override, terminal template, close behavior choice, UI prefs, onboarding tour state (`tour`, M10), streamer mode (`streamer_mode`, `streamer_hide_aliases`, M11), kubectl override (`kubectl_path`, M13) |
+| `settings.toml` | ssh binary override, terminal template, close behavior choice, UI prefs, onboarding tour state (`tour`, M10), streamer mode (`streamer_mode`, `streamer_hide_aliases`, M11), kubectl override (`kubectl_path`, M13), update check (`update_check`, `update_check_noted`, M14) |
 | `hosts.toml` | Per-host metadata keyed by alias: tags, notes, favorite, color, display order |
 | `tunnels.toml` | Tunnel definitions and groups (version 2 from M13, for kubectl tunnels) |
 | `history.toml` | Recent connections launched from the app (for the tray menu) |
+| `updates.toml` | The update check's state (M14): last check time and result, ETag, the latest release (version, URL, date), the skipped version. Written by sshelf only |
 | `running.toml` | The tunnels running now: their ssh process (pid, start time, arguments) and owners. Written by the supervisor whenever that changes, empty after a clean quit; read once at start to take tunnels over after a crash (§7 *Surviving a crash*, M12) |
 
 Rules:
@@ -368,6 +370,7 @@ Before starting a tunnel, determine the host key state using values from `ssh -G
 - **Sidebar:** an icon rail with Hosts · Tunnels · Groups · Settings, plus the orphan warning indicator (see *Visual design*).
 - **Main area:** list + detail pane.
 - **Feedback:** successes (settings saved, host saved/added/renamed, terminal opened) show as a toast in the bottom-right corner that fades after ~3 s; errors stay in the status bar until dismissed.
+  - **Every toast has a close button** (M14): Lucide `x` 14 in a 24 px ghost button at the right end, secondary grey, hover background `#2C313A` and strong text (80 ms). Closing removes the toast at once and the others close the gap; hovering a toast still pauses its fade. Sticky toasts (the update toasts, §10 *Update check*) close only this way or through their actions.
   - Hosts: list (search; filter chips *All*, *Favorites* and one per tag, one filter at a time; *New host*) with a separate collapsible *Patterns* section; detail pane with source file, metadata, actions (Connect, New tunnel, Edit, Rename…), and the `ssh -G` resolved panel.
   - *Edit* replaces the detail pane with the editor (§5): *Form* and *Raw text* tabs over the same block, the problems found, the changed lines as they will be written, and Save / Check / Discard. Picking another host closes an editor without changes. *New host* opens the same editor with an alias field and the target file picker (§4).
   - Tunnels: list with status, start/stop, forwards, stderr log.
@@ -460,7 +463,7 @@ All timings below are final and live as constants in one place (`theme.rs`). egu
 | Copyable value row | `Copy` | row background and copy icon fade in; click copies, toast "Copied <field>" | 80 ms | out |
 | Text inputs, raw editor | `Text` | focus outline fade | 80 ms | out |
 | Disabled controls | `NotAllowed` | none; a tooltip says why it is disabled | — | — |
-| Toast | — | fades in with a 6 px rise; fades out after 3 s; hover pauses | 120 ms | out |
+| Toast | — | fades in with a 6 px rise; fades out after 3 s; hover pauses; the close button removes it at once | 120 ms | out |
 | Starting / waiting ring | — | opacity pulses 100 → 40 → 100 % (`request_repaint_after`, only while visible) | 1 s loop | in-out |
 
 - **Reduce motion** (*Settings › Appearance*, `reduce_motion = true`): every duration becomes 0 and the pulse is static.
@@ -696,6 +699,55 @@ The UI for §7 *kubectl tunnels*. Reference boards: `Tunnel-Kubectl` (playable: 
 
 ---
 
+### Update check (milestone 14)
+
+sshelf shows its own version and says when a newer release is out on GitHub. It never downloads or installs anything: *What's new* opens the release page. Reference boards: `Updates` (playable: every state, the toast, the rail dot), `Update-States` (states, toasts, version string, first run, how a check works), and the updated `A-Settings`, `Tour-Welcome` and `Feedback` (close buttons on toasts).
+
+- **Version string**, embedded at build time by the sshelf crate's `build.rs`:
+  - **Version:** the tag when the build is exactly at a release tag (`git describe --tags --exact-match --match "[0-9]*.[0-9]*.[0-9]*"`, tree clean), otherwise `dev`. Cargo's package version is not used.
+  - **Commit:** `git rev-parse --short=7 HEAD`; `unknown` without git.
+  - `SSHELF_VERSION` / `SSHELF_COMMIT` in the build environment win; the release workflow sets them from the tag and `GITHUB_SHA`. `build.rs` reruns when `.git/HEAD` or the refs change.
+  - As built: "tree clean" means no changed tracked files (`git status --porcelain --untracked-files=no`), so untracked files don't make a tagged build `dev`; an empty override counts as unset. The rules live in `crates/sshelf/src/build_version.rs`, which `build.rs` includes and the app's tests run against temporary repositories. On Windows, `sshelf --version` started from a console (which gives a GUI program no stdout) writes to that console.
+  - **Shown:** "sshelf 0.4.0 · a1b2c3d" next to the Settings title (mono 12, secondary text; copy on hover, a click copies "sshelf 0.4.0 (a1b2c3d)" with the "Copied" toast); `sshelf --version` prints "sshelf 0.4.0 (a1b2c3d)" and exits before any window, tray or lock; the update toast's "You have"; the request's `User-Agent`.
+- **The check:**
+  - `GET https://api.github.com/repos/Veritaris/sshelf/releases/latest` with `Accept: application/vnd.github+json`, `User-Agent: sshelf/<version>`, `If-None-Match` with the stored ETag (a `304` keeps the stored release and doesn't count against GitHub's limit), a 10 s timeout and the system proxy (`HTTPS_PROXY`). HTTPS with rustls; it runs in core on a worker, never on the UI thread, and its result arrives as an event.
+  - Reads `tag_name` (a leading `v` is dropped), `html_url` and `published_at`. `/latest` never returns drafts or pre-releases.
+  - **Compare:** `X.Y.Z` numerically per part. Only a newer latest release counts; equal or older is *Up to date*. An unparseable tag is a failed check.
+  - **When:** at most once per 24 h, across starts too: about 5 s after start (after the window or tray is up) when the last answered check is a day old or there is none, else at that check plus 24 h; then every 24 h while sshelf runs; and on *Check now*. A failed check tries again after 1 h, and a start after a failed check checks after 5 s; GitHub's limit (`403` / `429` with `x-ratelimit-reset` or `retry-after`) waits until that time. A last check dated in the future (a clock set back) delays the first one by at most 24 h.
+  - **Not checked:** while `update_check` is off (except *Check now*); in a `dev` build (*Check now* shows the latest release without comparing); in the tour's sandbox; before the first-run note was shown (below).
+  - **Sent:** only that request. GitHub sees the IP address and the version in `User-Agent`.
+- **Announcing a newer version:**
+  - **Toast** (sticky): Lucide `circle-arrow-up` 18 in Blue, "sshelf 0.4.0 is available", "You have 0.3.2 · released 2 Nov", *What's new* (Lucide `external-link`; opens `html_url` in the browser and closes the toast) and *Skip this version*, and the close button. 400 px, bottom right; other toasts stack above it and still fade. Shown once per start for a newer, not skipped version (a daily check finding the same version doesn't bring a closed toast back); with the window hidden it waits until the window is shown.
+  - **Rail dot:** the Settings rail item carries a Blue 8 px dot (ring in the rail colour, like the Tunnels dot) while a newer, not skipped version is known; the rail tooltip adds "sshelf 0.4.0 is available". Closing the toast keeps the dot.
+  - **Skip this version:** stores it in `updates.toml`; the toast and dot go for that version. The next newer version is announced again. *Undo* in Settings clears it.
+- **Settings › Updates:** a card at the top of the right column, above *ssh*.
+  - Title with *Check now* (Lucide `refresh-cw`, disabled while checking).
+  - *Check for updates* switch: "Asks GitHub for the latest sshelf release at start and once a day. Nothing about you, your hosts or tunnels is sent." It applies at once, without *Save* (like *Privacy*). `update_check`, missing = on.
+  - One status line:
+    - **Up to date** (Lucide `circle-check`, Green) "· checked 18:33"; a build newer than the latest release adds "this build (0.4.1) is newer than the latest release (0.4.0)".
+    - **Checking GitHub…** with the pulsing ring.
+    - **Update available:** a Blue-tinted box (`#24303D`): "sshelf 0.4.0 is available · released 2 Nov · you have 0.3.2", *What's new*, *Skip this version*.
+    - **Skipped:** "0.4.0 skipped · you'll hear about the next version", *Undo*.
+    - **Couldn't check** (Light Yellow, Lucide `triangle-alert`): "Couldn't check for updates", the reason ("No connection", "GitHub didn't answer within 10 s", "GitHub limits checks; trying after 14:05", "Unexpected answer from GitHub (HTTP 502)"), "last success 2 Nov 09:12 · tries again in 1 h".
+    - **Off:** "Off · sshelf doesn't contact GitHub. Check now still works."
+    - **Development build:** "Development build: no automatic checks. Check now shows the latest release: 0.4.0."
+  - A failed check never shows a toast or a status bar error; only this line.
+- **First run:**
+  - **New users:** the welcome screen (§10 *Onboarding tour*) gets a second line under the cards: "sshelf checks GitHub for new versions at start and once a day. Turn it off in Settings › Updates." (Lucide `circle-arrow-up`). Showing the welcome screen counts as the note.
+  - **Existing users** (`tour` already set, no `update_check_noted`): the first start with M14 shows a sticky toast instead of checking: Lucide `info` in Blue, "sshelf now checks for new versions", "It asks GitHub at start and once a day. Nothing about you is sent.", *Keep it on* / *Turn off* and the close button (closing keeps it on). The first check runs once it is answered or closed.
+  - Either way `update_check_noted = true` is written and the note never comes back. A missing key is the default, so `settings.toml` keeps its version.
+- **Streamer mode:** nothing here is sensitive. **Tour:** the sandbox never checks and shows no update toast.
+- **Not in scope:** downloading or installing, pre-releases, release notes inside sshelf, a tray entry.
+- **As built (M14):**
+  - **HTTP client:** `ureq` 3 (blocking, one request on the checker's own thread) with rustls on ring and the bundled webpki roots; no OpenSSL or platform TLS, no gzip. The proxy comes from `ALL_PROXY` / `HTTPS_PROXY` / `HTTP_PROXY` minus `NO_PROXY` (ureq reads them); the Windows system proxy setting is not read. ring compiles C for the target, which CI does natively on each OS.
+  - **Core:** the app sends `Command::StartUpdates` (version, URL) on its first `logic` pass; only `main` names GitHub. The tour's sandbox ignores it and *Check now*. Tests use a local `http://` server, reached without a proxy. `SaveSettings` keeps `update_check` and `update_check_noted` as saved: only their own commands (the switch, the note) change them, so a Settings draft or the tour's state saved from older settings can't undo them.
+  - **`updates.toml`:** `checked_at`, `succeeded_at` (RFC 3339, UTC), `etag`, `[latest]` (`version`, `url`, `published`), `skipped`, and `[failure]` (`reason` = `offline` / `timeout` / `rate-limited` with `until` / `http` with `status` / `bad-answer` / `other` with `message`). The ETag is sent only together with a stored release. An `html_url` outside `https://github.com/Veritaris/sshelf/` counts as an unexpected answer (it is opened in the browser).
+  - **Reasons** besides the four above: "Unexpected answer from GitHub" (no release JSON, a tag that isn't `X.Y.Z`, a foreign page) and "Couldn't reach GitHub (<error>)" (TLS, proxy). A failure stored by an earlier run shows only while checks are on; before any answer the line reads "Not checked yet". "tries again in" rounds to minutes, then hours; a rate limit's line already names its time, so it has no "tries again". *Check now* also asks during a rate-limit wait. A `dev` build that hasn't checked says "Check now shows the latest release." without a version.
+  - **Announcing:** the toast and dot need checks on or a check this run (a release stored by an earlier run isn't announced while the check is off). *Skip* from Settings also takes the toast away; *Undo* brings the dot back, not the toast (once per start).
+  - **First run:** the existing-user toast and the welcome screen's note only appear in a run that checks (a test without a source shows neither). The welcome line sits 4 px under the tour line.
+  - **Toasts:** the close button is 24 px on every toast, the sticky ones too (the boards draw 28 px ghost buttons there; the spec wins); its accessible name is "Close notification", never the toast's text (streamer mode). A message wider than the toast still widens it, the close button after it. Sticky toasts are drawn only outside the tour and fade in like the others.
+  - **Rail:** the tooltip reads "Settings · sshelf 0.4.0 is available" before the shortcut (the board puts `Ctrl+4` in the middle); the item's accessible name stays "Settings". The dot fades in 180 ms.
+
 ## 11. Key generation (milestone 7)
 
 Available when adding/editing a host.
@@ -871,6 +923,19 @@ Each milestone ends with its acceptance criteria met, tests green on all three O
     - The app-level isolation test puts it on the user's `PATH`, with a `kubectl_path` that doesn't exist (no fallback, as for ssh).
     - `fake-ssh/tests/sandbox.rs` puts it on the sandbox Core's own `PATH` and checks detection ("Not part of the tour"), a lookup and a kubectl tunnel's start ("kubectl not found").
 - **Done when:** a kubectl tunnel to a real cluster (the owner checks with k3s) can be created, started, stopped, reconnects after its pod is deleted, and works in a group and from the tray; Settings shows kubectl found and not found; ssh tunnels behave as before; CI passes on all three OSes.
+
+### M14 — Update check and version
+- Everything in §10 *Update check*, and the close button on every toast (§10 *Layout*, *Feedback*). Reference boards: `docs/design/Updates.dc.html` (playable), `Update-States.dc.html`, and the updated `A-Settings`, `Tour-Welcome`, `Feedback`, `Interaction`.
+- Order:
+  1. The version: `build.rs` (git, the `SSHELF_*` overrides), a `version` module the app reads, `sshelf --version` in `main.rs`, the release workflow setting `SSHELF_VERSION` and `SSHELF_COMMIT`.
+  2. The close button on every toast, and sticky toasts in the toast stack.
+  3. Core: `update_check` / `update_check_noted` settings keys, `updates.toml` (version 1), the checker (HTTP client with rustls and proxy support; pick a small blocking one such as `ureq`, verify before adopting), the schedule, ETag and rate-limit handling, events.
+  4. UI: the Settings version chip and *Updates* card, the update toast, the rail dot and tooltip, *Skip* / *Undo*, the first-run line and toast.
+- Tests:
+  - **Version:** the tag / dev / unknown rules on a temporary git repo and with the overrides.
+  - **Checker** (no request to GitHub in any test; a local HTTP server or an injected transport): parsing a release JSON fixture; compare (newer, equal, older, `v` prefix, bad tag); `304` with ETag; `403` / `429` waiting until the reset; timeout; dev build and off never request; the 24 h and 1 h schedule with a fake clock.
+  - **UI** (`egui_kittest`): every Settings state; the toast's actions; the dot; closing any toast; the first-run toast for an existing user and none for a new one; the tour sandbox never checks.
+- **Done when:** a release build shows its tag and commit in Settings and `--version`, a local build shows `dev`; with an older build installed, the next start shows the toast and dot for the latest release, *Skip* silences it, *What's new* opens the release page; turning the check off stops all requests; every toast can be closed; CI passes on all three OSes.
 
 ---
 
