@@ -17,6 +17,7 @@ pub mod history;
 pub mod hostkeys;
 pub mod instance;
 pub mod keygen;
+pub mod kubectl;
 pub mod metadata;
 pub mod orphans;
 pub mod paths;

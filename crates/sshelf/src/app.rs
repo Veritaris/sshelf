@@ -8,6 +8,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::SystemTime;
 
 use sshelf_core::core::{AppData, Command, ConfigSnapshot, Core, Event, ParentWindow, SshInfo};
+use sshelf_core::kubectl::KubectlInfo;
 use sshelf_core::paths::Paths;
 use sshelf_core::redact::Redactor;
 use sshelf_core::settings;
@@ -96,6 +97,7 @@ pub struct SshelfApp {
     /// Streamer mode's filter for this Core's data.
     redactor: Arc<Redactor>,
     ssh: Option<Arc<SshInfo>>,
+    kubectl: Option<Arc<KubectlInfo>>,
     tunnel_states: Option<Arc<Snapshot>>,
     hosts: HostsView,
     tunnels: TunnelsView,
@@ -182,6 +184,7 @@ impl SshelfApp {
             data: None,
             redactor: Arc::default(),
             ssh: None,
+            kubectl: None,
             tunnel_states: None,
             hosts: HostsView::default(),
             tunnels: TunnelsView::default(),
@@ -310,6 +313,7 @@ impl SshelfApp {
                     result,
                 } => self.hosts.detail.on_resolved(alias, generation, result),
                 Event::Ssh(info) => self.ssh = Some(info),
+                Event::Kubectl(info) => self.kubectl = Some(info),
                 Event::Launched { alias } => {
                     self.toasts.push_value("Opened a terminal for", alias);
                 }
@@ -412,6 +416,12 @@ impl SshelfApp {
             running,
             failed,
             ssh: self.ssh.as_deref(),
+            kubectl: self
+                .data
+                .as_ref()
+                .is_some_and(|d| d.tunnels.tunnels.iter().any(|t| t.is_kubectl()))
+                .then_some(self.kubectl.as_deref())
+                .flatten(),
             config_loaded: self.config_loaded,
         };
         egui::Panel::bottom("status")
@@ -605,7 +615,7 @@ impl eframe::App for SshelfApp {
                     commands = self.settings.show(
                         ui,
                         self.data.as_deref(),
-                        self.ssh.as_deref(),
+                        (self.ssh.as_deref(), self.kubectl.as_deref()),
                         self.config.as_deref().map(|c| c.path.as_path()),
                         close_guard::running_count(self.tunnel_states.as_deref()),
                     );

@@ -1,6 +1,7 @@
 //! The status bar (SPEC.md §10 *Layout*): always shown, 28 px, along the
 //! bottom of the window: running and failed tunnels, the ssh version, the
-//! agent state and when the config was last read. An error takes its place,
+//! kubectl version while kubectl tunnels exist (M13), the agent state and
+//! when the config was last read. An error takes its place,
 //! tinted red, until dismissed.
 
 use std::time::SystemTime;
@@ -8,6 +9,7 @@ use std::time::SystemTime;
 use egui::{Align, CornerRadius, Label, Layout, RichText, Ui, UiBuilder, vec2};
 use sshelf_core::agent_service::AgentService;
 use sshelf_core::core::SshInfo;
+use sshelf_core::kubectl::KubectlInfo;
 use sshelf_core::ssh::AgentStatus;
 use sshelf_core::supervisor::{Snapshot, TunnelState};
 
@@ -32,6 +34,8 @@ pub struct Status<'a> {
     pub running: usize,
     pub failed: usize,
     pub ssh: Option<&'a SshInfo>,
+    /// kubectl, while any kubectl tunnel exists (M13).
+    pub kubectl: Option<&'a KubectlInfo>,
     /// When the last config snapshot arrived.
     pub config_loaded: Option<SystemTime>,
 }
@@ -164,15 +168,25 @@ fn left_items(ui: &mut Ui, status: &Status) {
     if status.failed > 0 {
         ui.label(small(format!("{} failed", status.failed), p.red));
     }
-    if let Some(ssh) = status.ssh {
-        if let Some(Ok(version)) = &ssh.version {
-            // "OpenSSH_for_Windows_9.5p1, LibreSSL 3.8.2": the first part.
-            let version = version.split(',').next().unwrap_or_default().trim();
-            ui.add(Label::new(small(version, p.dim).monospace()).truncate());
+    if let Some(Ok(version)) = status.ssh.and_then(|ssh| ssh.version.as_ref()) {
+        // "OpenSSH_for_Windows_9.5p1, LibreSSL 3.8.2": the first part.
+        let version = version.split(',').next().unwrap_or_default().trim();
+        ui.add(Label::new(small(version, p.dim).monospace()).truncate());
+    }
+    if let Some(info) = status.kubectl {
+        match (&info.kubectl, &info.version) {
+            (Ok(_), Some(Ok(version))) => {
+                let text = format!("kubectl {}", version.client);
+                ui.add(Label::new(small(text, p.dim).monospace()).truncate());
+            }
+            (Err(_), _) => {
+                ui.add(Label::new(small("kubectl not found", p.yellow)).truncate());
+            }
+            _ => {}
         }
-        if let Some((text, color)) = agent(ssh) {
-            ui.add(Label::new(small(text, color)).truncate());
-        }
+    }
+    if let Some((text, color)) = status.ssh.and_then(agent) {
+        ui.add(Label::new(small(text, color)).truncate());
     }
 }
 
@@ -202,15 +216,25 @@ mod tests {
         failed: usize,
         error: Option<String>,
     ) -> egui_kittest::Harness<'static, Option<String>> {
+        harness_with(running, failed, error, None)
+    }
+
+    fn harness_with(
+        running: usize,
+        failed: usize,
+        error: Option<String>,
+        kubectl: Option<KubectlInfo>,
+    ) -> egui_kittest::Harness<'static, Option<String>> {
         let ssh = ssh();
         test_util::harness()
-            .with_size([900.0, 28.0])
+            .with_size([1000.0, 28.0])
             .build_ui_state(
                 move |ui, error: &mut Option<String>| {
                     let status = Status {
                         running,
                         failed,
                         ssh: Some(&ssh),
+                        kubectl: kubectl.as_ref(),
                         config_loaded: Some(SystemTime::now()),
                     };
                     show(ui, &status, error);
@@ -229,6 +253,39 @@ mod tests {
         // A stopped service says more than the key count.
         harness.get_by_label("agent service stopped");
         harness.get_by_label_contains("config reloaded ");
+    }
+
+    #[test]
+    fn kubectl_follows_the_ssh_version() {
+        use sshelf_core::kubectl::{KubeconfigFiles, Kubectl, KubectlSource, KubectlVersion};
+        let found = KubectlInfo {
+            kubectl: Ok(Kubectl {
+                tool: sshelf_core::ssh::Tool::new("kubectl"),
+                source: KubectlSource::Path,
+            }),
+            version: Some(Ok(KubectlVersion {
+                client: "v1.31.2".into(),
+                kustomize: None,
+            })),
+            files: KubeconfigFiles::default(),
+            view: None,
+        };
+        let mut with = harness_with(0, 0, None, Some(found));
+        with.run();
+        with.get_by_label("kubectl v1.31.2");
+        let missing = KubectlInfo {
+            kubectl: Err("kubectl not found".into()),
+            version: None,
+            files: KubeconfigFiles::default(),
+            view: None,
+        };
+        let mut without = harness_with(0, 0, None, Some(missing));
+        without.run();
+        without.get_by_label("kubectl not found");
+        // Without kubectl tunnels the app passes none: nothing is said.
+        let mut plain = harness(0, 0, None);
+        plain.run();
+        assert!(plain.query_by_label_contains("kubectl").is_none());
     }
 
     #[test]

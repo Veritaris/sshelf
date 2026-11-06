@@ -24,6 +24,7 @@ use crate::health::{self, Health, HealthReport, HealthSnapshot};
 use crate::history::History;
 use crate::hostkeys::{self, ChangedKey, Keygen, KnownHostsWriter, UnknownKey};
 use crate::keygen::{self, FoundKey, GeneratedKey, KeyRequest};
+use crate::kubectl::{self, KubectlInfo};
 use crate::metadata::{HostMeta, HostsFile};
 use crate::orphans::{self, GroupOrphan, Orphan, TunnelOrphan};
 use crate::paths::Paths;
@@ -98,6 +99,8 @@ pub enum Command {
     },
     /// Re-detect the ssh binary, version, agent and service.
     RefreshSsh,
+    /// Re-detect kubectl, its version and the kubeconfig (M13).
+    RefreshKubectl,
     /// Open a terminal session for an alias.
     Connect(String),
     /// Create or update a tunnel (refused while it runs).
@@ -263,6 +266,8 @@ pub enum Event {
         result: Result<Resolved, String>,
     },
     Ssh(Arc<SshInfo>),
+    /// kubectl's binary, version and kubeconfig (M13), after each detection.
+    Kubectl(Arc<KubectlInfo>),
     Launched {
         alias: String,
     },
@@ -654,6 +659,7 @@ impl Worker {
             Err(e) => self.error(format!("config changes will not be detected: {e}")),
         }
         self.refresh_ssh();
+        self.refresh_kubectl();
         let tx = self.self_tx.clone();
         let ssh = self.tools.as_ref().ok().map(|t| t.ssh.clone());
         let on_event = move |event| {
@@ -744,6 +750,7 @@ impl Worker {
                 Command::SaveSettings(settings) => self.save_settings(settings),
                 Command::SetStreamer { on, hide_aliases } => self.set_streamer(on, hide_aliases),
                 Command::RefreshSsh => self.refresh_ssh(),
+                Command::RefreshKubectl => self.refresh_kubectl(),
                 Command::Connect(alias) => self.connect(&alias),
                 Command::SaveTunnel(tunnel) => self.save_tunnel(tunnel),
                 Command::DeleteTunnel(id) => self.delete_tunnel(&id),
@@ -1422,6 +1429,7 @@ impl Worker {
                     Settings::FILE
                 )));
                 self.refresh_ssh();
+                self.refresh_kubectl();
             }
             Err(e) => self.error(e.to_string()),
         }
@@ -1665,6 +1673,25 @@ impl Worker {
                 terminal,
                 tray: tray_host::available(),
             })));
+        });
+    }
+
+    /// Locates kubectl now (SPEC.md §8 *kubectl*); its version and the
+    /// kubeconfig are read in the background and reported as one
+    /// [`Event::Kubectl`]. The tour's sandbox never runs kubectl.
+    fn refresh_kubectl(&mut self) {
+        let kubectl = if self.sandbox.is_some() {
+            Err(kubectl::NOT_IN_TOUR.to_string())
+        } else {
+            kubectl::locate(self.data.settings.kubectl_path.as_deref(), &self.paths.kube)
+                .map_err(|e| e.to_string())
+        };
+        let env = self.paths.kube.clone();
+        let home = self.paths.home.clone();
+        let emitter = self.emitter.clone();
+        thread::spawn(move || {
+            let info = KubectlInfo::check(kubectl, &env, &home);
+            emitter.emit(Event::Kubectl(Arc::new(info)));
         });
     }
 

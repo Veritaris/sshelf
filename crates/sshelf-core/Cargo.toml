@@ -19,6 +19,8 @@ rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] 
 # The app window a file dialog belongs to (it is modal to it).
 raw-window-handle = { version = "0.6.2" }
 serde = { version = "1.0.229", features = ["derive"] }
+# kubectl's `-o json` output (M13: version, kubeconfig, lookups).
+serde_json = { version = "1.0.154" }
 # Key generation (SPEC.md §11): standard encrypted OpenSSH key files.
 # 0.7 is still a release candidate.
 ssh-key = { version = "0.6.7", features = ["crypto", "encryption", "getrandom"] }

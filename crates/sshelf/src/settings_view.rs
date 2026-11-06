@@ -2,14 +2,16 @@
 //! Appearance (host list style, card grouping, *Reduce motion*), Connect
 //! (the terminal command template), Window & tray (closing, the tray menu),
 //! Privacy (streamer mode, M11; applied at once), ssh (binary, version, the
-//! agent, the override), Files and Help (the tour, M10). *Save* and *Revert*
-//! sit next to the title.
+//! agent, the override), kubectl (M13: binary, version, kubeconfig, the
+//! override), Files and Help (the tour, M10). *Save* and *Revert* sit next to
+//! the title.
 
 use std::path::{Path, PathBuf};
 
 use egui::{Align, Align2, Color32, FontId, Frame, Id, Layout, Margin, RichText, Sense, Ui, vec2};
 use sshelf_core::agent_service::{self, AgentService};
 use sshelf_core::core::{AppData, Command, SshInfo};
+use sshelf_core::kubectl::{self, KubectlInfo, KubectlSource};
 use sshelf_core::settings::{
     CardsGroupBy, CloseBehavior, DEFAULT_TERMINAL_COMMAND, HostListStyle, Settings, TrayIconStyle,
     TrayMenu,
@@ -37,6 +39,7 @@ pub struct SettingsView {
     /// Saved settings the draft started from.
     base: Option<Settings>,
     ssh_path: String,
+    kubectl_path: String,
     terminal_command: String,
     close_behavior: CloseBehavior,
     host_list_style: HostListStyle,
@@ -57,10 +60,13 @@ impl SettingsView {
     /// The settings as edited (the tour's state and streamer mode, which
     /// apply at once, are kept as saved).
     fn draft(&self) -> Settings {
-        let path = self.ssh_path.trim();
+        let path = |text: &str| {
+            let text = text.trim();
+            (!text.is_empty()).then(|| PathBuf::from(text))
+        };
         Settings {
-            ssh_path: (!path.is_empty()).then(|| PathBuf::from(path)),
-            kubectl_path: self.base.as_ref().and_then(|b| b.kubectl_path.clone()),
+            ssh_path: path(&self.ssh_path),
+            kubectl_path: path(&self.kubectl_path),
             terminal_command: self.terminal_command.clone(),
             close_behavior: self.close_behavior,
             host_list_style: self.host_list_style,
@@ -86,11 +92,13 @@ impl SettingsView {
         }
         let dirty = self.base.as_ref().is_some_and(|b| self.draft() != *b);
         if self.base.as_ref() != Some(saved) && (!dirty || self.draft() == *saved) {
-            self.ssh_path = saved
-                .ssh_path
-                .as_ref()
-                .map(|p| p.display().to_string())
-                .unwrap_or_default();
+            let shown = |path: &Option<PathBuf>| {
+                path.as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default()
+            };
+            self.ssh_path = shown(&saved.ssh_path);
+            self.kubectl_path = shown(&saved.kubectl_path);
             self.terminal_command = saved.terminal_command.clone();
             self.close_behavior = saved.close_behavior;
             self.host_list_style = saved.host_list_style;
@@ -123,7 +131,7 @@ impl SettingsView {
         &mut self,
         ui: &mut Ui,
         data: Option<&AppData>,
-        ssh: Option<&SshInfo>,
+        (ssh, kubectl): (Option<&SshInfo>, Option<&KubectlInfo>),
         ssh_config: Option<&Path>,
         running: usize,
     ) -> Vec<Command> {
@@ -157,6 +165,7 @@ impl SettingsView {
                         ui.set_width(column);
                         ui.spacing_mut().item_spacing.y = GAP;
                         self.ssh(ui, ssh, &mut commands);
+                        self.kubectl(ui, kubectl, &mut commands);
                         files(ui, data, ssh_config);
                         self.help(ui, running);
                     });
@@ -492,23 +501,11 @@ impl SettingsView {
                     let (text, color) = agent_line(ssh);
                     ui.add(egui::Label::new(RichText::new(text).size(13.0).color(color)).wrap());
                 });
-                ui.horizontal_top(|ui| {
-                    ui.spacing_mut().item_spacing.x = 12.0;
-                    let (rect, _) = ui.allocate_exact_size(vec2(LABEL, 32.0), Sense::hover());
-                    let mut child = ui.new_child(
-                        egui::UiBuilder::new()
-                            .max_rect(rect)
-                            .layout(Layout::left_to_right(Align::Center)),
-                    );
-                    let label = child.label(RichText::new("Override").size(13.0).color(p.dim));
-                    ui.add(
-                        TextField::new(&mut self.ssh_path)
-                            .hint("path to an ssh binary (empty: detect)")
-                            .mono()
-                            .prefilled(),
-                    )
-                    .labelled_by(label.id);
-                });
+                override_row(
+                    ui,
+                    &mut self.ssh_path,
+                    "path to an ssh binary (empty: detect)",
+                );
                 if let Some(Ok(service)) = &ssh.service
                     && !service.is_running()
                 {
@@ -554,6 +551,157 @@ impl SettingsView {
         if copied {
             self.notices.push("Copied command".into());
         }
+    }
+
+    /// kubectl (SPEC.md §8 *kubectl*, §10 *kubectl tunnels*): the binary and
+    /// where it came from, its client version, the kubeconfig and the current
+    /// context, the override. Nothing here contacts a cluster.
+    fn kubectl(&mut self, ui: &mut Ui, info: Option<&KubectlInfo>, commands: &mut Vec<Command>) {
+        let p = &Palette::ONE_DARK;
+        card_with(
+            ui,
+            "kubectl",
+            |ui| {
+                if ui
+                    .add(
+                        Button::new("Refresh")
+                            .name("Refresh kubectl")
+                            .icon(icons::REFRESH_CW)
+                            .small(),
+                    )
+                    .clicked()
+                {
+                    commands.push(Command::RefreshKubectl);
+                }
+            },
+            |ui| {
+                let Some(info) = info else {
+                    ui.spinner();
+                    return;
+                };
+                let wrapped = |ui: &mut Ui, text: &str, color: Color32| {
+                    ui.add(egui::Label::new(RichText::new(text).size(13.0).color(color)).wrap());
+                };
+                let mono = |ui: &mut Ui, text: &str| {
+                    ui.label(
+                        RichText::new(text)
+                            .font(FontId::monospace(12.0))
+                            .color(p.text),
+                    );
+                };
+                let found = info.kubectl.is_ok();
+                row(ui, "Binary", |ui| match &info.kubectl {
+                    Ok(k) => {
+                        let source = match &k.source {
+                            KubectlSource::Override => "override".to_string(),
+                            KubectlSource::Path => "from PATH".to_string(),
+                            KubectlSource::Folder(name) => name.clone(),
+                        };
+                        path_label(ui, &k.tool.display(), Some(&source));
+                    }
+                    Err(e) if e == kubectl::NOT_IN_TOUR => wrapped(ui, e, p.dim),
+                    Err(_) if !self.kubectl_path.trim().is_empty() => {
+                        wrapped(ui, "the file set below doesn't exist", p.red)
+                    }
+                    Err(_) => wrapped(ui, "not found on PATH", p.yellow),
+                });
+                row(ui, "Version", |ui| match &info.version {
+                    Some(Ok(version)) => mono(ui, &version.describe()),
+                    Some(Err(e)) => wrapped(ui, e, p.red),
+                    None => wrapped(ui, "—", p.dim),
+                });
+                row(ui, "Kubeconfig", |ui| {
+                    let existing: Vec<_> = info.files.files.iter().filter(|(_, e)| *e).collect();
+                    let contexts = info.contexts().map(|v| v.contexts.len());
+                    let count = |n: usize| match n {
+                        1 => "1 context".to_string(),
+                        n => format!("{n} contexts"),
+                    };
+                    match (existing.as_slice(), info.files.from_env) {
+                        ([], _) => {
+                            let missing = info
+                                .files
+                                .files
+                                .first()
+                                .map(|(path, _)| path.display().to_string())
+                                .unwrap_or_default();
+                            path_label(ui, &missing, None);
+                            wrapped(
+                                ui,
+                                "not found · set KUBECONFIG or log in with your cluster's tool",
+                                p.yellow,
+                            );
+                        }
+                        ([(path, _)], false) => {
+                            let note = contexts.map(count).unwrap_or_default();
+                            path_label(ui, &path.display().to_string(), Some(&note));
+                        }
+                        (files, _) => {
+                            let mut note = format!(
+                                "{} · from KUBECONFIG",
+                                match files.len() {
+                                    1 => "1 file".to_string(),
+                                    n => format!("{n} files"),
+                                }
+                            );
+                            if let Some(n) = contexts {
+                                note.push_str(&format!(" · {}", count(n)));
+                            }
+                            path_label(ui, &files[0].0.display().to_string(), Some(&note));
+                        }
+                    }
+                });
+                row(ui, "Current context", |ui| match &info.view {
+                    Some(Ok(view)) => match &view.current {
+                        Some(current) => {
+                            if privacy::get(ui.ctx()).on {
+                                let style = masked::Style {
+                                    font: FontId::monospace(12.0),
+                                    color: p.text,
+                                    on_card: true,
+                                };
+                                masked::value(ui, current, &style);
+                            } else {
+                                mono(ui, current);
+                            }
+                        }
+                        None => wrapped(ui, "none set", p.dim),
+                    },
+                    Some(Err(e)) => {
+                        let shown = privacy::get(ui.ctx()).plain(e).into_owned();
+                        wrapped(ui, &shown, p.red)
+                    }
+                    None => wrapped(ui, "—", p.dim),
+                });
+                override_row(
+                    ui,
+                    &mut self.kubectl_path,
+                    "path to a kubectl binary (empty: detect)",
+                );
+                if !found
+                    && info.kubectl.as_ref().err().map(String::as_str) != Some(kubectl::NOT_IN_TOUR)
+                {
+                    wrapped(
+                        ui,
+                        "kubectl tunnels can't start until kubectl is installed or its path is \
+                         set above. ssh tunnels aren't affected.",
+                        p.text,
+                    );
+                    if button::link(ui, "How to install kubectl", 12.0).clicked() {
+                        ui.ctx()
+                            .open_url(egui::OpenUrl::new_tab(kubectl::INSTALL_URL));
+                    }
+                } else {
+                    ui.label(
+                        RichText::new(
+                            "Version is kubectl version --client; nothing here contacts a cluster.",
+                        )
+                        .size(12.0)
+                        .color(p.dim),
+                    );
+                }
+            },
+        );
     }
 
     /// Help: the tour again, or one chapter of it. Both wait while the
@@ -769,6 +917,23 @@ fn switch_row(ui: &mut Ui, name: &str, help: &str, on: &mut bool) -> bool {
 /// A path in mono, cut in the middle to the width left (the full path in a
 /// tooltip when cut), with an optional dim note after it. In streamer mode
 /// the path is a masked token, with no tooltip.
+/// An *Override* row: a real label naming the path field beside it.
+fn override_row(ui: &mut Ui, path: &mut String, hint: &str) {
+    let p = &Palette::ONE_DARK;
+    ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = 12.0;
+        let (rect, _) = ui.allocate_exact_size(vec2(LABEL, 32.0), Sense::hover());
+        let mut child = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(rect)
+                .layout(Layout::left_to_right(Align::Center)),
+        );
+        let label = child.label(RichText::new("Override").size(13.0).color(p.dim));
+        ui.add(TextField::new(path).hint(hint).mono().prefilled())
+            .labelled_by(label.id);
+    });
+}
+
 fn path_label(ui: &mut Ui, path: &str, note: Option<&str>) -> egui::Response {
     let p = &Palette::ONE_DARK;
     let font = FontId::monospace(12.0);
@@ -824,7 +989,7 @@ mod tests {
             .with_size([1100.0, 800.0])
             .build_ui_state(
                 move |ui, (view, commands): &mut (SettingsView, Vec<Command>)| {
-                    commands.extend(view.show(ui, Some(&data), None, None, 0));
+                    commands.extend(view.show(ui, Some(&data), (None, None), None, 0));
                 },
                 (SettingsView::default(), Vec::new()),
             )
@@ -838,7 +1003,7 @@ mod tests {
             .with_size([1100.0, 800.0])
             .build_ui_state(
                 move |ui, (view, asked): &mut (SettingsView, Vec<Chapter>)| {
-                    view.show(ui, Some(&data), None, None, running);
+                    view.show(ui, Some(&data), (None, None), None, running);
                     asked.extend(view.take_tour());
                 },
                 (SettingsView::default(), Vec::new()),
@@ -894,6 +1059,133 @@ mod tests {
             ..Settings::default()
         };
         assert_eq!(harness.state().1, [Command::SaveSettings(expected)]);
+    }
+
+    fn kubectl_harness(
+        info: KubectlInfo,
+    ) -> egui_kittest::Harness<'static, (SettingsView, Vec<Command>)> {
+        let data = data();
+        test_util::harness()
+            .with_size([1100.0, 1400.0])
+            .build_ui_state(
+                move |ui, (view, commands): &mut (SettingsView, Vec<Command>)| {
+                    commands.extend(view.show(ui, Some(&data), (None, Some(&info)), None, 0));
+                },
+                (SettingsView::default(), Vec::new()),
+            )
+    }
+
+    fn kubectl_info(found: bool) -> KubectlInfo {
+        use sshelf_core::kubectl::{
+            KubeConfigView, KubeContext, KubeconfigFiles, Kubectl, KubectlVersion,
+        };
+        let files = KubeconfigFiles {
+            files: vec![(PathBuf::from("/home/kq/.kube/config"), found)],
+            from_env: false,
+        };
+        if !found {
+            return KubectlInfo {
+                kubectl: Err("kubectl not found".into()),
+                version: None,
+                files,
+                view: None,
+            };
+        }
+        KubectlInfo {
+            kubectl: Ok(Kubectl {
+                tool: sshelf_core::ssh::Tool::new("/opt/kq/kubectl"),
+                source: KubectlSource::Folder("Docker Desktop".into()),
+            }),
+            version: Some(Ok(KubectlVersion {
+                client: "v1.31.2".into(),
+                kustomize: Some("v5.4.2".into()),
+            })),
+            files,
+            view: Some(Ok(KubeConfigView {
+                contexts: vec![
+                    KubeContext {
+                        name: "lab-kq".into(),
+                        ..KubeContext::default()
+                    },
+                    KubeContext {
+                        name: "other".into(),
+                        ..KubeContext::default()
+                    },
+                ],
+                current: Some("lab-kq".into()),
+            })),
+        }
+    }
+
+    #[test]
+    fn the_kubectl_card_shows_what_was_found() {
+        let mut harness = kubectl_harness(kubectl_info(true));
+        harness.step();
+        harness.step();
+        harness.get_by_label("/opt/kq/kubectl");
+        harness.get_by_label("Docker Desktop");
+        harness.get_by_label("Client v1.31.2, Kustomize v5.4.2");
+        harness.get_by_label("/home/kq/.kube/config");
+        harness.get_by_label("2 contexts");
+        harness.get_by_label("lab-kq");
+        assert!(harness.query_by_label("How to install kubectl").is_none());
+        harness.get_by_label("Refresh kubectl").click();
+        harness.step();
+        assert_eq!(harness.state().1, [Command::RefreshKubectl]);
+    }
+
+    #[test]
+    fn the_kubectl_card_says_how_to_install_it() {
+        let mut harness = kubectl_harness(kubectl_info(false));
+        harness.step();
+        harness.step();
+        harness.get_by_label("not found on PATH");
+        harness.get_by_label_contains("kubectl tunnels can't start");
+        harness.get_by_label("How to install kubectl");
+        harness.get_by_label_contains("not found · set KUBECONFIG");
+        // A set override that doesn't exist says so instead.
+        harness.state_mut().0.kubectl_path = "/nope/kubectl".into();
+        harness.step();
+        harness.get_by_label("the file set below doesn't exist");
+    }
+
+    #[test]
+    fn the_kubectl_override_waits_for_save() {
+        let mut harness = kubectl_harness(kubectl_info(false));
+        harness.step();
+        harness.state_mut().0.kubectl_path = "/opt/kubectl".into();
+        harness.step();
+        harness.get_by_label("Save").click();
+        harness.step();
+        harness.step();
+        let expected = Settings {
+            kubectl_path: Some(PathBuf::from("/opt/kubectl")),
+            ..Settings::default()
+        };
+        assert_eq!(harness.state().1, [Command::SaveSettings(expected)]);
+    }
+
+    #[test]
+    fn streamer_mode_masks_kubectls_paths_and_context() {
+        let info = kubectl_info(true);
+        let data = data();
+        let mut harness = test_util::harness()
+            .with_size([1100.0, 1400.0])
+            .build_ui_state(
+                move |ui, view: &mut SettingsView| {
+                    let on = privacy::Privacy {
+                        on: true,
+                        ..Default::default()
+                    };
+                    privacy::set(ui.ctx(), on);
+                    view.show(ui, Some(&data), (None, Some(&info)), None, 0);
+                },
+                SettingsView::default(),
+            );
+        harness.step();
+        harness.step();
+        let drawn = test_util::drawn_text(&harness);
+        assert!(!drawn.contains("kq"), "{drawn}");
     }
 
     #[test]
@@ -956,7 +1248,7 @@ mod tests {
             .with_size([1100.0, 900.0])
             .build_ui_state(
                 |ui, (view, data, commands): &mut (SettingsView, AppData, Vec<Command>)| {
-                    commands.extend(view.show(ui, Some(data), None, None, 0));
+                    commands.extend(view.show(ui, Some(data), (None, None), None, 0));
                 },
                 state,
             );
@@ -996,7 +1288,13 @@ mod tests {
                         ..Default::default()
                     };
                     privacy::set(ui.ctx(), on);
-                    view.show(ui, Some(&data), None, Some(Path::new("/q7/config")), 0);
+                    view.show(
+                        ui,
+                        Some(&data),
+                        (None, None),
+                        Some(Path::new("/q7/config")),
+                        0,
+                    );
                 },
                 SettingsView::default(),
             );
@@ -1013,7 +1311,7 @@ mod tests {
             .with_size([1100.0, 800.0])
             .build_ui_state(
                 |ui, (view, data): &mut (SettingsView, AppData)| {
-                    view.show(ui, Some(data), None, None, 0);
+                    view.show(ui, Some(data), (None, None), None, 0);
                 },
                 state,
             );
