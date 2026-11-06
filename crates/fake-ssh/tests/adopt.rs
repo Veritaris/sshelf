@@ -11,6 +11,8 @@ use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
 mod common;
+#[path = "common/holder.rs"]
+mod holder;
 
 use sshelf_core::running::{RunningFile, RunningTunnel};
 use sshelf_core::storage::Store;
@@ -57,7 +59,9 @@ impl Harness {
             let left = deadline.saturating_duration_since(Instant::now());
             match self.events.recv_timeout(left) {
                 Ok(SupervisorEvent::Snapshot(s)) => self.last = s,
-                Ok(SupervisorEvent::Error(e)) => panic!("error while waiting for {what}: {e}"),
+                Ok(SupervisorEvent::Error(e)) => {
+                    panic!("error while waiting for {what}: {}", holder::explain(&e))
+                }
                 Ok(SupervisorEvent::Adopted(n)) => self.adopted = Some(n),
                 Err(_) => panic!("timed out waiting for {what}; last: {:#?}", self.last),
             }
