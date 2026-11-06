@@ -316,6 +316,8 @@ impl SshelfApp {
                 } => self.hosts.detail.on_resolved(alias, generation, result),
                 Event::Ssh(info) => self.ssh = Some(info),
                 Event::Kubectl(info) => self.kubectl = Some(info),
+                // Nothing starts the check yet (M14's UI step does).
+                Event::Updates(_) => {}
                 Event::KubeLookup { query, result } => self.tunnels.on_lookup(query, result),
                 Event::Launched { alias } => {
                     self.toasts.push_value("Opened a terminal for", alias);

@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use raw_window_handle::{
     DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle,
@@ -38,6 +38,7 @@ use crate::supervisor::{self, Owner, Request, Snapshot, Supervisor, SupervisorEv
 use crate::terminal::{self, Terminal};
 use crate::tray_host;
 use crate::tunnels::{Group, Tunnel, TunnelsFile};
+use crate::updates::{self, Checker, UpdateStatus};
 use crate::watch::ConfigWatcher;
 
 /// Called after every event; the UI passes `ctx.request_repaint()`.
@@ -97,6 +98,23 @@ pub enum Command {
         on: bool,
         hide_aliases: bool,
     },
+    /// Start the update check (SPEC.md §10 *Update check*, M14), sent by
+    /// the app once its window or tray is up. Ignored by the tour's sandbox.
+    StartUpdates(UpdateSource),
+    /// *Check now*: also while the check is off, and in a `dev` build.
+    CheckUpdates,
+    /// The *Check for updates* switch: applied at once to the saved
+    /// settings, outside any Settings draft.
+    SetUpdateCheck(bool),
+    /// The first-run note was shown (the welcome screen) or answered (the
+    /// toast for existing users): `keep_on` false is *Turn off*.
+    NoteUpdateCheck {
+        keep_on: bool,
+    },
+    /// *Skip this version*.
+    SkipUpdate(String),
+    /// *Undo* a skipped version.
+    UnskipUpdate,
     /// Re-detect the ssh binary, version, agent and service.
     RefreshSsh,
     /// Re-detect kubectl, its version and the kubeconfig (M13).
@@ -271,6 +289,8 @@ pub enum Event {
     Ssh(Arc<SshInfo>),
     /// kubectl's binary, version and kubeconfig (M13), after each detection.
     Kubectl(Arc<KubectlInfo>),
+    /// The update check's state (M14), whenever it changes.
+    Updates(Arc<UpdateStatus>),
     /// What a [`Command::KubeLookup`] found, or why it couldn't.
     KubeLookup {
         query: KubeQuery,
@@ -507,10 +527,23 @@ pub struct Core {
 /// - *Install on server* runs through fake-ssh, then restarts the host's
 ///   failed tunnels;
 /// - host keys are not checked (the sample's servers are fake, and the tour
-///   has no host key step), and groups never start with it.
+///   has no host key step), and groups never start with it;
+/// - it never checks for updates ([`Command::StartUpdates`] is ignored).
 #[derive(Debug, Clone)]
 pub struct SandboxOptions {
     pub ssh: Tool,
+}
+
+/// What the update check asks and as which build ([`Command::StartUpdates`]).
+/// Only the app's `main` names GitHub ([`updates::LATEST_URL`]); tests use a
+/// local `http://` server, which is reached without a proxy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateSource {
+    /// This build's version (`dev` outside a release build).
+    pub version: String,
+    pub url: String,
+    /// Until the first automatic check ([`updates::FIRST`]).
+    pub first: Duration,
 }
 
 impl Core {
@@ -604,6 +637,8 @@ struct Worker {
     health_running: usize,
     /// The tour's sandbox Core.
     sandbox: Option<SandboxOptions>,
+    /// The update check, once the app started it (M14).
+    updates: Option<Checker>,
 }
 
 impl Worker {
@@ -658,6 +693,7 @@ impl Worker {
             health_queue: VecDeque::new(),
             health_running: 0,
             sandbox: None,
+            updates: None,
         }
     }
 
@@ -778,6 +814,16 @@ impl Worker {
                 Command::SetStreamer { on, hide_aliases } => self.set_streamer(on, hide_aliases),
                 Command::RefreshSsh => self.refresh_ssh(),
                 Command::RefreshKubectl => self.refresh_kubectl(),
+                Command::StartUpdates(source) => self.start_updates(source),
+                Command::CheckUpdates => self.tell_updates(updates::Request::CheckNow),
+                Command::SetUpdateCheck(on) => self.set_update_check(Some(on), None),
+                Command::NoteUpdateCheck { keep_on } => {
+                    self.set_update_check(Some(keep_on).filter(|on| !on), Some(true));
+                }
+                Command::SkipUpdate(version) => {
+                    self.tell_updates(updates::Request::Skip(version));
+                }
+                Command::UnskipUpdate => self.tell_updates(updates::Request::Unskip),
                 Command::KubeLookup(query) => self.kube_lookup(query),
                 Command::Connect(alias) => self.connect(&alias),
                 Command::SaveTunnel(tunnel) => self.save_tunnel(tunnel),
@@ -1472,6 +1518,7 @@ impl Worker {
                 )));
                 self.refresh_ssh();
                 self.refresh_kubectl();
+                self.configure_updates();
             }
             Err(e) => self.error(e.to_string()),
         }
@@ -1490,6 +1537,66 @@ impl Worker {
         if let Err(e) = saved {
             self.error(e.to_string());
         }
+    }
+
+    /// The update check's thread, with `updates.toml` in the app folder. The
+    /// tour's sandbox never checks.
+    fn start_updates(&mut self, source: UpdateSource) {
+        if self.sandbox.is_some() || self.updates.is_some() {
+            return;
+        }
+        let settings = &self.data.settings;
+        let transport = updates::Ureq {
+            // A local test server is reached directly.
+            env_proxy: source.url.starts_with("https://"),
+            ..updates::Ureq::default()
+        };
+        let emitter = self.emitter.clone();
+        self.updates = Some(Checker::start(
+            self.paths.app_dir.clone(),
+            updates::Options {
+                version: source.version,
+                url: source.url,
+                first: source.first,
+                enabled: settings.update_check,
+                noted: settings.update_check_noted,
+            },
+            Box::new(transport),
+            move |status| emitter.emit(Event::Updates(Arc::new(status))),
+        ));
+    }
+
+    fn tell_updates(&self, request: updates::Request) {
+        if let Some(checker) = &self.updates {
+            checker.send(request);
+        }
+    }
+
+    /// The *Check for updates* switch and the first-run note, applied at
+    /// once (like streamer mode, even when `settings.toml` can't be
+    /// written).
+    fn set_update_check(&mut self, on: Option<bool>, noted: Option<bool>) {
+        let mut settings = self.data.settings.clone();
+        if let Some(on) = on {
+            settings.update_check = on;
+        }
+        if let Some(noted) = noted {
+            settings.update_check_noted = noted;
+        }
+        let saved = self.store.save(&settings);
+        self.data.settings = settings;
+        self.publish_data();
+        self.configure_updates();
+        if let Err(e) = saved {
+            self.error(e.to_string());
+        }
+    }
+
+    fn configure_updates(&self) {
+        self.tell_updates(updates::Request::Configure {
+            enabled: self.data.settings.update_check,
+            noted: self.data.settings.update_check_noted,
+        });
     }
 
     /// Only files of the loaded config set (or the main config before it

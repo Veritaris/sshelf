@@ -57,8 +57,8 @@ pub struct SettingsView {
 }
 
 impl SettingsView {
-    /// The settings as edited (the tour's state and streamer mode, which
-    /// apply at once, are kept as saved).
+    /// The settings as edited (the tour's state, streamer mode and the
+    /// update check, which apply at once, are kept as saved).
     fn draft(&self) -> Settings {
         let path = |text: &str| {
             let text = text.trim();
@@ -77,6 +77,8 @@ impl SettingsView {
             streamer_mode: self.base.as_ref().is_some_and(|b| b.streamer_mode),
             streamer_hide_aliases: self.base.as_ref().is_some_and(|b| b.streamer_hide_aliases),
             tour: self.base.as_ref().and_then(|b| b.tour),
+            update_check: self.base.as_ref().is_none_or(|b| b.update_check),
+            update_check_noted: self.base.as_ref().is_some_and(|b| b.update_check_noted),
         }
     }
 
@@ -89,6 +91,8 @@ impl SettingsView {
             base.streamer_mode = saved.streamer_mode;
             base.streamer_hide_aliases = saved.streamer_hide_aliases;
             base.tour = saved.tour;
+            base.update_check = saved.update_check;
+            base.update_check_noted = saved.update_check_noted;
         }
         let dirty = self.base.as_ref().is_some_and(|b| self.draft() != *b);
         if self.base.as_ref() != Some(saved) && (!dirty || self.draft() == *saved) {

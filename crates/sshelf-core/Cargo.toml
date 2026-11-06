@@ -28,6 +28,10 @@ zeroize = { version = "1.9.1" }
 tempfile = { version = "3.27.0" }
 thiserror = { version = "2.0.21" }
 toml = { version = "1.1.8" }
+# The update check (SPEC.md §10 *Update check*, M14): one blocking HTTPS GET
+# on a worker. rustls with ring and the bundled webpki roots (no OpenSSL or
+# platform TLS); proxies from HTTPS_PROXY / ALL_PROXY / NO_PROXY. No gzip.
+ureq = { version = "3.5.1", default-features = false, features = ["rustls"] }
 
 [target.'cfg(windows)'.dependencies]
 # Service Control Manager (read-only `ssh-agent` query), Job Objects

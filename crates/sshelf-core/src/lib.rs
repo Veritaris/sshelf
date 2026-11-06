@@ -32,4 +32,5 @@ pub mod supervisor;
 pub mod terminal;
 pub mod tray_host;
 pub mod tunnels;
+pub mod updates;
 pub mod watch;

@@ -1,6 +1,6 @@
 //! `settings.toml`: ssh binary override, terminal command template, close
-//! behavior, appearance (host list style, reduced motion), the tray menu and
-//! the onboarding tour's state.
+//! behavior, appearance (host list style, reduced motion), the tray menu,
+//! the onboarding tour's state and the update check.
 
 use std::path::PathBuf;
 
@@ -44,6 +44,13 @@ pub struct Settings {
     /// welcome screen was answered, which shows it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tour: Option<TourState>,
+    /// Ask GitHub for the latest release at start and once a day (SPEC.md
+    /// §10 *Update check*, M14); missing = on.
+    pub update_check: bool,
+    /// The first-run note about the update check was shown (the welcome
+    /// screen's line, or the one-time toast for existing users).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub update_check_noted: bool,
 }
 
 /// How far the onboarding tour got.
@@ -127,6 +134,8 @@ impl Default for Settings {
             streamer_mode: false,
             streamer_hide_aliases: false,
             tour: None,
+            update_check: true,
+            update_check_noted: false,
         }
     }
 }
@@ -158,6 +167,8 @@ mod tests {
             streamer_mode: true,
             streamer_hide_aliases: true,
             tour: Some(TourState::Done),
+            update_check: false,
+            update_check_noted: true,
         };
         store.save(&settings).unwrap();
         let text = std::fs::read_to_string(store.path::<Settings>()).unwrap();
@@ -172,6 +183,8 @@ mod tests {
             "streamer_hide_aliases = true",
             "tour = \"done\"",
             "kubectl_path = \"/opt/k8s/kubectl\"",
+            "update_check = false",
+            "update_check_noted = true",
         ] {
             assert!(text.contains(line), "{line}: {text}");
         }
@@ -219,5 +232,11 @@ mod tests {
         assert_eq!(loaded.data.tour, None);
         // No `kubectl_path` (M13): kubectl is detected.
         assert_eq!(loaded.data.kubectl_path, None);
+        // No M14 keys: the check is on, its note not shown yet.
+        assert!(loaded.data.update_check);
+        assert!(!loaded.data.update_check_noted);
+        // The note is only written once shown.
+        let text = toml::to_string(&Settings::default()).unwrap();
+        assert!(!text.contains("update_check_noted"), "{text}");
     }
 }

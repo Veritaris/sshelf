@@ -9,8 +9,10 @@ use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant, SystemTime};
 
 mod common;
+#[path = "common/http.rs"]
+mod http;
 
-use sshelf_core::core::{Command, ConfigState, Core, Event};
+use sshelf_core::core::{Command, ConfigState, Core, Event, UpdateSource};
 use sshelf_core::metadata::{HostMeta, HostsFile};
 use sshelf_core::paths::Paths;
 use sshelf_core::settings::Settings;
@@ -744,6 +746,99 @@ fn saving_settings_publishes_them_and_says_so() {
     });
     assert_eq!(notice, "Settings saved to settings.toml");
     assert_eq!(Store::new(&paths.app_dir).load::<Settings>().data, settings);
+    drop(core);
+}
+
+/// The update check against a local stand-in for GitHub, from `Core`
+/// (SPEC.md §10 *Update check*).
+fn start_updates(core: &Core, url: &str) {
+    core.send(Command::StartUpdates(UpdateSource {
+        version: "0.3.2".into(),
+        url: url.into(),
+        first: Duration::ZERO,
+    }));
+}
+
+#[test]
+fn the_update_check_asks_follows_its_switch_and_keeps_a_skip() {
+    let server = http::serve(http::release("0.4.0"));
+    let tmp = tempfile::tempdir().unwrap();
+    let paths = Paths::new(&tmp.path().join("home"), tmp.path().join("app"));
+    let saved = Settings {
+        ssh_path: Some(fake_ssh()),
+        update_check_noted: true,
+        ..Settings::default()
+    };
+    Store::new(&paths.app_dir).save(&saved).unwrap();
+    let (core, events) = Core::start(paths.clone(), Arc::new(|| {}));
+    start_updates(&core, &server.url);
+    let found = wait_for(&events, "the check", |e| match e {
+        Event::Updates(s) if s.checked_this_run && !s.checking => Some(s),
+        _ => None,
+    });
+    assert_eq!(found.announced().unwrap().version, "0.4.0");
+    let heads = server.heads();
+    assert_eq!(heads.len(), 1);
+    assert!(heads[0].contains("sshelf/0.3.2"), "{}", heads[0]);
+    // Off at once: saved, and the next check is not scheduled.
+    core.send(Command::SetUpdateCheck(false));
+    let off = wait_for(&events, "off", |e| match e {
+        Event::Updates(s) if !s.enabled => Some(s),
+        _ => None,
+    });
+    assert_eq!(off.next_check, None);
+    assert!(
+        !Store::new(&paths.app_dir)
+            .load::<Settings>()
+            .data
+            .update_check
+    );
+    core.send(Command::SkipUpdate("0.4.0".into()));
+    wait_for(&events, "skipped", |e| match e {
+        Event::Updates(s) if s.skipped.as_deref() == Some("0.4.0") => Some(()),
+        _ => None,
+    });
+    let file = fs::read_to_string(paths.app_dir.join("updates.toml")).unwrap();
+    assert!(file.contains("skipped = \"0.4.0\""), "{file}");
+    assert!(file.contains("version = 1"), "{file}");
+    drop(core);
+    assert_eq!(server.heads().len(), 1);
+}
+
+#[test]
+fn the_first_check_waits_for_the_first_run_note() {
+    let server = http::serve(http::release("0.4.0"));
+    let tmp = tempfile::tempdir().unwrap();
+    let paths = Paths::new(&tmp.path().join("home"), tmp.path().join("app"));
+    let saved = Settings {
+        ssh_path: Some(fake_ssh()),
+        ..Settings::default()
+    };
+    Store::new(&paths.app_dir).save(&saved).unwrap();
+    let (core, events) = Core::start(paths.clone(), Arc::new(|| {}));
+    start_updates(&core, &server.url);
+    let first = wait_for(&events, "the status", |e| match e {
+        Event::Updates(s) => Some(s),
+        _ => None,
+    });
+    assert!(first.enabled && !first.auto, "{first:?}");
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(server.heads().is_empty());
+    core.send(Command::NoteUpdateCheck { keep_on: true });
+    wait_for(&events, "the check", |e| match e {
+        Event::Updates(s) if s.checked_this_run && !s.checking => Some(()),
+        _ => None,
+    });
+    let settings = Store::new(&paths.app_dir).load::<Settings>().data;
+    assert!(settings.update_check && settings.update_check_noted);
+    // *Turn off* instead: noted, and off.
+    core.send(Command::NoteUpdateCheck { keep_on: false });
+    wait_for(&events, "turned off", |e| match e {
+        Event::Updates(s) if !s.enabled => Some(()),
+        _ => None,
+    });
+    let settings = Store::new(&paths.app_dir).load::<Settings>().data;
+    assert!(!settings.update_check && settings.update_check_noted);
     drop(core);
 }
 

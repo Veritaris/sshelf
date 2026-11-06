@@ -10,8 +10,10 @@ use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
 mod common;
+#[path = "common/http.rs"]
+mod http;
 
-use sshelf_core::core::{Command, Core, Event, SandboxOptions};
+use sshelf_core::core::{Command, Core, Event, SandboxOptions, UpdateSource};
 use sshelf_core::paths::Paths;
 use sshelf_core::ssh::{Tool, ToolSource};
 use sshelf_core::storage::Store;
@@ -106,6 +108,28 @@ fn sandbox() -> Sandbox {
         core,
         events,
     }
+}
+
+/// The tour never checks for updates (SPEC.md §10 *Update check*): not on
+/// start, not on *Check now*; no status is ever reported.
+#[test]
+fn the_sandbox_never_checks_for_updates() {
+    let server = http::serve(http::release("9.9.9"));
+    let sandbox = sandbox();
+    sandbox.core.send(Command::StartUpdates(UpdateSource {
+        version: "0.3.2".into(),
+        url: server.url.clone(),
+        first: Duration::ZERO,
+    }));
+    sandbox.core.send(Command::CheckUpdates);
+    let deadline = Instant::now() + Duration::from_millis(600);
+    while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+        if let Ok(event) = sandbox.events.recv_timeout(left) {
+            assert!(!matches!(event, Event::Updates(_)), "{event:?}");
+        }
+    }
+    assert!(server.heads().is_empty());
+    assert!(!sandbox.dir.join("app").join("updates.toml").exists());
 }
 
 /// The tour stays ssh-only (SPEC.md §10 *kubectl tunnels*): even with a
