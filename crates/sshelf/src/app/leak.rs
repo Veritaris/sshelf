@@ -185,6 +185,7 @@ fn app(root: &Path, streamer: bool, hide: bool) -> Harness<'static, SshelfApp> {
         temp,
         user_paths: Some(paths),
         show: None,
+        updates: None,
     };
     let mut harness = test_util::harness()
         .with_size([1280.0, 800.0])

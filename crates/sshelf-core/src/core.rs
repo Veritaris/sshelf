@@ -1507,7 +1507,12 @@ impl Worker {
         }
     }
 
-    fn save_settings(&mut self, settings: Settings) {
+    /// The update check's switch and note apply at once through their own
+    /// commands: a save (a Settings draft, the tour's state) keeps them as
+    /// saved, so one made from older settings can't undo them.
+    fn save_settings(&mut self, mut settings: Settings) {
+        settings.update_check = self.data.settings.update_check;
+        settings.update_check_noted = self.data.settings.update_check_noted;
         match self.store.save(&settings) {
             Ok(()) => {
                 self.data.settings = settings;

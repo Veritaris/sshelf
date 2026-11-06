@@ -39,6 +39,9 @@ pub struct Rail<'a> {
     pub status: Status,
     /// Settings can't be opened, and why (the tour).
     pub settings_off: Option<&'a str>,
+    /// A newer sshelf to announce (SPEC.md §10 *Update check*): the Settings
+    /// item's Blue dot and a line in its tooltip.
+    pub update: Option<&'a str>,
 }
 
 struct Item {
@@ -138,6 +141,10 @@ pub fn show(ui: &mut Ui, view: &mut View, rail: &Rail) -> bool {
         if item.view == View::Tunnels && rail.running > 0 {
             tip.push_str(&format!(" · {} running", rail.running));
         }
+        let update = rail.update.filter(|_| item.view == View::Settings);
+        if let Some(version) = update {
+            tip.push_str(&format!(" · sshelf {version} is available"));
+        }
         let off = (item.view == View::Settings)
             .then_some(rail.settings_off)
             .flatten();
@@ -156,6 +163,25 @@ pub fn show(ui: &mut Ui, view: &mut View, rail: &Rail) -> bool {
             // The activity dot: 8 px, 6 px in from the top-right corner.
             let center = rect.right_top() + vec2(-10.0, 10.0);
             marks::paint_dot(ui.painter(), center, marks::DOT, p.green);
+        }
+        if item.view == View::Settings {
+            // The same dot in Blue while a newer version waits; it fades.
+            let shown = motion::fade(
+                ui.ctx(),
+                Id::unique("rail_update_dot"),
+                update.is_some(),
+                timing::SLIDE,
+                motion::ease_in_out,
+            );
+            if shown > 0.0 {
+                let center = rect.right_top() + vec2(-10.0, 10.0);
+                marks::paint_dot(
+                    ui.painter(),
+                    center,
+                    marks::DOT,
+                    p.blue.gamma_multiply(shown),
+                );
+            }
         }
         let clicked = match item.view {
             View::Tunnels => targets::clicked(ui.ctx(), Target::RailTunnels, &response),
@@ -280,6 +306,7 @@ mod tests {
         orphans: Vec<String>,
         running: usize,
         orphan_clicks: usize,
+        update: Option<&'static str>,
     }
 
     fn harness(orphans: Vec<String>, running: usize) -> egui_kittest::Harness<'static, State> {
@@ -292,6 +319,7 @@ mod tests {
                         running: state.running,
                         status: Status::Running,
                         settings_off: None,
+                        update: state.update,
                     };
                     if show(ui, &mut state.view, &rail) {
                         state.orphan_clicks += 1;
@@ -302,8 +330,25 @@ mod tests {
                     orphans,
                     running,
                     orphan_clicks: 0,
+                    update: None,
                 },
             )
+    }
+
+    /// A newer version: the Settings tooltip says so (the dot is painted
+    /// with it), and both go with it.
+    #[test]
+    fn an_update_adds_to_the_settings_tooltip() {
+        let mut harness = harness(Vec::new(), 0);
+        harness.state_mut().update = Some("0.4.0");
+        harness.run();
+        harness.get_by_label("Settings").hover();
+        harness.run_steps(40);
+        harness.get_by_label_contains("Settings · sshelf 0.4.0 is available");
+        harness.state_mut().update = None;
+        harness.run_steps(2);
+        // The open tooltip now says only "Settings".
+        assert!(harness.query_by_label_contains("is available").is_none());
     }
 
     #[test]

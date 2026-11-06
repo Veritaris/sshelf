@@ -131,17 +131,33 @@ pub fn show(ui: &mut Ui, config: Option<&ConfigSnapshot>) -> Option<Choice> {
         });
     });
     ui.add_space(8.0);
+    footnote(
+        &mut ui,
+        icons::INFO,
+        "You can take the tour again any time from Settings \u{203a} Help.",
+    );
+    // The update check's first-run note (SPEC.md §10 *Update check*).
+    ui.add_space(4.0);
+    footnote(&mut ui, icons::CIRCLE_ARROW_UP, UPDATE_NOTE);
+    choice
+}
+
+/// The update check's line under the cards.
+pub const UPDATE_NOTE: &str = "sshelf checks GitHub for new versions at start and once a day. \
+                               Turn it off in Settings \u{203a} Updates.";
+
+/// A centred dim line under the cards with its 14 px icon.
+fn footnote(ui: &mut Ui, icon: char, text: &str) {
+    let p = &Palette::ONE_DARK;
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
-        let text = "You can take the tour again any time from Settings \u{203a} Help.";
         let galley =
             ui.painter()
                 .layout_no_wrap(text.to_string(), FontId::proportional(12.0), p.dim);
         ui.add_space(((ui.available_width() - galley.size().x - 20.0) / 2.0).max(0.0));
-        crate::icons::show(ui, icons::INFO, 14.0, p.dim);
+        crate::icons::show(ui, icon, 14.0, p.dim);
         ui.label(RichText::new(text).size(12.0).color(p.dim));
     });
-    choice
 }
 
 /// A choice card: 16 px corners; the tour's has a Magenta outline.

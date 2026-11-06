@@ -3,12 +3,18 @@
 //! (the terminal command template), Window & tray (closing, the tray menu),
 //! Privacy (streamer mode, M11; applied at once), ssh (binary, version, the
 //! agent, the override), kubectl (M13: binary, version, kubeconfig, the
-//! override), Files and Help (the tour, M10). *Save* and *Revert* sit next to
-//! the title.
+//! override), Files and Help (the tour, M10), and Updates (M14: the check's
+//! switch, applied at once, and its state) at the top of the right column.
+//! *Save* and *Revert* sit next to the title, the version chip after it.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
-use egui::{Align, Align2, Color32, FontId, Frame, Id, Layout, Margin, RichText, Sense, Ui, vec2};
+use egui::{
+    Align, Align2, Color32, CursorIcon, FontId, Frame, Id, Layout, Margin, Response, RichText,
+    Role, Sense, Ui, WidgetInfo, vec2,
+};
 use sshelf_core::agent_service::{self, AgentService};
 use sshelf_core::core::{AppData, Command, SshInfo};
 use sshelf_core::kubectl::{self, KubectlInfo, KubectlSource};
@@ -19,6 +25,7 @@ use sshelf_core::settings::{
 use sshelf_core::ssh::{AgentStatus, ToolSource};
 use sshelf_core::storage::LoadStatus;
 use sshelf_core::terminal;
+use sshelf_core::updates::{Failure, Release, UpdateStatus, Version};
 
 use crate::theme::{Palette, radius};
 use crate::tour::steps::Chapter;
@@ -26,8 +33,8 @@ use crate::widgets::button::{self, Button};
 use crate::widgets::dropdown::Dropdown;
 use crate::widgets::field::TextField;
 use crate::widgets::switch::switch;
-use crate::widgets::{masked, nav, popup, text};
-use crate::{fonts, icons, privacy};
+use crate::widgets::{marks, masked, nav, popup, text};
+use crate::{fonts, icons, motion, privacy, util, version};
 
 /// Label column of a card's rows.
 const LABEL: f32 = 150.0;
@@ -54,6 +61,8 @@ pub struct SettingsView {
     /// Privacy's switches flipped: streamer mode and hidden aliases, to
     /// apply at once.
     streamer: Option<(bool, bool)>,
+    /// The update check's last state (`None` until it reports).
+    updates: Option<Arc<UpdateStatus>>,
 }
 
 impl SettingsView {
@@ -129,6 +138,11 @@ impl SettingsView {
         self.streamer.take()
     }
 
+    /// The update check reported (`Event::Updates`).
+    pub fn on_updates(&mut self, status: Arc<UpdateStatus>) {
+        self.updates = Some(status);
+    }
+
     /// `running`: the user's tunnels running now (the tour can't start
     /// while any does).
     pub fn show(
@@ -168,6 +182,7 @@ impl SettingsView {
                     ui.vertical(|ui| {
                         ui.set_width(column);
                         ui.spacing_mut().item_spacing.y = GAP;
+                        self.updates(ui, &data.settings, &mut commands);
                         self.ssh(ui, ssh, &mut commands);
                         self.kubectl(ui, kubectl, &mut commands);
                         files(ui, data, ssh_config);
@@ -190,6 +205,10 @@ impl SettingsView {
                     .font(fonts::semibold(20.0))
                     .color(p.text_strong),
             );
+            if version_chip(ui).clicked() {
+                ui.ctx().copy_text(version::line());
+                self.notices.push(format!("Copied {}", version::line()));
+            }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
                 let read_only = match &data.settings_status {
@@ -218,6 +237,47 @@ impl SettingsView {
                 }
             });
         });
+    }
+
+    /// Updates (SPEC.md §10 *Update check*): *Check now*, the switch (at
+    /// once, without *Save*) and one status line.
+    fn updates(&mut self, ui: &mut Ui, saved: &Settings, commands: &mut Vec<Command>) {
+        let status = self.updates.clone();
+        let checking = status.as_ref().is_some_and(|s| s.checking);
+        let mut check_now = false;
+        card_with(
+            ui,
+            "Updates",
+            |ui| {
+                let mut button = Button::new("Check now")
+                    .icon(icons::REFRESH_CW)
+                    .ghost()
+                    .small();
+                if status.is_none() {
+                    button = button.tip("The update check hasn't started");
+                }
+                check_now = ui
+                    .add_enabled(status.is_some() && !checking, button)
+                    .clicked();
+            },
+            |ui| {
+                let mut on = saved.update_check;
+                if switch_row(
+                    ui,
+                    "Check for updates",
+                    "Asks GitHub for the latest sshelf release at start and once a day. Nothing \
+                     about you, your hosts or tunnels is sent.",
+                    &mut on,
+                ) {
+                    commands.push(Command::SetUpdateCheck(on));
+                }
+                let line = update_line(status.as_deref(), saved.update_check);
+                commands.extend(show_update_line(ui, &line));
+            },
+        );
+        if check_now {
+            commands.push(Command::CheckUpdates);
+        }
     }
 
     fn appearance(&mut self, ui: &mut Ui) {
@@ -847,6 +907,324 @@ fn files(ui: &mut Ui, data: &AppData, ssh_config: Option<&Path>) {
 }
 
 /// A settings card: raised, 8 px corners, its title, then `add`.
+/// "sshelf 0.4.0 · a1b2c3d" after the title (mono 12, secondary text):
+/// hovering fades in its background and a copy icon; a click copies.
+fn version_chip(ui: &mut Ui) -> Response {
+    let p = &Palette::ONE_DARK;
+    let text = version::chip();
+    let galley = ui
+        .painter()
+        .layout_no_wrap(text.clone(), FontId::monospace(12.0), p.dim);
+    const ICON: f32 = 13.0;
+    let size = vec2(8.0 + galley.size().x + 6.0 + ICON + 8.0, 26.0);
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    response.widget_info(|| WidgetInfo::labeled(Role::Button, true, &text));
+    let hover = motion::fade(
+        ui.ctx(),
+        response.id.with("hover"),
+        response.hovered(),
+        crate::theme::timing::HOVER,
+        motion::ease_out,
+    );
+    let painter = ui.painter();
+    painter.rect_filled(
+        rect,
+        radius::CONTROL,
+        Color32::TRANSPARENT.lerp_to_gamma(p.surface, hover),
+    );
+    let at = egui::pos2(rect.left() + 8.0, rect.center().y - galley.size().y / 2.0);
+    painter.galley(at, galley, p.dim);
+    if hover > 0.0 {
+        painter.text(
+            egui::pos2(rect.right() - 8.0 - ICON / 2.0, rect.center().y),
+            Align2::CENTER_CENTER,
+            icons::COPY,
+            icons::font(ICON),
+            p.accent.gamma_multiply(hover),
+        );
+    }
+    let response = response.on_hover_cursor(CursorIcon::PointingHand);
+    popup::tip_below(response, |ui| {
+        ui.label("Copy version");
+    })
+}
+
+/// What Settings › Updates says (SPEC.md §10 *Update check*), from the
+/// check's state.
+#[derive(Debug, Clone, PartialEq)]
+enum UpdateLine {
+    /// The check hasn't reported yet, or nothing was checked.
+    NotYet,
+    Checking,
+    UpToDate {
+        checked: Option<SystemTime>,
+        /// This build is newer than the latest release: both versions.
+        ahead: Option<(String, String)>,
+    },
+    Available {
+        release: Release,
+        current: String,
+    },
+    Skipped(String),
+    Failed {
+        failure: Failure,
+        last_success: Option<SystemTime>,
+        next: Option<SystemTime>,
+    },
+    Off,
+    /// A `dev` build: no automatic checks; the latest release once known.
+    Dev(Option<String>),
+}
+
+fn update_line(status: Option<&UpdateStatus>, enabled: bool) -> UpdateLine {
+    let dev = Version::parse(version::VERSION).is_none();
+    let Some(s) = status else {
+        return match (enabled, dev) {
+            (false, _) => UpdateLine::Off,
+            (true, true) => UpdateLine::Dev(None),
+            (true, false) => UpdateLine::NotYet,
+        };
+    };
+    if s.checking {
+        return UpdateLine::Checking;
+    }
+    // A stored failure counts while checks run, or after *Check now*.
+    if let Some(failure) = &s.failure
+        && (s.checked_this_run || (s.enabled && !s.dev()))
+    {
+        return UpdateLine::Failed {
+            failure: failure.clone(),
+            last_success: s.succeeded_at,
+            next: s.next_check,
+        };
+    }
+    if s.dev() {
+        return UpdateLine::Dev(s.latest.as_ref().map(|r| r.version.clone()));
+    }
+    if !s.enabled && !s.checked_this_run {
+        return UpdateLine::Off;
+    }
+    if let Some(release) = s.newer() {
+        if s.skipped.as_deref() == Some(release.version.as_str()) {
+            return UpdateLine::Skipped(release.version.clone());
+        }
+        return UpdateLine::Available {
+            release: release.clone(),
+            current: s.current.clone(),
+        };
+    }
+    if s.checked_at.is_some() {
+        return UpdateLine::UpToDate {
+            checked: s.succeeded_at,
+            ahead: s
+                .latest
+                .as_ref()
+                .filter(|_| s.ahead())
+                .map(|r| (s.current.clone(), r.version.clone())),
+        };
+    }
+    UpdateLine::NotYet
+}
+
+/// Why a check failed, in plain words.
+fn failure_reason(failure: &Failure) -> String {
+    match failure {
+        Failure::Offline => "No connection".into(),
+        Failure::Timeout => "GitHub didn't answer within 10 s".into(),
+        Failure::RateLimited { until } => {
+            format!("GitHub limits checks; trying after {}", util::clock(*until))
+        }
+        Failure::Http { status } => format!("Unexpected answer from GitHub (HTTP {status})"),
+        Failure::BadAnswer => "Unexpected answer from GitHub".into(),
+        Failure::Other { message } => format!("Couldn't reach GitHub ({message})"),
+    }
+}
+
+/// "1 h" / "12 min" until `at` (at least a minute).
+fn wait_until(at: SystemTime) -> String {
+    let secs = at
+        .duration_since(SystemTime::now())
+        .unwrap_or(Duration::ZERO)
+        .as_secs();
+    let minutes = ((secs + 30) / 60).max(1);
+    if minutes >= 60 {
+        format!("{} h", (minutes + 30) / 60)
+    } else {
+        format!("{minutes} min")
+    }
+}
+
+/// The status line under the switch; its buttons' commands.
+fn show_update_line(ui: &mut Ui, line: &UpdateLine) -> Vec<Command> {
+    let p = &Palette::ONE_DARK;
+    let mut commands = Vec::new();
+    let dim = |text: &str| RichText::new(text).size(13.0).color(p.dim);
+    let small = |text: &str| RichText::new(text).size(12.0).color(p.dim);
+    match line {
+        UpdateLine::NotYet => {
+            ui.label(dim("Not checked yet"));
+        }
+        UpdateLine::Checking => {
+            ui.horizontal(|ui| {
+                ui.set_min_height(28.0);
+                ui.spacing_mut().item_spacing.x = 8.0;
+                marks::pulsing_ring(ui, 12.0, p.dim);
+                ui.label(dim("Checking GitHub\u{2026}"));
+            });
+        }
+        UpdateLine::UpToDate { checked, ahead } => {
+            ui.horizontal_top(|ui| {
+                ui.set_min_height(28.0);
+                ui.spacing_mut().item_spacing.x = 8.0;
+                icons::show(ui, icons::CIRCLE_CHECK, 16.0, p.green);
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        ui.label(RichText::new("Up to date").size(13.0).color(p.text));
+                        if let Some(at) = checked {
+                            ui.label(small(&format!("\u{b7} checked {}", util::clock(*at))));
+                        }
+                    });
+                    if let Some((current, latest)) = ahead {
+                        ui.label(small(&format!(
+                            "this build ({current}) is newer than the latest release ({latest})"
+                        )));
+                    }
+                });
+            });
+        }
+        UpdateLine::Available { release, current } => {
+            marks::banner(ui, p.blue_tint, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    icons::show(ui, icons::CIRCLE_ARROW_UP, 16.0, p.blue);
+                    ui.label(text::parts(
+                        &[
+                            ("sshelf ", false),
+                            (&release.version, true),
+                            (" is available", false),
+                        ],
+                        13.0,
+                        p.text_strong,
+                    ));
+                });
+                let mut meta = Vec::new();
+                let released = release.published.map(util::day);
+                if let Some(day) = &released {
+                    meta.push((format!("released {day} \u{b7} "), false));
+                }
+                meta.push(("you have ".to_string(), false));
+                meta.push((current.clone(), true));
+                let meta: Vec<(&str, bool)> = meta.iter().map(|(t, m)| (t.as_str(), *m)).collect();
+                ui.label(text::parts(&meta, 12.0, p.dim));
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    let new = Button::new("What's new").icon(icons::EXTERNAL_LINK).small();
+                    if ui.add(new).clicked() {
+                        ui.ctx().open_url(egui::OpenUrl::new_tab(&release.url));
+                    }
+                    let skip = Button::new("Skip this version")
+                        .icon(icons::SKIP_FORWARD)
+                        .ghost()
+                        .small();
+                    if ui.add(skip).clicked() {
+                        commands.push(Command::SkipUpdate(release.version.clone()));
+                    }
+                });
+            });
+        }
+        UpdateLine::Skipped(skipped) => {
+            ui.horizontal(|ui| {
+                ui.set_min_height(28.0);
+                ui.spacing_mut().item_spacing.x = 8.0;
+                icons::show(ui, icons::SKIP_FORWARD, 14.0, p.dim);
+                ui.label(text::parts(
+                    &[
+                        (skipped, true),
+                        (" skipped \u{b7} you'll hear about the next version", false),
+                    ],
+                    13.0,
+                    p.dim,
+                ));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let undo = Button::new("Undo").icon(icons::UNDO_2).ghost().small();
+                    if ui.add(undo).clicked() {
+                        commands.push(Command::UnskipUpdate);
+                    }
+                });
+            });
+        }
+        UpdateLine::Failed {
+            failure,
+            last_success,
+            next,
+        } => {
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                ui.vertical(|ui| {
+                    ui.add_space(2.0);
+                    icons::show(ui, icons::TRIANGLE_ALERT, 16.0, p.yellow);
+                });
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    ui.label(
+                        RichText::new("Couldn't check for updates")
+                            .size(13.0)
+                            .color(p.yellow),
+                    );
+                    ui.add(egui::Label::new(small(&failure_reason(failure))).wrap());
+                    let mut meta = Vec::new();
+                    if let Some(at) = last_success {
+                        meta.push(format!(
+                            "last success {} {}",
+                            util::day(*at),
+                            util::clock(*at)
+                        ));
+                    }
+                    // A rate limit already says when.
+                    if let Some(next) = next
+                        && !matches!(failure, Failure::RateLimited { .. })
+                    {
+                        meta.push(format!("tries again in {}", wait_until(*next)));
+                    }
+                    if !meta.is_empty() {
+                        ui.label(small(&meta.join(" \u{b7} ")));
+                    }
+                });
+            });
+        }
+        UpdateLine::Off => {
+            ui.add(
+                egui::Label::new(dim(
+                    "Off \u{b7} sshelf doesn't contact GitHub. Check now still works.",
+                ))
+                .wrap(),
+            );
+        }
+        UpdateLine::Dev(latest) => {
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                ui.vertical(|ui| {
+                    ui.add_space(2.0);
+                    icons::show(ui, icons::GIT_COMMIT_HORIZONTAL, 16.0, p.dim);
+                });
+                let text = match latest {
+                    Some(latest) => format!(
+                        "Development build: no automatic checks. Check now shows the latest \
+                         release: {latest}."
+                    ),
+                    None => "Development build: no automatic checks. Check now shows the latest \
+                             release."
+                        .to_string(),
+                };
+                ui.add(egui::Label::new(dim(&text)).wrap());
+            });
+        }
+    }
+    commands
+}
+
 fn card(ui: &mut Ui, title: &str, add: impl FnOnce(&mut Ui)) {
     card_with(ui, title, |_| {}, add);
 }
@@ -997,6 +1375,259 @@ mod tests {
                 },
                 (SettingsView::default(), Vec::new()),
             )
+    }
+
+    /// A check that found nothing yet, of build `current`.
+    fn status(current: &str) -> UpdateStatus {
+        UpdateStatus {
+            current: current.into(),
+            enabled: true,
+            auto: true,
+            checking: false,
+            checked_this_run: true,
+            latest: None,
+            skipped: None,
+            checked_at: None,
+            succeeded_at: None,
+            failure: None,
+            next_check: None,
+        }
+    }
+
+    fn release(version: &str) -> Release {
+        Release {
+            version: version.into(),
+            url: format!("https://github.com/Veritaris/sshelf/releases/tag/{version}"),
+            published: Some(SystemTime::now()),
+        }
+    }
+
+    fn checked(current: &str, latest: &str) -> UpdateStatus {
+        let now = SystemTime::now();
+        UpdateStatus {
+            latest: Some(release(latest)),
+            checked_at: Some(now),
+            succeeded_at: Some(now),
+            ..status(current)
+        }
+    }
+
+    #[test]
+    fn the_update_line_follows_the_checks_state() {
+        let line = |s: &UpdateStatus| update_line(Some(s), s.enabled);
+        assert_eq!(
+            line(&UpdateStatus {
+                checking: true,
+                ..checked("0.3.2", "0.4.0")
+            }),
+            UpdateLine::Checking
+        );
+        assert!(matches!(
+            line(&checked("0.3.2", "0.4.0")),
+            UpdateLine::Available { release, current } if release.version == "0.4.0" && current == "0.3.2"
+        ));
+        assert_eq!(
+            line(&UpdateStatus {
+                skipped: Some("0.4.0".into()),
+                ..checked("0.3.2", "0.4.0")
+            }),
+            UpdateLine::Skipped("0.4.0".into())
+        );
+        assert!(matches!(
+            line(&checked("0.4.0", "0.4.0")),
+            UpdateLine::UpToDate { ahead: None, .. }
+        ));
+        assert!(matches!(
+            line(&checked("0.4.1", "0.4.0")),
+            UpdateLine::UpToDate { ahead: Some((c, l)), .. } if c == "0.4.1" && l == "0.4.0"
+        ));
+        assert!(matches!(
+            line(&UpdateStatus {
+                failure: Some(Failure::Timeout),
+                ..checked("0.3.2", "0.4.0")
+            }),
+            UpdateLine::Failed {
+                failure: Failure::Timeout,
+                ..
+            }
+        ));
+        // Off: nothing checked this run (a stored failure doesn't show).
+        let off = UpdateStatus {
+            enabled: false,
+            checked_this_run: false,
+            failure: Some(Failure::Offline),
+            ..checked("0.3.2", "0.4.0")
+        };
+        assert_eq!(line(&off), UpdateLine::Off);
+        // …until *Check now*.
+        assert!(matches!(
+            line(&UpdateStatus {
+                failure: None,
+                checked_this_run: true,
+                ..off
+            }),
+            UpdateLine::Available { .. }
+        ));
+        // A dev build names the latest release, compares nothing.
+        assert_eq!(
+            line(&checked("dev", "0.4.0")),
+            UpdateLine::Dev(Some("0.4.0".into()))
+        );
+        assert_eq!(
+            line(&UpdateStatus {
+                checked_this_run: false,
+                ..status("0.3.2")
+            }),
+            UpdateLine::NotYet
+        );
+        assert_eq!(update_line(None, false), UpdateLine::Off);
+    }
+
+    #[test]
+    fn the_updates_card_shows_every_state() {
+        let mut harness = harness(data());
+        let in_an_hour = SystemTime::now() + Duration::from_secs(3600);
+        let cases: Vec<(UpdateStatus, Vec<&str>)> = vec![
+            (
+                checked("0.4.0", "0.4.0"),
+                vec!["Up to date", "\u{b7} checked "],
+            ),
+            (
+                checked("0.4.1", "0.4.0"),
+                vec!["this build (0.4.1) is newer than the latest release (0.4.0)"],
+            ),
+            (
+                UpdateStatus {
+                    checking: true,
+                    ..status("0.3.2")
+                },
+                vec!["Checking GitHub\u{2026}"],
+            ),
+            (
+                checked("0.3.2", "0.4.0"),
+                vec!["sshelf 0.4.0 is available", "you have 0.3.2", "released "],
+            ),
+            (
+                UpdateStatus {
+                    skipped: Some("0.4.0".into()),
+                    ..checked("0.3.2", "0.4.0")
+                },
+                vec!["0.4.0 skipped \u{b7} you'll hear about the next version"],
+            ),
+            (
+                UpdateStatus {
+                    failure: Some(Failure::Timeout),
+                    next_check: Some(in_an_hour),
+                    ..checked("0.3.2", "0.4.0")
+                },
+                vec![
+                    "Couldn't check for updates",
+                    "GitHub didn't answer within 10 s",
+                    "last success ",
+                    "tries again in 1 h",
+                ],
+            ),
+            (
+                UpdateStatus {
+                    failure: Some(Failure::Http { status: 502 }),
+                    ..status("0.3.2")
+                },
+                vec!["Unexpected answer from GitHub (HTTP 502)"],
+            ),
+            (
+                UpdateStatus {
+                    failure: Some(Failure::Offline),
+                    ..status("0.3.2")
+                },
+                vec!["No connection"],
+            ),
+            (
+                UpdateStatus {
+                    failure: Some(Failure::RateLimited { until: in_an_hour }),
+                    ..status("0.3.2")
+                },
+                vec!["GitHub limits checks; trying after "],
+            ),
+            (
+                UpdateStatus {
+                    enabled: false,
+                    checked_this_run: false,
+                    ..status("0.3.2")
+                },
+                vec!["Off \u{b7} sshelf doesn't contact GitHub. Check now still works."],
+            ),
+            (
+                checked("dev", "0.4.0"),
+                vec![
+                    "Development build: no automatic checks. Check now shows the latest release: 0.4.0.",
+                ],
+            ),
+        ];
+        for (status, texts) in cases {
+            harness.state_mut().0.on_updates(Arc::new(status.clone()));
+            harness.run_steps(2);
+            for text in texts {
+                assert!(
+                    harness.query_by_label_contains(text).is_some(),
+                    "{text:?} for {status:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_updates_card_sends_its_commands() {
+        let mut harness = harness(data());
+        harness
+            .state_mut()
+            .0
+            .on_updates(Arc::new(checked("0.3.2", "0.4.0")));
+        harness.run_steps(2);
+        harness.get_by_label("Check now").click();
+        harness.get_by_label("Check for updates").click();
+        harness.get_by_label("Skip this version").click();
+        harness.run_steps(2);
+        assert_eq!(
+            harness.state().1,
+            [
+                Command::CheckUpdates,
+                Command::SetUpdateCheck(false),
+                Command::SkipUpdate("0.4.0".into()),
+            ]
+        );
+        harness.state_mut().1.clear();
+        harness.state_mut().0.on_updates(Arc::new(UpdateStatus {
+            skipped: Some("0.4.0".into()),
+            ..checked("0.3.2", "0.4.0")
+        }));
+        harness.run_steps(2);
+        harness.get_by_label("Undo").click();
+        harness.run_steps(2);
+        assert_eq!(harness.state().1, [Command::UnskipUpdate]);
+        // Checking: *Check now* waits.
+        harness.state_mut().0.on_updates(Arc::new(UpdateStatus {
+            checking: true,
+            ..status("0.3.2")
+        }));
+        harness.run_steps(2);
+        assert!(
+            harness
+                .get_by_label("Check now")
+                .accesskit_node()
+                .is_disabled()
+        );
+    }
+
+    #[test]
+    fn the_version_chip_copies_the_version() {
+        let mut harness = harness(data());
+        harness.run_steps(2);
+        harness.get_by_label(&version::chip()).click();
+        harness.run_steps(2);
+        assert_eq!(
+            harness.state_mut().0.take_notices(),
+            [format!("Copied {}", version::line())]
+        );
     }
 
     fn help_harness(

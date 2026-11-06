@@ -85,6 +85,7 @@ fn a_kubectl_tunnel_goes_from_the_editor_to_running() {
         temp,
         user_paths: Some(paths),
         show: None,
+        updates: None,
     };
     let mut harness = test_util::harness()
         .with_size([1280.0, 900.0])

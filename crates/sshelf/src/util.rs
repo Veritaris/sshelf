@@ -22,6 +22,20 @@ pub fn ago(time: SystemTime) -> String {
     }
 }
 
+/// `"18:33"`: the local time of day.
+pub fn clock(time: SystemTime) -> String {
+    chrono::DateTime::<chrono::Local>::from(time)
+        .format("%H:%M")
+        .to_string()
+}
+
+/// `"2 Nov"`: the local date, without the year.
+pub fn day(time: SystemTime) -> String {
+    chrono::DateTime::<chrono::Local>::from(time)
+        .format("%-d %b")
+        .to_string()
+}
+
 /// `file:line` with only the file name, and the full `path:line`.
 pub fn location(set: &ConfigSet, at: LineRef) -> (String, String) {
     let file = &set.files[at.file];

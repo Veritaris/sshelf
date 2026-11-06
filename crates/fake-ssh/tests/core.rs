@@ -793,6 +793,21 @@ fn the_update_check_asks_follows_its_switch_and_keeps_a_skip() {
             .data
             .update_check
     );
+    // A save from older settings (a draft, the tour's state) keeps both.
+    core.send(Command::SaveSettings(Settings {
+        reduce_motion: true,
+        update_check_noted: false,
+        ..saved.clone()
+    }));
+    wait_for(&events, "the save", |e| match e {
+        Event::Data(data) if data.settings.reduce_motion => Some(()),
+        _ => None,
+    });
+    let stored = Store::new(&paths.app_dir).load::<Settings>().data;
+    assert!(
+        !stored.update_check && stored.update_check_noted,
+        "{stored:?}"
+    );
     core.send(Command::SkipUpdate("0.4.0".into()));
     wait_for(&events, "skipped", |e| match e {
         Event::Updates(s) if s.skipped.as_deref() == Some("0.4.0") => Some(()),

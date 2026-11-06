@@ -6,6 +6,21 @@ use egui::{Color32, FontId, Painter, Response, Sense, Ui};
 
 use crate::widgets::popup;
 
+/// One line of `parts` in `color` at `size`: each part proportional, or mono
+/// when its flag is set (a version inside a sentence).
+pub fn parts(parts: &[(&str, bool)], size: f32, color: Color32) -> LayoutJob {
+    let mut job = LayoutJob::default();
+    for (text, mono) in parts {
+        let font = if *mono {
+            FontId::monospace(size)
+        } else {
+            FontId::proportional(size)
+        };
+        job.append(text, 0.0, egui::TextFormat::simple(font, color));
+    }
+    job
+}
+
 /// `text` cut with an ellipsis to fit `width` in `font`, and whether it was
 /// cut. Paths lose their middle, so the file name stays; anything else its
 /// end.

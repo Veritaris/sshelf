@@ -7,12 +7,15 @@ use std::sync::mpsc::Receiver;
 use std::sync::{Arc, OnceLock};
 use std::time::SystemTime;
 
-use sshelf_core::core::{AppData, Command, ConfigSnapshot, Core, Event, ParentWindow, SshInfo};
+use sshelf_core::core::{
+    AppData, Command, ConfigSnapshot, Core, Event, ParentWindow, SshInfo, UpdateSource,
+};
 use sshelf_core::kubectl::KubectlInfo;
 use sshelf_core::paths::Paths;
 use sshelf_core::redact::Redactor;
 use sshelf_core::settings;
 use sshelf_core::supervisor::Snapshot;
+use sshelf_core::updates::{self, UpdateStatus};
 
 use crate::close_guard::{self, CloseGuard};
 use crate::fonts;
@@ -31,13 +34,16 @@ use crate::tour::{steps, welcome};
 use crate::tray::{self, Tray, TrayAction, TrayModel};
 use crate::tray_menu::TrayMenu;
 use crate::tunnels_view::{KeyFix, TunnelsView};
-use crate::{motion, status_bar, window};
+use crate::{motion, status_bar, version, window};
 
 #[cfg(test)]
 mod kube_flow;
 #[cfg(test)]
 mod leak;
 mod tour_run;
+#[cfg(test)]
+mod update_flow;
+mod update_run;
 
 /// How the app starts: the real one, or a test's.
 pub struct Startup {
@@ -52,6 +58,9 @@ pub struct Startup {
     /// "Show the window" requests from later starts (single instance);
     /// `None` in tests, which never take the instance lock.
     pub show: Option<Arc<ShowRequests>>,
+    /// The update check (SPEC.md §10 *Update check*): GitHub for real,
+    /// `None` in tests (none may ask GitHub) or a local server.
+    pub updates: Option<UpdateSource>,
 }
 
 impl Startup {
@@ -62,6 +71,11 @@ impl Startup {
             temp: std::env::temp_dir(),
             user_paths: None,
             show: Some(show),
+            updates: Some(UpdateSource {
+                version: version::VERSION.into(),
+                url: updates::LATEST_URL.into(),
+                first: updates::FIRST,
+            }),
         }
     }
 }
@@ -130,6 +144,16 @@ pub struct SshelfApp {
     /// The welcome screen shows even though `tour` is set (Back from the
     /// tour's first step).
     welcome: bool,
+    /// The update check's last state (SPEC.md §10 *Update check*).
+    updates: Option<Arc<UpdateStatus>>,
+    /// The version the update toast announced this run (once per start).
+    announced: Option<String>,
+    /// The update check's first-run note was shown this run (the welcome
+    /// screen's line or the toast for existing users).
+    note_shown: bool,
+    /// This run checks for updates (tests mostly don't): the first-run note
+    /// is only about a check that runs.
+    updates_on: bool,
 }
 
 /// The root window's raw handles, for dialogs that must be modal to it.
@@ -203,9 +227,13 @@ impl SshelfApp {
             toasts: Toasts::default(),
             config_loaded: None,
             parent: parent_window(cc),
-            startup,
             tour: None,
             welcome: false,
+            updates: None,
+            announced: None,
+            note_shown: false,
+            updates_on: startup.updates.is_some(),
+            startup,
         }
     }
 
@@ -316,8 +344,10 @@ impl SshelfApp {
                 } => self.hosts.detail.on_resolved(alias, generation, result),
                 Event::Ssh(info) => self.ssh = Some(info),
                 Event::Kubectl(info) => self.kubectl = Some(info),
-                // Nothing starts the check yet (M14's UI step does).
-                Event::Updates(_) => {}
+                Event::Updates(status) => {
+                    self.settings.on_updates(status.clone());
+                    self.updates = Some(status);
+                }
                 Event::KubeLookup { query, result } => self.tunnels.on_lookup(query, result),
                 Event::Launched { alias } => {
                     self.toasts.push_value("Opened a terminal for", alias);
@@ -449,6 +479,7 @@ impl SshelfApp {
             .as_deref()
             .map(|d| d.tunnels.groups.as_slice())
             .unwrap_or_default();
+        let announced = self.update_to_announce().map(|r| r.version.clone());
         let rail = sidebar::Rail {
             orphans: &orphans,
             running: status_bar::tunnel_counts(self.tunnel_states.as_deref()).0,
@@ -456,6 +487,7 @@ impl SshelfApp {
             settings_off: self
                 .tour_running()
                 .then_some("Not available during the tour"),
+            update: announced.as_deref(),
         };
         egui::Panel::left("rail")
             .resizable(false)
@@ -472,6 +504,7 @@ impl eframe::App for SshelfApp {
     /// the tray are handled here, the drawing in [`Self::ui`].
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.apply_events(ctx);
+        self.run_updates();
         // Streamer mode for this frame's drawing, from the user's settings.
         privacy::set(
             ctx,
@@ -542,8 +575,12 @@ impl eframe::App for SshelfApp {
             .as_ref()
             .is_some_and(|d| d.settings.tour.is_none());
         if !self.tour_running() && (first_launch || self.welcome) {
+            if first_launch {
+                // Its line is the update check's first-run note.
+                self.note_welcome();
+            }
             self.drag_strip(ui);
-            self.toasts.show(ui.ctx());
+            self.show_toasts(ui.ctx());
             let choice = egui::CentralPanel::default()
                 .frame(egui::Frame::NONE)
                 .show(ui, |ui| welcome::show(ui, self.config.as_deref()))
@@ -572,7 +609,7 @@ impl eframe::App for SshelfApp {
             self.orphans.open = !self.orphans.open;
         }
         self.drag_strip(ui);
-        self.toasts.show(ui.ctx());
+        self.show_toasts(ui.ctx());
 
         let mut commands = Vec::new();
         let mut tour_chapter = None;

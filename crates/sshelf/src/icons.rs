@@ -22,14 +22,17 @@ pub const CHECK: char = '\u{e06c}';
 pub const CHEVRON_DOWN: char = '\u{e06d}';
 pub const CHEVRON_RIGHT: char = '\u{e06f}';
 pub const CHEVRON_UP: char = '\u{e070}';
+pub const CIRCLE_ARROW_UP: char = '\u{e07b}';
 pub const CIRCLE_CHECK: char = '\u{e226}';
 pub const CIRCLE_X: char = '\u{e084}';
 pub const COMPASS: char = '\u{e09b}';
 pub const COPY: char = '\u{e09e}';
+pub const EXTERNAL_LINK: char = '\u{e0b9}';
 pub const EYE: char = '\u{e0ba}';
 pub const EYE_OFF: char = '\u{e0bb}';
 pub const FILE_TEXT: char = '\u{e0cc}';
 pub const FOLDER: char = '\u{e0d7}';
+pub const GIT_COMMIT_HORIZONTAL: char = '\u{e0e3}';
 pub const INFO: char = '\u{e0f9}';
 pub const KEY_ROUND: char = '\u{e4a3}';
 pub const LAYERS: char = '\u{e529}';
@@ -48,11 +51,13 @@ pub const SETTINGS: char = '\u{e154}';
 pub const SHIELD_ALERT: char = '\u{e1fe}';
 pub const SHIELD_CHECK: char = '\u{e1ff}';
 pub const SHIP_WHEEL: char = '\u{e502}';
+pub const SKIP_FORWARD: char = '\u{e160}';
 pub const SQUARE: char = '\u{e167}';
 pub const SQUARE_TERMINAL: char = '\u{e20a}';
 pub const STAR: char = '\u{e176}';
 pub const TERMINAL: char = '\u{e181}';
 pub const TRIANGLE_ALERT: char = '\u{e193}';
+pub const UNDO_2: char = '\u{e2a1}';
 pub const X: char = '\u{e1b2}';
 
 /// Every icon above, for the glyph check in [`crate::fonts`].
@@ -66,14 +71,17 @@ pub const ALL: &[char] = &[
     CHEVRON_DOWN,
     CHEVRON_RIGHT,
     CHEVRON_UP,
+    CIRCLE_ARROW_UP,
     CIRCLE_CHECK,
     CIRCLE_X,
     COMPASS,
     COPY,
+    EXTERNAL_LINK,
     EYE,
     EYE_OFF,
     FILE_TEXT,
     FOLDER,
+    GIT_COMMIT_HORIZONTAL,
     INFO,
     KEY_ROUND,
     LAYERS,
@@ -92,11 +100,13 @@ pub const ALL: &[char] = &[
     SHIELD_ALERT,
     SHIELD_CHECK,
     SHIP_WHEEL,
+    SKIP_FORWARD,
     SQUARE,
     SQUARE_TERMINAL,
     STAR,
     TERMINAL,
     TRIANGLE_ALERT,
+    UNDO_2,
     X,
 ];
 
