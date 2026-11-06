@@ -3,12 +3,17 @@
 //! fades in with a 6 px rise, stays 3 s, then fades out; hovering one pauses
 //! it. Errors stay in the status bar until dismissed. A toast's clock only
 //! runs while it is drawn, so one raised while the window is hidden is still
-//! seen. Waiting is one scheduled repaint, not a polling timer.
+//! seen. Waiting is one scheduled repaint, not a polling timer. Every toast
+//! has a close button at its right end (§10 *Layout*, *Feedback*): closing
+//! removes it at once and the others close the gap.
 
 use std::time::Duration;
 
 use egui::text::{LayoutJob, TextFormat};
-use egui::{Align2, Area, Color32, FontId, Frame, Id, Margin, Order, Stroke, vec2};
+use egui::{
+    Align, Align2, Area, Color32, CursorIcon, FontId, Frame, Id, Layout, Margin, Order, Response,
+    Role, Sense, Stroke, Ui, WidgetInfo, vec2,
+};
 
 use crate::theme::{Palette, radius, timing};
 use crate::widgets::masked;
@@ -26,6 +31,12 @@ const RISE: f32 = 6.0;
 /// The longest step a toast's clock takes in one frame, so frames missed
 /// while the window was hidden don't make it vanish at once.
 const MAX_STEP: f64 = 0.1;
+/// The close button's side and icon size.
+const CLOSE: f32 = 24.0;
+const CLOSE_ICON: f32 = 14.0;
+/// The close button's accessible name (never the toast's text, which can be
+/// an alias streamer mode hides).
+pub const CLOSE_NAME: &str = "Close notification";
 
 struct Toast {
     id: u64,
@@ -91,6 +102,35 @@ fn message(text: &str, value: Option<&str>) -> LayoutJob {
     job
 }
 
+/// Lucide `x` in a 24 px ghost button: secondary grey, the hover background
+/// and strong text fading in over 80 ms.
+fn close_button(ui: &mut Ui) -> Response {
+    let p = &Palette::ONE_DARK;
+    let (rect, response) = ui.allocate_exact_size(vec2(CLOSE, CLOSE), Sense::click());
+    response.widget_info(|| WidgetInfo::labeled(Role::Button, true, CLOSE_NAME));
+    let hover = motion::fade(
+        ui.ctx(),
+        response.id.with("hover"),
+        response.hovered(),
+        timing::HOVER,
+        motion::ease_out,
+    );
+    let painter = ui.painter();
+    painter.rect_filled(
+        rect,
+        radius::CONTROL,
+        Color32::TRANSPARENT.lerp_to_gamma(p.surface, hover),
+    );
+    painter.text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        icons::X,
+        icons::font(CLOSE_ICON),
+        p.dim.lerp_to_gamma(p.text_strong, hover),
+    );
+    response.on_hover_cursor(CursorIcon::PointingHand)
+}
+
 impl Toasts {
     pub fn push(&mut self, text: impl Into<String>) {
         self.add(
@@ -147,6 +187,7 @@ impl Toasts {
         // Newest at the bottom, stacked upwards.
         let mut bottom = status_bar::HEIGHT + MARGIN;
         let mut next_wake = f64::INFINITY;
+        let mut closed = None;
         for toast in self.items.iter_mut().rev() {
             let Some(look) = look(toast.age, fade) else {
                 continue;
@@ -164,33 +205,55 @@ impl Toasts {
                         .inner_margin(Margin::symmetric(12, 10))
                         .show(ui, |ui| {
                             ui.set_width(WIDTH - 24.0);
-                            ui.horizontal(|ui| {
-                                ui.spacing_mut().item_spacing.x = 10.0;
-                                let (icon, color) = toast.icon;
-                                icons::show(ui, icon, 16.0, color);
-                                if privacy::get(ui.ctx()).on {
-                                    // Through the filter (a value is an alias).
-                                    let text = match &toast.value {
-                                        Some(value) => format!("{} {value}", toast.text),
-                                        None => toast.text.clone(),
-                                    };
-                                    let style = masked::Style {
-                                        font: FontId::proportional(13.0),
-                                        color: p.text,
-                                        on_card: false,
-                                    };
-                                    masked::text(ui, &text, &style, true);
-                                } else {
-                                    ui.label(message(&toast.text, toast.value.as_deref()));
-                                }
-                                if toast.copy
-                                    && let Some(value) = &toast.value
-                                    && crate::widgets::button::link(ui, "Copy", 13.0).clicked()
-                                {
-                                    // The real value, also in streamer mode.
-                                    ui.ctx().copy_text(value.clone());
-                                }
-                            });
+                            // One row as high as the close button.
+                            let row = vec2(ui.available_width(), CLOSE);
+                            ui.allocate_ui_with_layout(
+                                row,
+                                Layout::right_to_left(Align::Center),
+                                |ui| {
+                                    ui.spacing_mut().item_spacing.x = 10.0;
+                                    if close_button(ui).clicked() {
+                                        closed = Some(toast.id);
+                                    }
+                                    if toast.copy
+                                        && let Some(value) = &toast.value
+                                        && crate::widgets::button::link(ui, "Copy", 13.0).clicked()
+                                    {
+                                        // The real value, also in streamer mode.
+                                        ui.ctx().copy_text(value.clone());
+                                    }
+                                    let rest = vec2(ui.available_width(), CLOSE);
+                                    ui.allocate_ui_with_layout(
+                                        rest,
+                                        Layout::left_to_right(Align::Center),
+                                        |ui| {
+                                            let (icon, color) = toast.icon;
+                                            icons::show(ui, icon, 16.0, color);
+                                            if privacy::get(ui.ctx()).on {
+                                                // Through the filter (a value is an
+                                                // alias).
+                                                let text = match &toast.value {
+                                                    Some(value) => {
+                                                        format!("{} {value}", toast.text)
+                                                    }
+                                                    None => toast.text.clone(),
+                                                };
+                                                let style = masked::Style {
+                                                    font: FontId::proportional(13.0),
+                                                    color: p.text,
+                                                    on_card: false,
+                                                };
+                                                masked::text(ui, &text, &style, true);
+                                            } else {
+                                                ui.label(message(
+                                                    &toast.text,
+                                                    toast.value.as_deref(),
+                                                ));
+                                            }
+                                        },
+                                    );
+                                },
+                            );
                         });
                 });
             bottom += area.response.rect.height() + GAP;
@@ -211,7 +274,12 @@ impl Toasts {
                 });
             }
         }
-        self.items.retain(|t| look(t.age, fade).is_some());
+        self.items
+            .retain(|t| look(t.age, fade).is_some() && Some(t.id) != closed);
+        if closed.is_some() {
+            // The others close the gap on the next pass.
+            ctx.request_repaint();
+        }
         if next_wake.is_finite() {
             ctx.request_repaint_after(Duration::from_secs_f64(next_wake));
         }
@@ -275,6 +343,38 @@ mod tests {
             .build_ui_state(|ui, toasts: &mut Toasts| toasts.show(ui.ctx()), toasts);
         harness.step();
         harness.get_by_label("Opened a terminal for vps-north");
+    }
+
+    #[test]
+    fn every_toast_closes_at_once_and_the_others_stay() {
+        let mut toasts = Toasts::default();
+        toasts.push("Settings saved");
+        toasts.push_copy("web api is running on", "127.0.0.1:18080");
+        toasts.push_value("Opened a terminal for", "vps-north");
+        let mut harness = test_util::harness()
+            .build_ui_state(|ui, toasts: &mut Toasts| toasts.show(ui.ctx()), toasts);
+        harness.step();
+        assert_eq!(harness.get_all_by_label(CLOSE_NAME).count(), 3);
+        // The newest is drawn first (at the bottom): close the middle one.
+        let middle = harness
+            .get_by_label("web api is running on 127.0.0.1:18080")
+            .rect();
+        harness
+            .get_all_by_label(CLOSE_NAME)
+            .find(|close| {
+                close.rect().center().y > middle.top() && close.rect().center().y < middle.bottom()
+            })
+            .expect("the middle toast's close button")
+            .click();
+        harness.step();
+        assert_eq!(
+            harness.state().texts(),
+            ["Settings saved", "Opened a terminal for"]
+        );
+        harness.step();
+        assert!(harness.query_by_label_contains("web api").is_none());
+        // Still in their hold: closing isn't fading.
+        assert!(harness.state().items.iter().all(|t| t.age < 1.0));
     }
 
     #[test]
