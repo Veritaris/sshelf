@@ -26,7 +26,7 @@ use crate::child::{self, KILL_GRACE, TreeKiller};
 use crate::running::{self, RunningFile, RunningTunnel};
 use crate::ssh::Tool;
 use crate::storage::Store;
-use crate::tunnels::{Group, Tunnel};
+use crate::tunnels::{Group, Tunnel, TunnelType};
 
 /// Stderr lines kept per tunnel.
 pub const LOG_LINES: usize = 200;
@@ -94,17 +94,92 @@ pub enum FailureKind {
     HostKeyUnknown,
     /// No offered key was accepted (BatchMode: agent or passphrase-less keys only).
     Auth,
+    /// kubectl: the pod, service or deployment doesn't exist (any more).
+    ResourceGone,
+    /// kubectl: not logged in to the cluster (Unauthorized, or an exec
+    /// credential plugin failed).
+    NotLoggedIn,
+    /// kubectl: the cluster's API server can't be reached.
+    ClusterUnreachable,
+    /// kubectl: a local port is taken.
+    PortInUse,
+    /// kubectl: the context isn't in the kubeconfig.
+    NoContext,
+    /// No kubectl binary.
+    KubectlMissing,
     Other,
 }
 
-/// Classifies the last run in `log` (the lines after the last start).
-pub fn classify_failure(log: &VecDeque<LogLine>) -> FailureKind {
+impl FailureKind {
+    /// Whether auto-reconnect retries it (SPEC.md §7: failures that need the
+    /// user don't; for kubectl see the *Failures* table).
+    pub fn reconnects(self) -> bool {
+        matches!(
+            self,
+            FailureKind::Other | FailureKind::ClusterUnreachable | FailureKind::PortInUse
+        )
+    }
+}
+
+/// The log line that starts a run of `program`.
+fn start_marker(program: &str) -> String {
+    format!("starting {program}")
+}
+
+/// Classifies the last run in `log` (the lines after the last start) of a
+/// tunnel of type `kind`.
+pub fn classify_failure(log: &VecDeque<LogLine>, kind: TunnelType) -> FailureKind {
+    let marker = start_marker(kind.program());
     let start = log
         .iter()
-        .rposition(|l| l.text.starts_with("starting ssh"))
+        .rposition(|l| l.text.starts_with(&marker))
         .map_or(0, |i| i + 1);
-    classify_lines(log.iter().skip(start).map(|l| l.text.as_str()))
+    let lines = log.iter().skip(start).map(|l| l.text.as_str());
+    match kind {
+        TunnelType::Ssh => classify_lines(lines),
+        TunnelType::Kubectl => classify_kubectl_lines(lines),
+    }
 }
+
+/// What kubectl's messages say went wrong (SPEC.md §7 *kubectl tunnels*,
+/// *Failures*).
+pub fn classify_kubectl_lines<'a>(lines: impl IntoIterator<Item = &'a str>) -> FailureKind {
+    let run: Vec<&str> = lines.into_iter().collect();
+    let any = |needles: &[&str]| run.iter().any(|l| needles.iter().any(|n| l.contains(n)));
+    if any(&["(NotFound)"]) {
+        FailureKind::ResourceGone
+    } else if any(&[
+        "You must be logged in to the server",
+        "(Unauthorized)",
+        // An exec credential plugin (a cloud CLI) failed or is missing.
+        "getting credentials",
+    ]) {
+        FailureKind::NotLoggedIn
+    } else if any(&[
+        "error: context \"",
+        "context was not found for specified context",
+    ]) {
+        FailureKind::NoContext
+    } else if any(&["unable to listen on any of the requested ports"]) {
+        FailureKind::PortInUse
+    } else if any(&["Unable to connect to the server"]) {
+        FailureKind::ClusterUnreachable
+    } else {
+        FailureKind::Other
+    }
+}
+
+/// kubectl's ready line for one forward: the local port of
+/// `Forwarding from 127.0.0.1:18080 -> 80` (and of its `[::1]` twin).
+pub fn forwarding_port(line: &str) -> Option<u16> {
+    let from = line.trim().strip_prefix("Forwarding from ")?;
+    let (local, _) = from.split_once(" -> ")?;
+    local.rsplit_once(':')?.1.parse().ok()
+}
+
+/// What kubectl prints when the pod goes away; some versions keep running
+/// after it (SPEC.md §7 *Drops*).
+pub const LOST_POD: &str = "lost connection to pod";
 
 /// What ssh's messages say went wrong (also used by health checks).
 pub fn classify_lines<'a>(lines: impl IntoIterator<Item = &'a str>) -> FailureKind {
@@ -209,6 +284,8 @@ pub enum Request {
     },
     /// ssh for processes started from now on.
     SetSsh(Option<Tool>),
+    /// kubectl for kubectl tunnels started from now on (M13).
+    SetKubectl(Option<Tool>),
     /// Takes over what `running.toml` lists from before a crash, as far as
     /// it is still the same process running the same `tunnels`' ssh (SPEC.md
     /// §7 *Surviving a crash*); the rest is dropped from the file, never
@@ -277,6 +354,7 @@ impl Supervisor {
             .spawn(move || {
                 Worker {
                     ssh,
+                    kubectl: None,
                     tx: worker_tx,
                     on_event: Box::new(on_event),
                     entries: BTreeMap::new(),
@@ -351,6 +429,8 @@ struct Entry {
     attempt: u32,
     /// When the pending automatic restart is due.
     due: Option<Instant>,
+    /// kubectl: the local ports that printed `Forwarding from` in this run.
+    ready: BTreeSet<u16>,
 }
 
 /// First wait before an automatic restart; it doubles up to the maximum.
@@ -367,6 +447,7 @@ pub fn reconnect_delay(attempt: u32) -> Duration {
 
 struct Worker {
     ssh: Option<Tool>,
+    kubectl: Option<Tool>,
     tx: Sender<Message>,
     on_event: Box<dyn Fn(SupervisorEvent) + Send>,
     entries: BTreeMap<String, Entry>,
@@ -516,13 +597,14 @@ impl Worker {
         }
         let tx = self.tx.clone();
         let waiter_id = id.clone();
+        let exited = format!("{} exited", tunnel.kind.program());
         thread::spawn(move || {
             child::wait_exit(pid);
             // Its own last words went to the sshelf that crashed.
             let _ = tx.send(Message::Line {
                 id: waiter_id.clone(),
                 generation,
-                text: "ssh exited".to_string(),
+                text: exited,
             });
             let _ = tx.send(Message::Exited {
                 id: waiter_id,
@@ -558,6 +640,7 @@ impl Worker {
                 restart: false,
                 attempt: 0,
                 due: None,
+                ready: BTreeSet::new(),
             },
         );
         self.changed = true;
@@ -690,6 +773,7 @@ impl Worker {
                 }
             }
             Request::SetSsh(ssh) => self.ssh = ssh,
+            Request::SetKubectl(kubectl) => self.kubectl = kubectl,
             Request::Adopt { tunnels } => self.adopt(tunnels),
         }
     }
@@ -731,6 +815,7 @@ impl Worker {
                 restart: false,
                 attempt: 0,
                 due: None,
+                ready: BTreeSet::new(),
             });
             entry.status.owners.insert(owner.clone());
             self.changed = true;
@@ -772,45 +857,55 @@ impl Worker {
     }
 
     fn spawn(&mut self, id: &str) {
-        let Some(ssh) = self.ssh.clone() else {
-            return self.fail(id, "no ssh binary".to_string());
+        let kind = self
+            .entries
+            .get(id)
+            .expect("spawn of a known tunnel")
+            .tunnel
+            .kind;
+        let tool = match kind {
+            TunnelType::Ssh => self.ssh.clone(),
+            TunnelType::Kubectl => self.kubectl.clone(),
+        };
+        let Some(tool) = tool else {
+            return match kind {
+                TunnelType::Ssh => self.fail(id, "no ssh binary".to_string()),
+                TunnelType::Kubectl => self.fail_as(
+                    id,
+                    "kubectl not found".to_string(),
+                    FailureKind::KubectlMissing,
+                ),
+            };
         };
         let entry = self.entries.get_mut(id).expect("spawn of a known tunnel");
-        let mut cmd = ssh.command();
-        cmd.args(entry.tunnel.ssh_args())
+        let mut cmd = tool.command();
+        // kubectl says it is ready on stdout ("Forwarding from …"); ssh's
+        // stdout has nothing for us.
+        let stdout = match kind {
+            TunnelType::Ssh => Stdio::null(),
+            TunnelType::Kubectl => Stdio::piped(),
+        };
+        cmd.args(entry.tunnel.args())
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
+            .stdout(stdout)
             .stderr(Stdio::piped());
         let spawned = match child::spawn_tree(cmd) {
             Ok(spawned) => spawned,
-            Err(e) => return self.fail(id, format!("cannot start {}: {e}", ssh.display())),
+            Err(e) => return self.fail(id, format!("cannot start {}: {e}", tool.display())),
         };
         self.next_generation += 1;
         let generation = self.next_generation;
         let mut child = spawned.child;
         let pid = child.id();
 
-        // The reader says when it has read everything, so the exit is
-        // reported after ssh's last lines (they decide the failure kind).
+        // The readers say when they have read everything, so the exit is
+        // reported after the last lines (they decide the failure kind).
         let (read_all, all_read) = mpsc::channel::<()>();
+        if let Some(stdout) = child.stdout.take() {
+            self.read_lines(stdout, id, generation, read_all.clone());
+        }
         if let Some(stderr) = child.stderr.take() {
-            let tx = self.tx.clone();
-            let id = id.to_string();
-            thread::spawn(move || {
-                // Dropped when this thread ends, which wakes the waiter.
-                let _read_all = read_all;
-                for line in BufReader::new(stderr).lines() {
-                    let Ok(text) = line else { break };
-                    let message = Message::Line {
-                        id: id.clone(),
-                        generation,
-                        text,
-                    };
-                    if tx.send(message).is_err() {
-                        break;
-                    }
-                }
-            });
+            self.read_lines(stderr, id, generation, read_all);
         }
         let tx = self.tx.clone();
         let waiter_id = id.to_string();
@@ -836,15 +931,50 @@ impl Worker {
         entry.status.failure = None;
         entry.status.reconnect = None;
         entry.status.pid = Some(pid);
-        push_log(&mut entry.status.log, format!("starting ssh (pid {pid})"));
+        entry.ready.clear();
+        push_log(
+            &mut entry.status.log,
+            format!("{} (pid {pid})", start_marker(kind.program())),
+        );
         self.changed = true;
     }
 
+    /// Sends each line of `stream` to the worker; `read_all` is dropped at
+    /// its end, which (with the other stream's) wakes the exit waiter.
+    fn read_lines(
+        &self,
+        stream: impl std::io::Read + Send + 'static,
+        id: &str,
+        generation: u64,
+        read_all: Sender<()>,
+    ) {
+        let tx = self.tx.clone();
+        let id = id.to_string();
+        thread::spawn(move || {
+            let _read_all = read_all;
+            for line in BufReader::new(stream).lines() {
+                let Ok(text) = line else { break };
+                let message = Message::Line {
+                    id: id.clone(),
+                    generation,
+                    text,
+                };
+                if tx.send(message).is_err() {
+                    break;
+                }
+            }
+        });
+    }
+
     fn fail(&mut self, id: &str, reason: String) {
+        self.fail_as(id, reason, FailureKind::Other);
+    }
+
+    fn fail_as(&mut self, id: &str, reason: String, failure: FailureKind) {
         if let Some(entry) = self.entries.get_mut(id) {
             push_log(&mut entry.status.log, reason.clone());
             entry.status.state = TunnelState::Failed(reason);
-            entry.status.failure = Some(FailureKind::Other);
+            entry.status.failure = Some(failure);
             entry.status.pid = None;
             self.changed = true;
         }
@@ -862,9 +992,29 @@ impl Worker {
         let Some(entry) = self.current(id, generation) else {
             return;
         };
-        if entry.status.state == TunnelState::Starting && text.contains(READY_MARKER) {
+        let ready = match entry.tunnel.kind {
+            TunnelType::Ssh => text.contains(READY_MARKER),
+            // Running once every forward has said so (one line per address
+            // family; each port counts once).
+            TunnelType::Kubectl => {
+                if let Some(port) = forwarding_port(&text) {
+                    entry.ready.insert(port);
+                }
+                let ports = entry.tunnel.listen_ports();
+                !ports.is_empty() && ports.iter().all(|p| entry.ready.contains(p))
+            }
+        };
+        if entry.status.state == TunnelState::Starting && ready {
             entry.status.state = TunnelState::Running;
             entry.status.running_since = Some(Instant::now());
+        }
+        // A kubectl that keeps running after losing its pod forwards nothing:
+        // end it, and its exit counts as a drop.
+        if entry.tunnel.is_kubectl()
+            && text.contains(LOST_POD)
+            && let Some(process) = &entry.process
+        {
+            process.killer.kill();
         }
         push_log(&mut entry.status.log, text);
         self.changed = true;
@@ -895,25 +1045,27 @@ impl Worker {
             }
             return;
         }
+        let kind = entry.tunnel.kind;
+        let marker = start_marker(kind.program());
         let reason = entry
             .status
             .log
             .iter()
             .rev()
-            .find(|l| !l.debug && !l.text.starts_with("starting ssh"))
+            .find(|l| !l.debug && !l.text.starts_with(&marker))
             .map(|l| l.text.clone())
-            .unwrap_or_else(|| format!("ssh exited with code {code:?}"));
-        let failure = classify_failure(&entry.status.log);
+            .unwrap_or_else(|| format!("{} exited with code {code:?}", kind.program()));
+        let failure = classify_failure(&entry.status.log, kind);
         entry.status.state = TunnelState::Failed(reason);
         entry.status.failure = Some(failure);
         // A drop after a stable run starts the backoff over.
         if running_since.is_some_and(|since| since.elapsed() >= RECONNECT_STABLE) {
             entry.attempt = 0;
         }
-        // Auth and host key failures need the user; retrying cannot help.
-        let retry = entry.tunnel.auto_reconnect
-            && !entry.status.owners.is_empty()
-            && failure == FailureKind::Other;
+        // Auth, host key and other failures that need the user: retrying
+        // cannot help.
+        let retry =
+            entry.tunnel.auto_reconnect && !entry.status.owners.is_empty() && failure.reconnects();
         self.changed = true;
         if retry {
             self.schedule_reconnect(id);
@@ -950,7 +1102,8 @@ impl Worker {
 }
 
 fn push_log(log: &mut VecDeque<LogLine>, text: String) {
-    let debug = text.starts_with("debug");
+    // ssh's `-v` lines, and kubectl's line per accepted connection.
+    let debug = text.starts_with("debug") || text.starts_with("Handling connection for");
     log.push_back(LogLine {
         text,
         debug,
@@ -1009,19 +1162,20 @@ mod tests {
 
     #[test]
     fn failures_are_classified_from_the_last_run() {
+        let ssh = TunnelType::Ssh;
         let changed = log(&[
             "starting ssh (pid 1)",
             "@    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @",
             "Host key verification failed.",
         ]);
-        assert_eq!(classify_failure(&changed), FailureKind::HostKeyChanged);
+        assert_eq!(classify_failure(&changed, ssh), FailureKind::HostKeyChanged);
         let unknown = log(&["starting ssh (pid 1)", "Host key verification failed."]);
-        assert_eq!(classify_failure(&unknown), FailureKind::HostKeyUnknown);
+        assert_eq!(classify_failure(&unknown, ssh), FailureKind::HostKeyUnknown);
         let auth = log(&[
             "starting ssh (pid 1)",
             "web: Permission denied (publickey).",
         ]);
-        assert_eq!(classify_failure(&auth), FailureKind::Auth);
+        assert_eq!(classify_failure(&auth, ssh), FailureKind::Auth);
         // An earlier run's messages do not count.
         let retried = log(&[
             "starting ssh (pid 1)",
@@ -1029,7 +1183,99 @@ mod tests {
             "starting ssh (pid 2)",
             "Error: remote port forwarding failed for listen port 6443",
         ]);
-        assert_eq!(classify_failure(&retried), FailureKind::Other);
+        assert_eq!(classify_failure(&retried, ssh), FailureKind::Other);
+    }
+
+    /// kubectl's lines, as real kubectl versions print them (made-up names).
+    #[test]
+    fn kubectl_failures_are_classified() {
+        let kind = |lines: &[&str]| {
+            let mut all = vec!["starting kubectl (pid 1)"];
+            all.extend(lines);
+            classify_failure(&log(&all), TunnelType::Kubectl)
+        };
+        for (lines, expected) in [
+            (
+                &["Error from server (NotFound): pods \"web-0\" not found"][..],
+                FailureKind::ResourceGone,
+            ),
+            (
+                &["Error from server (NotFound): services \"web\" not found"],
+                FailureKind::ResourceGone,
+            ),
+            (
+                &["error: You must be logged in to the server (Unauthorized)"],
+                FailureKind::NotLoggedIn,
+            ),
+            (
+                &[
+                    "Unable to connect to the server: getting credentials: exec: executable \
+                     fake-cli not found",
+                ],
+                FailureKind::NotLoggedIn,
+            ),
+            (
+                &["Unable to connect to the server: dial tcp 192.0.2.1:6443: i/o timeout"],
+                FailureKind::ClusterUnreachable,
+            ),
+            (
+                &[
+                    "Unable to listen on port 18080: Listeners failed to create with the \
+                     following errors: [unable to create listener: Error listen tcp4 \
+                     127.0.0.1:18080: bind: address already in use]",
+                    "error: unable to listen on any of the requested ports: [{18080 80}]",
+                ],
+                FailureKind::PortInUse,
+            ),
+            (
+                &["error: context \"lab\" does not exist"],
+                FailureKind::NoContext,
+            ),
+            (
+                &[
+                    "E1106 portforward.go:413] error forwarding port 80 to pod 0f, uid : lost \
+                   connection to pod",
+                ],
+                FailureKind::Other,
+            ),
+        ] {
+            assert_eq!(kind(lines), expected, "{lines:?}");
+        }
+        let reconnect: Vec<FailureKind> = [
+            FailureKind::ResourceGone,
+            FailureKind::NotLoggedIn,
+            FailureKind::ClusterUnreachable,
+            FailureKind::PortInUse,
+            FailureKind::NoContext,
+            FailureKind::KubectlMissing,
+            FailureKind::Other,
+            FailureKind::Auth,
+        ]
+        .into_iter()
+        .filter(|k| k.reconnects())
+        .collect();
+        assert_eq!(
+            reconnect,
+            [
+                FailureKind::ClusterUnreachable,
+                FailureKind::PortInUse,
+                FailureKind::Other
+            ]
+        );
+    }
+
+    #[test]
+    fn forwarding_lines_name_their_local_port() {
+        assert_eq!(
+            forwarding_port("Forwarding from 127.0.0.1:18080 -> 80"),
+            Some(18080)
+        );
+        assert_eq!(
+            forwarding_port("Forwarding from [::1]:19090 -> metrics"),
+            Some(19090)
+        );
+        assert_eq!(forwarding_port("Handling connection for 18080"), None);
+        assert_eq!(forwarding_port("Forwarding from nowhere"), None);
     }
 
     #[test]

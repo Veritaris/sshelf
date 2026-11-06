@@ -575,6 +575,8 @@ struct Worker {
     data: AppData,
     config: Arc<ConfigSnapshot>,
     tools: Result<SshTools, String>,
+    /// kubectl, when found (M13).
+    kubectl: Option<Tool>,
     terminal: Option<Terminal>,
     watcher: Option<ConfigWatcher>,
     supervisor: Option<Supervisor>,
@@ -629,6 +631,7 @@ impl Worker {
             data,
             config,
             tools: Err("not detected yet".into()),
+            kubectl: None,
             terminal: None,
             watcher: None,
             supervisor: None,
@@ -671,6 +674,8 @@ impl Worker {
             Some(_) => Supervisor::start(ssh, on_event),
             None => Supervisor::start_recorded(ssh, self.paths.app_dir.clone(), on_event),
         });
+        // Located above, before the supervisor existed.
+        self.supervise(Request::SetKubectl(self.kubectl.clone()));
         self.reload();
         // Tunnels still running from before a crash, before anything starts.
         if let Some(supervisor) = &self.supervisor {
@@ -1686,6 +1691,8 @@ impl Worker {
             kubectl::locate(self.data.settings.kubectl_path.as_deref(), &self.paths.kube)
                 .map_err(|e| e.to_string())
         };
+        self.kubectl = kubectl.as_ref().ok().map(|k| k.tool.clone());
+        self.supervise(Request::SetKubectl(self.kubectl.clone()));
         let env = self.paths.kube.clone();
         let home = self.paths.home.clone();
         let emitter = self.emitter.clone();

@@ -6,7 +6,8 @@
 //! file.
 //!
 //! - `--as <name>` (first): act as the companion tool `name` (`ssh-add`,
-//!   `ssh-keygen`), as the binary does when copied under that name.
+//!   `ssh-keygen`), or as `kubectl` ([`kubectl`], M13), as the binary does
+//!   when copied under that name.
 //! - `FAKE_SSH_SCENARIOS=<file>`: friendly host names (see [`Scenarios`]).
 //!   A host listed there behaves like the alias prefix of its `scenario`;
 //!   every other host still goes by its own prefix.
@@ -55,6 +56,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 use std::thread;
 use std::time::Duration;
+
+pub mod kubectl;
 
 /// What `-V` prints.
 pub const VERSION_LINE: &str = "OpenSSH_fake_1.0, fake-ssh";
@@ -239,6 +242,9 @@ pub fn run(mut args: Vec<String>) -> ExitCode {
     }
     if name == "ssh-keygen" {
         return ssh_keygen(&args);
+    }
+    if name == "kubectl" {
+        return kubectl::run(&args);
     }
 
     if args.iter().any(|a| a == "-V") {

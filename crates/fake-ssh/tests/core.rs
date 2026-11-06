@@ -651,6 +651,78 @@ fn groups_marked_for_launch_start_with_sshelf() {
     drop(core);
 }
 
+/// kubectl (M13) found on the core's own `PATH` (fake-ssh copied as
+/// `kubectl`), reported with its version and kubeconfig, and a kubectl
+/// tunnel started through the core: no ssh, no host key check.
+#[test]
+fn kubectl_is_found_and_runs_kubectl_tunnels() {
+    use sshelf_core::kubectl::KubectlSource;
+    use sshelf_core::tunnels::{Kube, KubeForward, Resource};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let bin = tmp.path().join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let kubectl = bin.join(format!("kubectl{}", std::env::consts::EXE_SUFFIX));
+    fs::copy(fake_ssh(), &kubectl).unwrap();
+    let mut paths = Paths::new(&tmp.path().join("home"), tmp.path().join("app"));
+    paths.kube.path = bin.clone().into_os_string();
+
+    let (core, events) = Core::start(paths.clone(), Arc::new(|| {}));
+    let info = wait_for(&events, "kubectl", |e| match e {
+        Event::Kubectl(info) => Some(info),
+        _ => None,
+    });
+    let found = info.kubectl.as_ref().unwrap();
+    assert_eq!(found.tool.program, kubectl);
+    assert_eq!(found.source, KubectlSource::Path);
+    assert_eq!(
+        info.version.as_ref().unwrap().as_ref().unwrap().client,
+        fake_ssh::kubectl::CLIENT_VERSION
+    );
+    let view = info.contexts().unwrap();
+    assert_eq!(view.current.as_deref(), Some("fake-lab"));
+    // No kubeconfig in the temp home (and none from the real one).
+    assert!(!info.files.files[0].1);
+
+    let port = common::hold_port().1;
+    let tunnel = Tunnel::kubectl(
+        "t-k",
+        "web api",
+        Kube {
+            context: String::new(),
+            namespace: "fake-api".into(),
+            resource: Resource::parse("service/fake-web").unwrap(),
+            address: DEFAULT_BIND.into(),
+            forwards: vec![KubeForward {
+                listen: port,
+                target: "80".into(),
+            }],
+        },
+    );
+    core.send(Command::SaveTunnel(tunnel));
+    wait_for(&events, "the saved tunnel", |e| match e {
+        Event::Data(d) if d.tunnels.tunnel("t-k").is_some() => Some(()),
+        _ => None,
+    });
+    core.send(Command::StartTunnel("t-k".into()));
+    tunnel_state(&events, "t-k", TunnelState::Running);
+    assert!(listening(port));
+
+    // An override that doesn't exist: not found, no fallback to PATH.
+    core.send(Command::SaveSettings(Settings {
+        kubectl_path: Some(tmp.path().join("nope")),
+        ..Settings::default()
+    }));
+    let info = wait_for(&events, "kubectl again", |e| match e {
+        Event::Kubectl(info) => Some(info),
+        _ => None,
+    });
+    let error = info.kubectl.as_ref().unwrap_err();
+    assert!(error.contains("does not exist"), "{error}");
+    drop(core);
+    assert!(!listening(port), "kubectl tunnels stop with the app");
+}
+
 #[test]
 fn saving_settings_publishes_them_and_says_so() {
     let tmp = tempfile::tempdir().unwrap();

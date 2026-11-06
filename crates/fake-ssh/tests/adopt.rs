@@ -166,6 +166,33 @@ mod after_a_crash {
     const CRASH_DIR: &str = "SSHELF_TEST_CRASH_DIR";
     const CRASH_PORT: &str = "SSHELF_TEST_CRASH_PORT";
     const CRASH_RECONNECT: &str = "SSHELF_TEST_CRASH_RECONNECT";
+    /// Run a kubectl tunnel (M13) instead of an ssh one.
+    const CRASH_KUBECTL: &str = "SSHELF_TEST_CRASH_KUBECTL";
+
+    fn fake_kubectl() -> sshelf_core::ssh::Tool {
+        sshelf_core::ssh::Tool {
+            prefix: vec!["--as".into(), "kubectl".into()],
+            ..sshelf_core::ssh::Tool::new(fake_ssh())
+        }
+    }
+
+    fn kube_tunnel(id: &str, port: u16) -> Tunnel {
+        use sshelf_core::tunnels::{Kube, KubeForward, Resource};
+        Tunnel::kubectl(
+            id,
+            "web api",
+            Kube {
+                context: String::new(),
+                namespace: "fake-api".into(),
+                resource: Resource::parse("service/fake-web").unwrap(),
+                address: DEFAULT_BIND.into(),
+                forwards: vec![KubeForward {
+                    listen: port,
+                    target: "80".into(),
+                }],
+            },
+        )
+    }
 
     /// The sshelf that crashes: run by the tests below (and a no-op
     /// otherwise). It starts tunnel `a`, waits until it is recorded, and
@@ -181,7 +208,12 @@ mod after_a_crash {
         h.send(Request::Adopt {
             tunnels: Vec::new(),
         });
-        let mut t = tunnel("a", port);
+        let mut t = if std::env::var_os(CRASH_KUBECTL).is_some() {
+            h.send(Request::SetKubectl(Some(fake_kubectl())));
+            kube_tunnel("a", port)
+        } else {
+            tunnel("a", port)
+        };
         t.auto_reconnect = std::env::var_os(CRASH_RECONNECT).is_some();
         h.send(Request::Start {
             tunnel: t,
@@ -194,6 +226,10 @@ mod after_a_crash {
 
     /// Runs the crashing sshelf on `dir`; returns what it left running.
     fn crash(dir: &Path, port: u16, reconnect: bool) -> RunningTunnel {
+        crash_with(dir, port, reconnect, false)
+    }
+
+    fn crash_with(dir: &Path, port: u16, reconnect: bool, kubectl: bool) -> RunningTunnel {
         let mut command = Command::new(std::env::current_exe().unwrap());
         command
             .args(["after_a_crash::crashing_sshelf", "--exact", "--nocapture"])
@@ -201,6 +237,9 @@ mod after_a_crash {
             .env(CRASH_PORT, port.to_string());
         if reconnect {
             command.env(CRASH_RECONNECT, "1");
+        }
+        if kubectl {
+            command.env(CRASH_KUBECTL, "1");
         }
         let status = command.status().unwrap();
         assert!(!status.success(), "it crashed");
@@ -275,6 +314,49 @@ mod after_a_crash {
         assert_eq!(s.state("a"), TunnelState::Failed("ssh exited".into()));
         let s = h.until("running again", |s| s.state("a") == TunnelState::Running);
         assert_ne!(s.tunnels["a"].pid, Some(left.pid), "a new process");
+    }
+
+    /// kubectl tunnels are recorded with their program and taken over the
+    /// same way; an ssh tunnel now under the same id doesn't match.
+    #[test]
+    fn a_kubectl_tunnel_left_by_a_crash_is_taken_over() {
+        let dir = tempfile::tempdir().unwrap();
+        let port = common::hold_port().1;
+        let left = crash_with(dir.path(), port, true, true);
+        assert_eq!(left.program.as_deref(), Some("kubectl"));
+        assert_eq!(left.args, kube_tunnel("a", port).args());
+
+        let mut h = Harness::recorded(dir.path());
+        h.send(Request::SetKubectl(Some(fake_kubectl())));
+        let mut t = kube_tunnel("a", port);
+        t.auto_reconnect = true;
+        h.send(Request::Adopt { tunnels: vec![t] });
+        let s = h.until("taken over", |s| s.state("a") == TunnelState::Running);
+        assert_eq!(s.tunnels["a"].pid, Some(left.pid));
+        assert_eq!(h.adopted, Some(1));
+        kill_group(left.pid);
+        let s = h.until("failed", |s| {
+            matches!(s.state("a"), TunnelState::Failed(_)) && s.tunnels["a"].reconnect.is_some()
+        });
+        assert_eq!(s.state("a"), TunnelState::Failed("kubectl exited".into()));
+        let s = h.until("running again", |s| s.state("a") == TunnelState::Running);
+        assert_ne!(s.tunnels["a"].pid, Some(left.pid), "a new kubectl");
+        drop(h);
+
+        // The other way round: a record of kubectl, an ssh tunnel now.
+        let dir = tempfile::tempdir().unwrap();
+        let port = common::hold_port().1;
+        let left = crash_with(dir.path(), port, false, true);
+        let mut h = Harness::recorded(dir.path());
+        h.send(Request::Adopt {
+            tunnels: vec![tunnel("a", port)],
+        });
+        record_until(dir.path(), "the record cleared", |f| f.tunnels.is_empty());
+        h.until("a snapshot", |_| true);
+        assert_eq!(h.adopted, None);
+        drop(h);
+        assert!(child::start_time(left.pid).is_some(), "left alone");
+        kill_group(left.pid);
     }
 
     /// A tunnel changed since the crash isn't taken over, and its process is

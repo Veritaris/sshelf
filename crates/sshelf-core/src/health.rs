@@ -80,7 +80,8 @@ pub fn classify(code: Option<i32>, stderr: &str, elapsed: Duration) -> Health {
         FailureKind::HostKeyChanged => Health::HostKeyChanged,
         FailureKind::HostKeyUnknown => Health::HostKeyUnknown,
         FailureKind::Auth => Health::AuthFailed,
-        FailureKind::Other => Health::Unreachable(
+        // ssh's lines never classify as kubectl's kinds.
+        _ => Health::Unreachable(
             stderr
                 .lines()
                 .map(str::trim)
