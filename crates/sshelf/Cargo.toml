@@ -14,8 +14,13 @@ fake-ssh = { path = "../fake-ssh" }
 # emoji fonts (`monochrome_emoji_fonts`) stay off.
 egui = { version = "0.37.0" }
 # Linux needs at least one windowing backend once default features are off.
+# `clipboard` makes `copy_text` reach the system clipboard (arboard, and
+# smithay-clipboard on Wayland) and `links` makes `open_url` open the browser
+# (webbrowser): without them egui takes both requests and drops them.
 eframe = { version = "0.37.0", default-features = false, features = [
     "accesskit",
+    "clipboard",
+    "links",
     "default_fonts",
     "glow",
     "wayland",
