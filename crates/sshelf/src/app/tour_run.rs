@@ -880,23 +880,26 @@ mod tests {
         let _one = one_tour();
         let root = tempfile::tempdir().unwrap();
         let mut harness = app_in(root.path(), "tour = \"done\"\n");
-        // One through the Help card itself (tall enough to show it without
-        // scrolling).
-        harness.set_size(egui::vec2(1280.0, 1700.0));
-        // The ssh and kubectl cards change height once detection reports:
-        // wait for both, or the click can land where the Help card was.
+        // One through the Help card itself, once detection has filled the
+        // cards above it.
         settle(&mut harness, "ssh and kubectl detected", |app| {
             app.ssh.is_some() && app.kubectl.is_some()
         });
         harness.state_mut().view = View::Settings;
         harness.run_steps(3);
-        harness.get_by_label("Start a chapter").click();
+        // Clicked through accesskit, not at a position: the cards above
+        // Help differ by machine (terminal, agent service), and pointer
+        // clicks missed on the Windows runner.
+        harness.get_by_label("Start a chapter").click_accesskit();
         harness.run_steps(3);
-        harness.get_by_label("Fixing problems").click();
+        assert!(
+            crate::widgets::dropdown::is_open(&harness.ctx, "settings_tour_chapter"),
+            "the chapter list didn't open"
+        );
+        harness.get_by_label("Fixing problems").click_accesskit();
         harness.run_steps(3);
         let fixing = steps::first_step(Chapter::Fixing);
         assert_eq!(step_index(harness.state()), Some(fixing));
-        harness.set_size(egui::vec2(1280.0, 800.0));
         play(&mut harness, fixing);
         let ctx = harness.ctx.clone();
         for chapter in Chapter::PLAYABLE.into_iter().skip(1) {
