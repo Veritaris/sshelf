@@ -85,6 +85,20 @@ impl Privacy {
         self.plain(&shown).into_owned()
     }
 
+    /// A kubectl tunnel's namespace or resource name as text: "namespace N"
+    /// / "resource N" while names are hidden (they are treated like aliases,
+    /// SPEC.md §10 *kubectl tunnels*); one no tunnel uses yet (a lookup's)
+    /// is "•••••" then, as an alias the config doesn't know.
+    pub fn kube_name<'a>(&self, name: &'a str) -> Cow<'a, str> {
+        if !(self.on && self.hide_aliases) || name.is_empty() {
+            return Cow::Borrowed(name);
+        }
+        match self.redactor.kube_name(name) {
+            Some(numbered) => Cow::Owned(numbered),
+            None => Cow::Borrowed(DOTS),
+        }
+    }
+
     /// A tag as text: `tag` while tags are hidden.
     pub fn tag_text<'a>(&self, tag: &'a str) -> &'a str {
         if self.on && self.hide_aliases {

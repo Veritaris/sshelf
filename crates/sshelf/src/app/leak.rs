@@ -21,8 +21,11 @@ use sshelf_core::metadata::{HostMeta, HostsFile};
 use sshelf_core::paths::Paths;
 use sshelf_core::settings::HostListStyle;
 use sshelf_core::storage::Store;
+use sshelf_core::supervisor::FailureKind;
 use sshelf_core::supervisor::{LogLine, Owner, Snapshot, TunnelState, TunnelStatus};
-use sshelf_core::tunnels::{Forward, ForwardKind, Group, Tunnel, TunnelsFile};
+use sshelf_core::tunnels::{
+    Forward, ForwardKind, Group, Kube, KubeForward, Resource, Tunnel, TunnelsFile,
+};
 
 use super::{SshelfApp, Startup};
 use crate::hostkey_modal::HostKeyModals;
@@ -50,7 +53,23 @@ const MARKERS: &[&str] = &[
     "54321",
     "54123",
     "10.77.9.9",
+    // kubectl (M13): the context, the cluster's server and user, the
+    // tunnel's ports. Its paths are under HOME.
+    "lkqctx",
+    "lkq-cluster.example.net",
+    "lkq-kubeuser",
+    "54777",
+    "54888",
 ];
+
+/// The kubeconfig the fake kubectl reports (`config view -o json`).
+const KUBECONFIG: &str = r#"{"kind":"Config","clusters":[
+{"name":"lkq-cl","cluster":{"server":"https://lkq-cluster.example.net:6443"}}],
+"contexts":[{"name":"lkqctx-lab","context":{"cluster":"lkq-cl","user":"lkq-kubeuser"}}],
+"current-context":"lkqctx-lab"}"#;
+
+/// kubectl's own words when the context is gone, with markers.
+const KUBECTL_ERROR: &str = "error: context \"lkqctx-lab\" does not exist";
 
 /// Aliases and tags: shown, unless *Hide host aliases and tags* is on.
 const NAME_MARKERS: &[&str] = &["lkqa-", "lkqtag"];
@@ -84,12 +103,19 @@ fn app(root: &Path, streamer: bool, hide: bool) -> Harness<'static, SshelfApp> {
     fs::create_dir_all(&paths.ssh_dir).unwrap();
     fs::create_dir_all(&paths.app_dir).unwrap();
     fs::write(&paths.ssh_config, CONFIG).unwrap();
+    // fake-ssh as kubectl under the home folder, with the marker kubeconfig.
+    let kube_bin = home.join("kbin");
+    fs::create_dir_all(kube_bin.join("kube")).unwrap();
+    fs::write(kube_bin.join("kube").join("config.json"), KUBECONFIG).unwrap();
+    let kubectl = kube_bin.join(format!("kubectl{}", std::env::consts::EXE_SUFFIX));
+    fs::copy(fake_ssh_binary(), &kubectl).unwrap();
     fs::write(
         paths.app_dir.join("settings.toml"),
         format!(
-            "version = 1\nssh_path = '{}'\nreduce_motion = true\ntour = \"done\"\n\
-             streamer_mode = {streamer}\nstreamer_hide_aliases = {hide}\n",
-            fake_ssh_binary().display()
+            "version = 1\nssh_path = '{}'\nkubectl_path = '{}'\nreduce_motion = true\n\
+             tour = \"done\"\nstreamer_mode = {streamer}\nstreamer_hide_aliases = {hide}\n",
+            fake_ssh_binary().display(),
+            kubectl.display()
         ),
     )
     .unwrap();
@@ -116,21 +142,37 @@ fn app(root: &Path, streamer: bool, hide: bool) -> Harness<'static, SshelfApp> {
         .unwrap();
     store
         .save(&TunnelsFile {
-            tunnels: vec![Tunnel::ssh(
-                "t-web",
-                "web admin",
-                WEB,
-                vec![Forward {
-                    kind: ForwardKind::L,
-                    bind: "127.0.0.1".into(),
-                    listen: 54123,
-                    target: Some("lkq-target.internal:54321".into()),
-                }],
-            )],
+            tunnels: vec![
+                Tunnel::ssh(
+                    "t-web",
+                    "web admin",
+                    WEB,
+                    vec![Forward {
+                        kind: ForwardKind::L,
+                        bind: "127.0.0.1".into(),
+                        listen: 54123,
+                        target: Some("lkq-target.internal:54321".into()),
+                    }],
+                ),
+                Tunnel::kubectl(
+                    "t-kube",
+                    "kube admin",
+                    Kube {
+                        context: "lkqctx-lab".into(),
+                        namespace: "lkqa-ns".into(),
+                        resource: Resource::parse("service/lkqa-svc").unwrap(),
+                        address: "127.0.0.1".into(),
+                        forwards: vec![KubeForward {
+                            listen: 54777,
+                            target: "54888".into(),
+                        }],
+                    },
+                ),
+            ],
             groups: vec![Group {
                 id: "g-work".into(),
                 name: "Work".into(),
-                tunnels: vec!["t-web".into()],
+                tunnels: vec!["t-web".into(), "t-kube".into()],
                 start_on_launch: false,
             }],
         })
@@ -147,8 +189,11 @@ fn app(root: &Path, streamer: bool, hide: bool) -> Harness<'static, SshelfApp> {
     let mut harness = test_util::harness()
         .with_size([1280.0, 800.0])
         .build_eframe(|cc| SshelfApp::with(cc, startup));
-    settle(&mut harness, "the config and data", |app| {
-        app.data.is_some() && app.config.as_ref().is_some_and(|c| c.hosts().is_some())
+    // kubectl's detection too: its kubeconfig feeds the filter.
+    settle(&mut harness, "the config, data and kubectl", |app| {
+        app.data.is_some()
+            && app.config.as_ref().is_some_and(|c| c.hosts().is_some())
+            && app.kubectl.as_ref().is_some_and(|k| k.view.is_some())
     });
     harness
 }
@@ -237,23 +282,47 @@ fn tunnel_states(state: TunnelState) -> Arc<Snapshot> {
         debug: false,
         at: SystemTime::now(),
     };
+    let kube_state = match &state {
+        TunnelState::Failed(_) => TunnelState::Failed(KUBECTL_ERROR.into()),
+        other => other.clone(),
+    };
+    let kube_failure =
+        matches!(kube_state, TunnelState::Failed(_)).then_some(FailureKind::NoContext);
     Arc::new(Snapshot {
-        tunnels: BTreeMap::from([(
-            "t-web".to_string(),
-            TunnelStatus {
-                state,
-                owners: BTreeSet::from([Owner::Manual]),
-                log: VecDeque::from([
-                    line("debug1: Connecting to lkq-host.internal [10.77.3.41] port 52817."),
-                    line("channel 2: open failed: connect to lkq-target.internal port 54321"),
-                    line(SSH_ERROR),
-                ]),
-                pid: None,
-                failure: None,
-                reconnect: None,
-                running_since: None,
-            },
-        )]),
+        tunnels: BTreeMap::from([
+            (
+                "t-web".to_string(),
+                TunnelStatus {
+                    state,
+                    owners: BTreeSet::from([Owner::Manual]),
+                    log: VecDeque::from([
+                        line("debug1: Connecting to lkq-host.internal [10.77.3.41] port 52817."),
+                        line("channel 2: open failed: connect to lkq-target.internal port 54321"),
+                        line(SSH_ERROR),
+                    ]),
+                    pid: None,
+                    failure: None,
+                    reconnect: None,
+                    running_since: None,
+                },
+            ),
+            (
+                "t-kube".to_string(),
+                TunnelStatus {
+                    state: kube_state,
+                    owners: BTreeSet::from([Owner::Manual]),
+                    log: VecDeque::from([
+                        line("Forwarding from 127.0.0.1:54777 -> 54888"),
+                        line("Handling connection for 54777"),
+                        line(KUBECTL_ERROR),
+                    ]),
+                    pid: None,
+                    failure: kube_failure,
+                    reconnect: None,
+                    running_since: None,
+                },
+            ),
+        ]),
     })
 }
 
@@ -367,6 +436,37 @@ fn screens() -> Vec<(&'static str, Setup)> {
             app.tunnel_states = Some(tunnel_states(TunnelState::Stopped));
             frames(h);
             click(h, "Edit");
+        }),
+        ("kubectl tunnel", |h| {
+            let app = h.state_mut();
+            app.view = View::Tunnels;
+            app.tunnels.select("t-kube");
+        }),
+        ("kubectl tunnel running", |h| {
+            let app = h.state_mut();
+            app.view = View::Tunnels;
+            app.tunnels.select("t-kube");
+            app.tunnel_states = Some(tunnel_states(TunnelState::Running));
+            frames(h);
+            // The log's debug lines too ("Handling connection for …").
+            click(h, "Show debug lines");
+        }),
+        ("kubectl editor", |h| {
+            let app = h.state_mut();
+            app.view = View::Tunnels;
+            app.tunnels.select("t-kube");
+            app.tunnel_states = Some(tunnel_states(TunnelState::Stopped));
+            frames(h);
+            click(h, "Edit");
+        }),
+        ("kubectl contexts", |h| {
+            let app = h.state_mut();
+            app.view = View::Tunnels;
+            app.tunnels.select("t-kube");
+            app.tunnel_states = Some(tunnel_states(TunnelState::Stopped));
+            frames(h);
+            click(h, "Edit");
+            click(h, "Context");
         }),
         ("groups", |h| {
             let app = h.state_mut();

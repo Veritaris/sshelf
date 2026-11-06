@@ -427,6 +427,8 @@ fn contents_in(ui: &mut Ui, rect: egui::Rect, model: &TrayModel, actions: &mut V
                     _ => marks::pulsing_ring(ui, marks::DOT, p.dim),
                 };
                 ui.add_space(8.0);
+                marks::type_mark(ui, tunnel.kind, None);
+                ui.add_space(2.0);
                 ui.label(RichText::new(&tunnel.name).size(13.0).color(p.text));
                 let (note, color) = if failed {
                     let text = if tunnel.reconnecting {
@@ -787,6 +789,7 @@ mod tests {
                 id: "t-a".into(),
                 name: "API".into(),
                 port: Some(6443),
+                kind: sshelf_core::tunnels::TunnelType::Kubectl,
                 state: TunnelState::Running,
                 manual: true,
                 reconnecting: false,

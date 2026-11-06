@@ -11,10 +11,11 @@
 
 use std::collections::{HashMap, HashSet};
 use std::net::Ipv6Addr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use sshconf::{ConfigSet, HostList, LineKind};
 
+use crate::kubectl::KubeConfigView;
 use crate::tunnels::TunnelsFile;
 
 /// What a masked value is; free text shows it as this label.
@@ -42,6 +43,28 @@ impl Kind {
     }
 }
 
+/// What a hidden name is (*Hide host aliases and tags*): a host alias, or a
+/// kubectl tunnel's namespace or resource name (M13), which are treated
+/// like aliases.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NameKind {
+    Host,
+    Namespace,
+    Resource,
+}
+
+impl NameKind {
+    /// "host 3", "namespace 1", "resource 2".
+    pub fn numbered(self, n: usize) -> String {
+        let word = match self {
+            NameKind::Host => "host",
+            NameKind::Namespace => "namespace",
+            NameKind::Resource => "resource",
+        };
+        format!("{word} {n}")
+    }
+}
+
 /// A piece of a filtered text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Segment<'a> {
@@ -49,8 +72,9 @@ pub enum Segment<'a> {
     Plain(&'a str),
     /// A sensitive value of `kind`.
     Token(Kind, &'a str),
-    /// A host alias, shown as "host N" (only with hidden aliases).
-    Alias(&'a str, usize),
+    /// A name shown as "host N" / "namespace N" / "resource N" (only with
+    /// hidden aliases).
+    Alias(&'a str, NameKind, usize),
 }
 
 /// The five dots every masked field shows, never the real length.
@@ -64,8 +88,8 @@ enum Needle {
     /// A path prefix: separators and ASCII case are loose, and the match
     /// runs on to the end of the path.
     Path,
-    /// A host alias (only matched with hidden aliases).
-    Alias(usize),
+    /// A host alias or a kubectl name (only matched with hidden aliases).
+    Alias(NameKind, usize),
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -74,6 +98,9 @@ pub struct Redactor {
     needles: Vec<(String, Needle)>,
     /// Alias → its host's position in the config (from 1).
     aliases: HashMap<String, usize>,
+    /// kubectl tunnels' namespaces and resource names → their kind and
+    /// number (first seen in `tunnels.toml`, from 1 per kind).
+    names: HashMap<String, (NameKind, usize)>,
     /// Aliases that are masked whenever streamer mode is on: an IP address,
     /// or equal to a HostName.
     always: HashSet<String>,
@@ -88,6 +115,10 @@ pub struct Sources<'a> {
     pub home: &'a Path,
     /// The local login (`ssh -G` reports it as `user` when none is set).
     pub local_user: Option<&'a str>,
+    /// The kubeconfig's contexts, cluster servers and users (M13).
+    pub kube: Option<&'a KubeConfigView>,
+    /// kubectl's binary and the kubeconfig files.
+    pub kube_paths: &'a [PathBuf],
 }
 
 impl Redactor {
@@ -108,6 +139,14 @@ impl Redactor {
                 }
             }
         }
+        let mut names: HashMap<String, (NameKind, usize)> = HashMap::new();
+        let mut name = |value: &str, kind: NameKind| {
+            if value.chars().count() < 2 || aliases.contains_key(value) {
+                return;
+            }
+            let next = names.values().filter(|(k, _)| *k == kind).count() + 1;
+            names.entry(value.to_string()).or_insert((kind, next));
+        };
         for tunnel in &sources.tunnels.tunnels {
             for forward in &tunnel.forwards {
                 known.address(&forward.bind, &aliases);
@@ -115,6 +154,23 @@ impl Redactor {
                     known.host_port(target, &aliases);
                 }
             }
+            if tunnel.is_kubectl() {
+                let kube = &tunnel.kube;
+                known.word(&kube.context, Kind::Host);
+                known.address(&kube.address, &aliases);
+                name(&kube.namespace, NameKind::Namespace);
+                name(&kube.resource.name, NameKind::Resource);
+            }
+        }
+        if let Some(view) = sources.kube {
+            for context in &view.contexts {
+                known.word(&context.name, Kind::Host);
+                known.word(&context.user, Kind::User);
+                known.url(&context.server, &aliases);
+            }
+        }
+        for path in sources.kube_paths {
+            known.path(&path.to_string_lossy());
         }
         let home = sources.home.to_string_lossy();
         if home.len() > 3 {
@@ -136,12 +192,22 @@ impl Redactor {
             .into_iter()
             .map(|(value, kind)| (value, Needle::Word(kind)))
             .chain(known.paths.into_iter().map(|p| (p, Needle::Path)))
-            .chain(aliases.iter().map(|(a, n)| (a.clone(), Needle::Alias(*n))))
+            .chain(
+                aliases
+                    .iter()
+                    .map(|(a, n)| (a.clone(), Needle::Alias(NameKind::Host, *n))),
+            )
+            .chain(
+                names
+                    .iter()
+                    .map(|(name, (kind, n))| (name.clone(), Needle::Alias(*kind, *n))),
+            )
             .collect();
         needles.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then(a.0.cmp(&b.0)));
         Redactor {
             needles,
             aliases,
+            names,
             always,
         }
     }
@@ -149,6 +215,12 @@ impl Redactor {
     /// The "host N" number of `alias`.
     pub fn alias_number(&self, alias: &str) -> Option<usize> {
         self.aliases.get(alias).copied()
+    }
+
+    /// "namespace N" / "resource N" for a kubectl tunnel's namespace or
+    /// resource name, if it is one.
+    pub fn kube_name(&self, name: &str) -> Option<String> {
+        self.names.get(name).map(|(kind, n)| kind.numbered(*n))
     }
 
     /// Whether `alias` is masked whenever streamer mode is on (an IP, or
@@ -210,7 +282,7 @@ impl Redactor {
             .map(|segment| match segment {
                 Segment::Plain(s) => s.to_string(),
                 Segment::Token(..) => DOTS.to_string(),
-                Segment::Alias(_, n) => format!("host {n}"),
+                Segment::Alias(_, kind, n) => kind.numbered(n),
             })
             .collect()
     }
@@ -246,14 +318,14 @@ impl Redactor {
                         take(end, Segment::Token(Kind::Path, &text[i..end]));
                     }
                 }
-                Needle::Alias(n) => {
+                Needle::Alias(kind, n) => {
                     if hide_aliases
                         && rest.starts_with(value.as_str())
                         && word_bounded(text, i, i + value.len())
                     {
                         take(
                             i + value.len(),
-                            Segment::Alias(&text[i..i + value.len()], *n),
+                            Segment::Alias(&text[i..i + value.len()], *kind, *n),
                         );
                     }
                 }
@@ -338,6 +410,16 @@ impl Known {
             self.host(value.split(':').next().unwrap_or(""), aliases);
         } else {
             self.host(value, aliases);
+        }
+    }
+
+    /// A cluster server URL (`https://host:6443/path`): its host.
+    fn url(&mut self, value: &str, aliases: &HashMap<String, usize>) {
+        let rest = value.split_once("://").map_or(value, |(_, rest)| rest);
+        let authority = rest.split('/').next().unwrap_or_default();
+        let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+        if !host.is_empty() {
+            self.host_port(host, aliases);
         }
     }
 
@@ -610,9 +692,15 @@ fn port_at(text: &str, i: usize, last_token_end: Option<usize>) -> Option<usize>
         return None;
     }
     let before = &text[..i];
-    let lower_tail = before[before.len().saturating_sub(5)..].to_ascii_lowercase();
+    let lower_tail = before[before.len().saturating_sub(16)..].to_ascii_lowercase();
     let in_context = lower_tail.ends_with("port ")
         || before.ends_with("-p ")
+        // kubectl: "forwarding 18080 -> 80", "Handling connection for
+        // 18080", "requested ports: [{18080 80}]".
+        || before.ends_with("-> ")
+        || lower_tail.ends_with("forwarding ")
+        || lower_tail.ends_with("connection for ")
+        || before.ends_with("[{")
         || (before.ends_with(':')
             && (last_token_end == Some(i - 1) || before[..before.len() - 1].ends_with(']')));
     if !in_context {
@@ -663,6 +751,8 @@ mod tests {
             tunnels: &file,
             home: Path::new("/home/jdoe"),
             local_user: Some("jdoe"),
+            kube: None,
+            kube_paths: &[],
         });
         (r, hide)
     }
@@ -675,9 +765,110 @@ mod tests {
             .map(|s| match s {
                 Segment::Plain(p) => p.to_string(),
                 Segment::Token(kind, _) => format!("<{}>", kind.label()),
-                Segment::Alias(_, n) => format!("{{host {n}}}"),
+                Segment::Alias(_, kind, n) => format!("{{{}}}", kind.numbered(n)),
             })
             .collect()
+    }
+
+    /// kubectl (M13): contexts, cluster servers, kubeconfig users, paths and
+    /// tunnel addresses are masked; namespaces and resource names are hidden
+    /// like aliases; ports in kubectl's lines are masked in context.
+    #[test]
+    fn kubectl_values_are_masked() {
+        use crate::kubectl::{KubeConfigView, KubeContext};
+        use crate::tunnels::{Kube, KubeForward, Resource};
+        let mut file = TunnelsFile::default();
+        for (id, ns, resource) in [
+            ("t-1", "api", "service/web"),
+            ("t-2", "ops", "pod/web-0"),
+            ("t-3", "api", "service/web"),
+        ] {
+            file.upsert_tunnel(Tunnel::kubectl(
+                id,
+                id,
+                Kube {
+                    context: "lab-ctx".into(),
+                    namespace: ns.into(),
+                    resource: Resource::parse(resource).unwrap(),
+                    address: "10.1.2.3".into(),
+                    forwards: vec![KubeForward {
+                        listen: 18080,
+                        target: "80".into(),
+                    }],
+                },
+            ));
+        }
+        let view = KubeConfigView {
+            contexts: vec![KubeContext {
+                name: "eks-prod".into(),
+                cluster: "c".into(),
+                server: "https://abc.eks.example.test:443/x".into(),
+                user: "arn-admin".into(),
+            }],
+            current: None,
+        };
+        let paths = [PathBuf::from("/opt/kube/bin/kubectl")];
+        let build = |hide| {
+            (
+                Redactor::build(Sources {
+                    set: None,
+                    hosts: None,
+                    tunnels: &file,
+                    home: Path::new("/home/jdoe"),
+                    local_user: None,
+                    kube: Some(&view),
+                    kube_paths: &paths,
+                }),
+                hide,
+            )
+        };
+        let r = build(false);
+        assert_eq!(
+            shown(&r, "error: context \"eks-prod\" does not exist"),
+            "error: context \"<host>\" does not exist"
+        );
+        assert_eq!(
+            shown(
+                &r,
+                "Unable to connect to the server: dial tcp abc.eks.example.test:443"
+            ),
+            "Unable to connect to the server: dial tcp <host>:<port>"
+        );
+        assert_eq!(shown(&r, "as arn-admin on lab-ctx"), "as <user> on <host>");
+        assert_eq!(shown(&r, "/opt/kube/bin/kubectl"), "<path>");
+        assert_eq!(
+            shown(&r, "Forwarding from 10.1.2.3:18080 -> 80"),
+            "Forwarding from <ip>:<port> -> <port>"
+        );
+        assert_eq!(
+            shown(&r, "Handling connection for 18080"),
+            "Handling connection for <port>"
+        );
+        assert_eq!(
+            shown(&r, "an error occurred forwarding 18080 -> 80"),
+            "an error occurred forwarding <port> -> <port>"
+        );
+        assert_eq!(
+            shown(
+                &r,
+                "unable to listen on any of the requested ports: [{18080 80}]"
+            ),
+            "unable to listen on any of the requested ports: [{<port> 80}]"
+        );
+        // Names are shown, unless hidden; numbered in first-seen order.
+        assert_eq!(shown(&r, "api / service/web"), "api / service/web");
+        let hidden = build(true);
+        assert_eq!(
+            shown(&hidden, "api · service/web · ops · pod/web-0"),
+            "{namespace 1} · service/{resource 1} · {namespace 2} · pod/{resource 2}"
+        );
+        assert_eq!(hidden.0.kube_name("ops").as_deref(), Some("namespace 2"));
+        assert_eq!(hidden.0.kube_name("nope"), None);
+        // Times stay as they are.
+        assert_eq!(
+            shown(&r, "14:02:22  starting kubectl"),
+            "14:02:22  starting kubectl"
+        );
     }
 
     const CONFIG: &str = "Host web\n    HostName web.prod.example.com\n    User deploy\n    Port 2222\n    IdentityFile ~/.ssh/id_web\n    ProxyJump ops@jump.example.net:2200\n\

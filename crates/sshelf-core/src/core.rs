@@ -463,6 +463,8 @@ enum Message {
         review: KeyFor,
         result: Result<Option<ChangedKey>, String>,
     },
+    /// kubectl was detected (its kubeconfig feeds streamer mode's filter).
+    KubectlChecked(Arc<KubectlInfo>),
     /// An edit was validated in the background.
     HealthChecked {
         alias: String,
@@ -585,6 +587,8 @@ struct Worker {
     tools: Result<SshTools, String>,
     /// kubectl, when found (M13).
     kubectl: Option<Tool>,
+    /// What its last detection found (the redactor masks its contexts).
+    kube_info: Option<Arc<KubectlInfo>>,
     terminal: Option<Terminal>,
     watcher: Option<ConfigWatcher>,
     supervisor: Option<Supervisor>,
@@ -640,6 +644,7 @@ impl Worker {
             config,
             tools: Err("not detected yet".into()),
             kubectl: None,
+            kube_info: None,
             terminal: None,
             watcher: None,
             supervisor: None,
@@ -731,6 +736,15 @@ impl Worker {
                 }
                 Message::KeyReview { review, result } => {
                     self.key_reviewed(review, result);
+                    continue;
+                }
+                Message::KubectlChecked(info) => {
+                    self.kube_info = Some(Arc::clone(&info));
+                    // The contexts, servers and users to mask: the filter
+                    // first, as before every `Data`.
+                    self.emitter
+                        .emit(Event::Redactor(Arc::new(self.redactor())));
+                    self.emitter.emit(Event::Kubectl(info));
                     continue;
                 }
                 Message::HealthChecked { alias, report } => {
@@ -996,12 +1010,26 @@ impl Worker {
         let local_user = std::env::var("USER")
             .or_else(|_| std::env::var("USERNAME"))
             .ok();
+        // kubectl's binary and kubeconfig files are paths to mask (M13).
+        let kube_paths: Vec<PathBuf> = self
+            .kube_info
+            .iter()
+            .flat_map(|info| {
+                let binary = info.kubectl.as_ref().ok().map(|k| k.tool.program.clone());
+                binary
+                    .into_iter()
+                    .chain(info.files.files.iter().map(|(path, _)| path.clone()))
+            })
+            .chain(self.data.settings.kubectl_path.clone())
+            .collect();
         Redactor::build(redact::Sources {
             set: self.config.set(),
             hosts: self.config.hosts(),
             tunnels: &self.data.tunnels,
             home: &self.paths.home,
             local_user: local_user.as_deref(),
+            kube: self.kube_info.as_ref().and_then(|info| info.contexts()),
+            kube_paths: &kube_paths,
         })
     }
 
@@ -1704,10 +1732,10 @@ impl Worker {
         self.supervise(Request::SetKubectl(self.kubectl.clone()));
         let env = self.paths.kube.clone();
         let home = self.paths.home.clone();
-        let emitter = self.emitter.clone();
+        let tx = self.self_tx.clone();
         thread::spawn(move || {
             let info = KubectlInfo::check(kubectl, &env, &home);
-            emitter.emit(Event::Kubectl(Arc::new(info)));
+            let _ = tx.send(Message::KubectlChecked(Arc::new(info)));
         });
     }
 

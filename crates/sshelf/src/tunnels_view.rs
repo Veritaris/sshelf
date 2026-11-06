@@ -187,16 +187,22 @@ fn join_target(host: &str, port: &str) -> String {
     }
 }
 
-/// `<context> / <namespace> · <kind>/<name>` for a kubectl tunnel ("current
-/// context" when none is pinned); the context is masked in streamer mode.
-fn kube_where(tunnel: &Tunnel, masked: bool) -> String {
+/// `<context> / <namespace>` for a kubectl tunnel ("current context" when
+/// none is pinned; the context masked in streamer mode): the groups' host
+/// column and the group editor's notes.
+pub fn kube_place(tunnel: &Tunnel, masked: bool) -> String {
     let kube = &tunnel.kube;
     let context = match (kube.context.as_str(), masked) {
         ("", _) => "current context",
         (_, true) => DOTS,
         (context, false) => context,
     };
-    format!("{context} / {} · {}", kube.namespace, kube.resource)
+    format!("{context} / {}", kube.namespace)
+}
+
+/// `<context> / <namespace> · <kind>/<name>` for a kubectl tunnel.
+fn kube_where(tunnel: &Tunnel, masked: bool) -> String {
+    format!("{} · {}", kube_place(tunnel, masked), tunnel.kube.resource)
 }
 
 /// The list's second line for a kubectl tunnel: where it forwards to and its
@@ -1030,6 +1036,9 @@ impl TunnelsView {
         };
         let missing_text =
             (!missing.is_empty()).then(|| format!("Missing: {}", missing.join(", ")));
+        let in_tour = kubectl.is_some_and(|k| {
+            k.kubectl.as_ref().err().map(String::as_str) == Some(sshelf_core::kubectl::NOT_IN_TOUR)
+        });
         let last_type = &mut self.last_type;
         let open_settings = &mut self.open_settings;
         let lookups = &mut self.lookups;
@@ -1123,6 +1132,9 @@ impl TunnelsView {
                             },
                             nav::Segment {
                                 icon: Some((icons::SHIP_WHEEL, p.blue)),
+                                // The tour stays ssh-only (its sandbox has
+                                // no kubectl).
+                                disabled: in_tour.then_some(sshelf_core::kubectl::NOT_IN_TOUR),
                                 ..nav::Segment::new("kubectl")
                             },
                         ];
@@ -1942,17 +1954,24 @@ fn kube_line(ui: &mut Ui, tunnel: &Tunnel) {
     } else {
         mono_value(ui, &kube.context, p.text);
     }
+    // Shown like aliases: "namespace N" / "resource N" while names are
+    // hidden.
+    let privacy = privacy::get(ui.ctx());
     dim(ui, "· namespace");
     ui.label(
-        RichText::new(&kube.namespace)
+        RichText::new(privacy.kube_name(&kube.namespace))
             .font(FontId::monospace(13.0))
             .color(p.text),
     );
     dim(ui, "·");
     ui.label(
-        RichText::new(kube.resource.to_string())
-            .font(FontId::monospace(13.0))
-            .color(p.text),
+        RichText::new(format!(
+            "{}/{}",
+            kube.resource.kind.word(),
+            privacy.kube_name(&kube.resource.name)
+        ))
+        .font(FontId::monospace(13.0))
+        .color(p.text),
     );
 }
 
@@ -2925,6 +2944,28 @@ mod tests {
         harness.get_by_label("Settings › kubectl").click();
         harness.step();
         assert!(harness.state_mut().0.take_open_settings());
+    }
+
+    /// The tour's sandbox has no kubectl: the switch's kubectl half is
+    /// disabled there.
+    #[test]
+    fn the_tour_keeps_the_editor_ssh_only() {
+        let mut f = fixture(TunnelState::Stopped);
+        f.kubectl = Some(KubectlInfo {
+            kubectl: Err(sshelf_core::kubectl::NOT_IN_TOUR.into()),
+            version: None,
+            files: Default::default(),
+            view: None,
+        });
+        let mut view = TunnelsView::default();
+        view.new_tunnel("", &f.data.tunnels);
+        let mut harness = harness(f, view);
+        harness.step();
+        let kubectl = harness.get_by_label("kubectl");
+        assert!(kubectl.accesskit_node().is_disabled());
+        kubectl.click();
+        harness.step();
+        assert!(!harness.state().0.editor.as_ref().unwrap().is_kubectl());
     }
 
     /// Once a kubectl tunnel saved and started runs, the app gets its toast.

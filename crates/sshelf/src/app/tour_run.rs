@@ -44,6 +44,7 @@ pub(super) struct Session {
     data: Option<Arc<AppData>>,
     redactor: Arc<Redactor>,
     ssh: Option<Arc<SshInfo>>,
+    kubectl: Option<Arc<sshelf_core::kubectl::KubectlInfo>>,
     tunnel_states: Option<Arc<Snapshot>>,
     config_loaded: Option<SystemTime>,
     error: Option<String>,
@@ -74,6 +75,7 @@ impl SshelfApp {
         std::mem::swap(&mut self.data, &mut other.data);
         std::mem::swap(&mut self.redactor, &mut other.redactor);
         std::mem::swap(&mut self.ssh, &mut other.ssh);
+        std::mem::swap(&mut self.kubectl, &mut other.kubectl);
         std::mem::swap(&mut self.tunnel_states, &mut other.tunnel_states);
         std::mem::swap(&mut self.config_loaded, &mut other.config_loaded);
         std::mem::swap(&mut self.error, &mut other.error);
@@ -769,11 +771,26 @@ mod tests {
         )
         .unwrap();
         let missing_ssh = user.join("no-ssh-here");
+        // A kubectl on the user's PATH that must never run (M13): the tour
+        // stays ssh-only, and the user's set kubectl doesn't exist (no
+        // fallback to PATH, as for ssh).
+        let kube_bin = root.path().join("kube-bin");
+        fs::create_dir_all(&kube_bin).unwrap();
+        fs::copy(
+            fake_ssh_binary(),
+            kube_bin.join(format!("kubectl{}", std::env::consts::EXE_SUFFIX)),
+        )
+        .unwrap();
+        fs::write(kube_bin.join(fake_ssh::kubectl::PANIC_MARKER), "").unwrap();
+        let mut paths = paths;
+        paths.kube.path = kube_bin.clone().into_os_string();
         fs::write(
             paths.app_dir.join("settings.toml"),
             format!(
-                "version = 1\nssh_path = '{}'\nreduce_motion = true\ntour = \"offered\"\n",
-                missing_ssh.display()
+                "version = 1\nssh_path = '{}'\nkubectl_path = '{}'\nreduce_motion = true\n\
+                 tour = \"offered\"\n",
+                missing_ssh.display(),
+                user.join("no-kubectl-here").display()
             ),
         )
         .unwrap();
@@ -817,6 +834,10 @@ mod tests {
         let mut before = before;
         before.remove(&settings);
         assert_eq!(before, after);
+        assert!(
+            !kube_bin.join(fake_ssh::kubectl::RAN_MARKER).exists(),
+            "a kubectl ran"
+        );
     }
 
     /// An app on a user folder in `root` whose Core has no ssh, and the

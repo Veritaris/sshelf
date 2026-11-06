@@ -25,7 +25,8 @@
 //!   A context starting with `missing` doesn't exist.
 //!
 //! The fixture folder is `FAKE_KUBECTL_DIR`, else `kube/` next to the
-//! binary.
+//! binary. A copy next to a [`PANIC_MARKER`] file must never run: it writes
+//! [`RAN_MARKER`] and panics.
 
 use std::env;
 use std::fs;
@@ -112,7 +113,21 @@ fn cluster_error(context: &str) -> Option<String> {
     }
 }
 
+/// A copy next to a `panic-if-run` file is a kubectl that must never run
+/// (the isolation tests): it leaves `ran` beside it, then panics.
+pub const PANIC_MARKER: &str = "panic-if-run";
+/// What a kubectl that must never run leaves behind when it does.
+pub const RAN_MARKER: &str = "ran";
+
 pub fn run(args: &[String]) -> ExitCode {
+    if let Some(dir) = env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(PathBuf::from))
+        .filter(|dir| dir.join(PANIC_MARKER).exists())
+    {
+        let _ = fs::write(dir.join(RAN_MARKER), args.join(" "));
+        panic!("this kubectl must never run: {args:?}");
+    }
     let call = parse(args);
     let words: Vec<&str> = call.words.iter().map(String::as_str).collect();
     let context = call.context.clone().unwrap_or_else(|| "fake-lab".into());

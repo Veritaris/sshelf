@@ -108,6 +108,73 @@ fn sandbox() -> Sandbox {
     }
 }
 
+/// The tour stays ssh-only (SPEC.md §10 *kubectl tunnels*): even with a
+/// kubectl on its `PATH` (one that must never run), the sandbox Core finds
+/// none, answers lookups with "Not part of the tour" and starts no kubectl
+/// tunnel.
+#[test]
+fn the_sandbox_never_runs_kubectl() {
+    use sshelf_core::kubectl::{KubeList, KubeQuery, NOT_IN_TOUR};
+    use sshelf_core::tunnels::{Kube, KubeForward, Resource};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().to_path_buf();
+    let bin = dir.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    fs::copy(
+        env!("CARGO_BIN_EXE_fake-ssh"),
+        bin.join(format!("kubectl{}", std::env::consts::EXE_SUFFIX)),
+    )
+    .unwrap();
+    fs::write(bin.join(fake_ssh::kubectl::PANIC_MARKER), "").unwrap();
+    let mut paths = Paths::new(&dir.join("home"), dir.join("app"));
+    paths.kube.path = bin.clone().into_os_string();
+    fs::create_dir_all(&paths.ssh_dir).unwrap();
+    let mut tunnels = TunnelsFile::default();
+    tunnels.upsert_tunnel(Tunnel::kubectl(
+        "t-k",
+        "kube",
+        Kube {
+            namespace: "n".into(),
+            resource: Resource::parse("service/web").unwrap(),
+            forwards: vec![KubeForward {
+                listen: common::hold_port().1,
+                target: "80".into(),
+            }],
+            ..Kube::default()
+        },
+    ));
+    Store::new(&paths.app_dir).save(&tunnels).unwrap();
+    let ssh = Tool {
+        program: PathBuf::from(env!("CARGO_BIN_EXE_fake-ssh")),
+        prefix: vec!["--fake-ssh".into()],
+        env: Vec::new(),
+    };
+    let (core, events) = Core::start_with(paths, Some(SandboxOptions { ssh }), Arc::new(|| {}));
+    let info = wait_for(&events, "kubectl info", |e| match e {
+        Event::Kubectl(info) => Some(info),
+        _ => None,
+    });
+    assert_eq!(info.kubectl.as_ref().unwrap_err(), NOT_IN_TOUR);
+    core.send(Command::KubeLookup(KubeQuery {
+        context: String::new(),
+        what: KubeList::Namespaces,
+    }));
+    let result = wait_for(&events, "the lookup", |e| match e {
+        Event::KubeLookup { result, .. } => Some(result),
+        _ => None,
+    });
+    assert_eq!(result, Err(NOT_IN_TOUR.to_string()));
+    core.send(Command::StartTunnel("t-k".into()));
+    let state = state_of(&events, "t-k", |s| matches!(s, TunnelState::Failed(_)));
+    assert_eq!(state, TunnelState::Failed("kubectl not found".into()));
+    drop(core);
+    assert!(
+        !bin.join(fake_ssh::kubectl::RAN_MARKER).exists(),
+        "the sandbox ran kubectl"
+    );
+}
+
 #[test]
 fn the_sandbox_runs_fake_ssh_and_opens_no_terminal() {
     let s = sandbox();

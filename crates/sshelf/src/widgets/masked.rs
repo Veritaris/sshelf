@@ -75,7 +75,7 @@ pub fn text(ui: &mut Ui, text: &str, style: &Style, wrap: bool) -> Response {
     for (index, segment) in segments.iter().enumerate() {
         let (shown, format) = match segment {
             Segment::Plain(s) => ((*s).to_string(), format.clone()),
-            Segment::Token(_, value) | Segment::Alias(value, _) if held == Some(index) => (
+            Segment::Token(_, value) | Segment::Alias(value, ..) if held == Some(index) => (
                 (*value).to_string(),
                 egui::TextFormat {
                     background: p.yellow_tint,
@@ -93,9 +93,10 @@ pub fn text(ui: &mut Ui, text: &str, style: &Style, wrap: bool) -> Response {
                     ..egui::TextFormat::simple(label_font.clone(), p.dim)
                 },
             ),
-            // *Hide host aliases and tags*: "host N", underlined in Blue.
-            Segment::Alias(_, n) => (
-                format!("host {n}"),
+            // *Hide host aliases and tags*: "host N" (or a kubectl tunnel's
+            // "namespace N", "resource N"), underlined in Blue.
+            Segment::Alias(_, kind, n) => (
+                kind.numbered(*n),
                 egui::TextFormat {
                     underline: egui::Stroke::new(1.0, p.blue),
                     ..format.clone()
@@ -309,6 +310,8 @@ mod tests {
             tunnels: &Default::default(),
             home: tmp.path(),
             local_user: None,
+            kube: None,
+            kube_paths: &[],
         }))
     }
 

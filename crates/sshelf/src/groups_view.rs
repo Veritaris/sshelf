@@ -25,7 +25,7 @@ use crate::widgets::dropdown::{Choice, Dropdown};
 use crate::widgets::field::TextField;
 use crate::widgets::switch::{switch, switch_raised};
 use crate::widgets::{marks, masked, nav, popup, text};
-use crate::{fonts, icons, motion, privacy};
+use crate::{fonts, icons, motion, privacy, tunnels_view};
 
 /// Width of the group list.
 const LIST_WIDTH: f32 = 340.0;
@@ -83,6 +83,21 @@ fn state_chip(state: GroupState, total: usize) -> (String, Color32, Color32) {
 /// "L 127.0.0.1:6443": a tunnel's first forward (and how many more);
 /// "L •••••" when `masked`.
 fn forwards_short(tunnel: &Tunnel, masked: bool) -> String {
+    if tunnel.is_kubectl() {
+        // "18080 → 80 +1"
+        let Some(first) = tunnel.kube.forwards.first() else {
+            return String::new();
+        };
+        let mut text = if masked {
+            format!("{DOTS} \u{2192} {DOTS}")
+        } else {
+            format!("{} \u{2192} {}", first.listen, first.target)
+        };
+        if tunnel.kube.forwards.len() > 1 {
+            text.push_str(&format!(" +{}", tunnel.kube.forwards.len() - 1));
+        }
+        return text;
+    }
     let Some(first) = tunnel.forwards.first() else {
         return String::new();
     };
@@ -534,22 +549,41 @@ impl GroupsView {
                 .layout(Layout::left_to_right(Align::Center)),
         );
         mark(&mut mark_ui, &state);
-        let painter = ui.painter();
         let y = rect.center().y;
         let mut x = inner.left() + 16.0 + GAP;
+        // The type mark, then the name.
+        let mut type_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(Rect::from_min_size(
+                    pos2(x, rect.top()),
+                    vec2(icons::INLINE, rect.height()),
+                ))
+                .layout(Layout::left_to_right(Align::Center)),
+        );
+        marks::type_mark(&mut type_ui, tunnel.kind, None);
+        let named = icons::INLINE + 6.0;
+        let painter = ui.painter();
         let cell = |x: f32, text: &str, font: FontId, color: Color32, width: f32| {
             let (text, _) = text::elide(painter, text, &font, width);
             painter.text(pos2(x, y), Align2::LEFT_CENTER, text, font, color);
         };
         cell(
-            x,
+            x + named,
             &tunnel.name,
             FontId::proportional(13.0),
             p.text_strong,
-            flex,
+            flex - named,
         );
         x += flex + GAP;
-        let host = privacy::get(ui.ctx()).alias_text(&tunnel.host).into_owned();
+        let privacy = privacy::get(ui.ctx());
+        let host = if tunnel.is_kubectl() {
+            // Through the filter: hidden names read "namespace N".
+            privacy
+                .plain(&tunnels_view::kube_place(tunnel, privacy.on))
+                .into_owned()
+        } else {
+            privacy.alias_text(&tunnel.host).into_owned()
+        };
         cell(x, &host, FontId::monospace(13.0), p.dim, flex);
         x += flex + GAP;
         // A clickable row: a masked forward shows as dots, not a token.
@@ -705,9 +739,23 @@ impl GroupsView {
                     let choices: Vec<Choice<usize>> = tunnels
                         .iter()
                         .enumerate()
-                        .map(|(i, t)| Choice {
-                            note: Some(t.host.clone()),
-                            ..Choice::new(i, &t.name)
+                        .map(|(i, t)| {
+                            let privacy = privacy::get(ui.ctx());
+                            let (icon, note) = if t.is_kubectl() {
+                                (
+                                    icons::SHIP_WHEEL,
+                                    privacy
+                                        .plain(&tunnels_view::kube_place(t, privacy.on))
+                                        .into_owned(),
+                                )
+                            } else {
+                                (icons::TERMINAL, privacy.alias_text(&t.host).into_owned())
+                            };
+                            Choice {
+                                note: Some(note),
+                                icon: Some(icon),
+                                ..Choice::new(i, &t.name)
+                            }
                         })
                         .collect();
                     let mut picked: Vec<usize> = draft
@@ -1106,6 +1154,49 @@ mod tests {
                 .is_disabled()
         );
         harness.get_by_label("No groups yet");
+    }
+
+    /// A group mixing both types: kubectl rows show where they forward to,
+    /// and the editor's tunnel list notes "context / namespace".
+    #[test]
+    fn groups_mix_ssh_and_kubectl_tunnels() {
+        use sshelf_core::tunnels::{Kube, KubeForward, Resource};
+        let mut data = (*data()).clone();
+        data.tunnels.upsert_tunnel(Tunnel::kubectl(
+            "t-k",
+            "web api",
+            Kube {
+                context: "lab".into(),
+                namespace: "api".into(),
+                resource: Resource::parse("service/web").unwrap(),
+                address: "127.0.0.1".into(),
+                forwards: vec![KubeForward {
+                    listen: 18080,
+                    target: "80".into(),
+                }],
+            },
+        ));
+        data.tunnels.groups[1].tunnels.push("t-k".into());
+        let mut harness = harness_with(Arc::new(data), Snapshot::default(), selected("g-2"));
+        harness.step();
+        harness.step();
+        let drawn = test_util::drawn_text(&harness);
+        assert!(drawn.contains("lab / api"), "{drawn}");
+        assert!(drawn.contains("18080 \u{2192} 80"), "{drawn}");
+        // The editor's list.
+        harness.state_mut().0.editor =
+            Some(harness.state().0.editor.clone().unwrap_or_else(|| Group {
+                id: "g-new".into(),
+                name: "New".into(),
+                tunnels: Vec::new(),
+                start_on_launch: false,
+            }));
+        harness.step();
+        harness.get_by_label("Tunnels").click();
+        harness.step();
+        harness.step();
+        harness.get_by_label("web api");
+        assert!(test_util::drawn_text(&harness).contains("lab / api"));
     }
 
     #[test]

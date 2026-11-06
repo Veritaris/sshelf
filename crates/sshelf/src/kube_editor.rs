@@ -159,7 +159,8 @@ pub fn form(
     commands: &mut Vec<Command>,
 ) {
     let p = &Palette::ONE_DARK;
-    let masked = privacy::get(ui.ctx()).on;
+    let privacy = privacy::get(ui.ctx());
+    let masked = privacy.on;
     let errors_for = |prefix: &str| -> Vec<String> {
         env.problems
             .iter()
@@ -266,12 +267,12 @@ pub fn form(
         let choices: Vec<Choice<usize>> = items
             .iter()
             .enumerate()
-            .map(|(i, name)| Choice::new(i, name))
+            .map(|(i, name)| Choice::new(i, privacy.kube_name(name)))
             .collect();
         let trigger = if draft.kube.namespace.is_empty() {
             "Pick or type a namespace".to_string()
         } else {
-            draft.kube.namespace.clone()
+            privacy.kube_name(&draft.kube.namespace).into_owned()
         };
         let selected = items
             .iter()
@@ -361,13 +362,13 @@ pub fn form(
                 .map(|(i, item)| Choice {
                     detail: (!item.ports.is_empty()).then(|| ports_line(item, masked)),
                     note: item.status.clone(),
-                    ..Choice::new(i, &item.name)
+                    ..Choice::new(i, privacy.kube_name(&item.name))
                 })
                 .collect();
             let trigger = if draft.kube.resource.name.is_empty() {
                 format!("Pick a {word}")
             } else {
-                draft.kube.resource.to_string()
+                format!("{word}/{}", privacy.kube_name(&draft.kube.resource.name))
             };
             let selected = items
                 .iter()
@@ -695,17 +696,19 @@ fn command_preview(ui: &mut Ui, draft: &Tunnel) {
         parts.push(("--context".into(), false));
         parts.push((kube.context.clone(), true));
     }
+    // Names as aliases: "namespace N" while hidden.
+    let privacy = privacy::get(ui.ctx());
     parts.push(("--namespace".into(), false));
     parts.push(if kube.namespace.is_empty() {
         ("‹namespace›".into(), false)
     } else {
-        (kube.namespace.clone(), false)
+        (privacy.kube_name(&kube.namespace).into_owned(), false)
     });
     parts.push(("port-forward".into(), false));
     let name = if kube.resource.name.is_empty() {
         "‹name›".to_string()
     } else {
-        kube.resource.name.clone()
+        privacy.kube_name(&kube.resource.name).into_owned()
     };
     parts.push((format!("{}/{name}", kube.resource.kind.word()), false));
     let complete: Vec<&KubeForward> = kube

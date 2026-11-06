@@ -16,6 +16,7 @@ use sshconf::HostList;
 use sshelf_core::core::{AppData, Command};
 use sshelf_core::settings::TrayIconStyle;
 use sshelf_core::supervisor::{GroupState, Owner, Snapshot, TunnelState};
+use sshelf_core::tunnels::TunnelType;
 use tray_icon::menu::{
     CheckMenuItem, IsMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu,
 };
@@ -158,6 +159,8 @@ pub struct TunnelRow {
     pub name: String,
     /// The first forward's listen port.
     pub port: Option<u16>,
+    /// ssh or kubectl (the sshelf menu shows its mark).
+    pub kind: TunnelType,
     pub state: TunnelState,
     /// Started by hand: *Stop* releases that start.
     pub manual: bool,
@@ -258,7 +261,8 @@ pub fn model(
             tunnels.push(TunnelRow {
                 id: tunnel.id.clone(),
                 name: tunnel.name.clone(),
-                port: tunnel.forwards.first().map(|f| f.listen),
+                port: tunnel.listen_ports().first().copied(),
+                kind: tunnel.kind,
                 state: status.state.clone(),
                 manual: status.owners.contains(&Owner::Manual),
                 reconnecting: status.reconnect.is_some(),
