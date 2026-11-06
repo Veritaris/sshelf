@@ -883,6 +883,11 @@ mod tests {
         // One through the Help card itself (tall enough to show it without
         // scrolling).
         harness.set_size(egui::vec2(1280.0, 1700.0));
+        // The ssh and kubectl cards change height once detection reports:
+        // wait for both, or the click can land where the Help card was.
+        settle(&mut harness, "ssh and kubectl detected", |app| {
+            app.ssh.is_some() && app.kubectl.is_some()
+        });
         harness.state_mut().view = View::Settings;
         harness.run_steps(3);
         harness.get_by_label("Start a chapter").click();
