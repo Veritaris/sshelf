@@ -19,8 +19,9 @@ jobs:
             target: x86_64-pc-windows-msvc
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-          # Pinned: macos-latest and macos-15 runners were slow to provision.
-          - os: macos-14
+          # Pinned (macos-latest moves on its own); macos-14 images are
+          # retired ("configuration … is not supported").
+          - os: macos-15
             target: aarch64-apple-darwin
 
     runs-on: ${{ matrix.platform.os }}
