@@ -510,15 +510,20 @@ impl GroupsView {
                     });
                     continue;
                 };
-                self.tunnel_row(ui, tunnel, states);
+                if self.tunnel_row(ui, tunnel, states) {
+                    // Retried as the group's (its failed tunnels), not as a
+                    // manual start.
+                    commands.push(Command::StartGroup(group.id.clone()));
+                }
             }
         });
         shared_note(ui, group, data, states, active);
     }
 
     /// One tunnel of the group: mark, name, host, forward, state; a click
-    /// shows it in Tunnels. A failure follows on its own strip.
-    fn tunnel_row(&mut self, ui: &mut Ui, tunnel: &Tunnel, states: &Snapshot) {
+    /// shows it in Tunnels. A failure follows on its own strip, and has a
+    /// *Retry* button after "Failed"; returns whether it was pressed.
+    fn tunnel_row(&mut self, ui: &mut Ui, tunnel: &Tunnel, states: &Snapshot) -> bool {
         let p = &Palette::ONE_DARK;
         let state = states.state(&tunnel.id);
         let (rect, response) =
@@ -596,13 +601,27 @@ impl GroupsView {
         );
         x += 160.0 + GAP;
         let (label, color) = state_label(&state);
-        cell(
-            x,
-            &capitalized(&label),
-            FontId::proportional(12.0),
-            color,
-            96.0,
-        );
+        let label = capitalized(&label);
+        cell(x, &label, FontId::proportional(12.0), color, 96.0);
+        let mut retry = false;
+        if matches!(state, TunnelState::Failed(_)) {
+            // A small ghost button just after the word (drawn over the row,
+            // so it takes the click).
+            let width = painter
+                .layout_no_wrap(label, FontId::proportional(12.0), color)
+                .size()
+                .x;
+            let at = Rect::from_center_size(pos2(x + width + 6.0 + 14.0, y), vec2(28.0, 28.0));
+            let mut button_ui = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(at)
+                    .layout(Layout::left_to_right(Align::Center)),
+            );
+            let name = format!("Retry {}", tunnel.name);
+            retry = button_ui
+                .add(Button::icon_only(icons::ROTATE_CW, &name).ghost().small())
+                .clicked();
+        }
         if popup::tip_below(response, |ui| {
             ui.label("Show in Tunnels");
         })
@@ -639,6 +658,7 @@ impl GroupsView {
                     }
                 });
         }
+        retry
     }
 
     fn editor(&mut self, ui: &mut Ui, data: &AppData, commands: &mut Vec<Command>) {
@@ -1110,6 +1130,14 @@ mod tests {
         assert!(harness.get_by_label("Edit").accesskit_node().is_disabled());
 
         harness.get_by_label("Retry failed").click();
+        harness.step();
+        assert_eq!(harness.state().1, [Command::StartGroup("g-1".into())]);
+
+        // The failed row's own Retry, after "Failed": the same, as the
+        // group's; the running row has none.
+        harness.state_mut().1.clear();
+        assert!(harness.query_by_label("Retry DB").is_none());
+        harness.get_by_label("Retry API").click();
         harness.step();
         assert_eq!(harness.state().1, [Command::StartGroup("g-1".into())]);
     }

@@ -260,6 +260,10 @@ enum Action {
     Cancel,
     Retry,
     Review,
+    /// Running for a group only: a manual owner keeps it up once the group
+    /// stops. Offered in the detail and the menu, not on the row (where it
+    /// would read as *Start* on a running tunnel).
+    Keep,
 }
 
 impl Action {
@@ -268,9 +272,9 @@ impl Action {
         match state {
             TunnelState::Starting if manual => Some(Action::Cancel),
             TunnelState::Starting | TunnelState::Stopping => None,
-            // A group's tunnel keeps Start: it adds a manual owner.
             TunnelState::Running if manual => Some(Action::Stop),
-            TunnelState::Running | TunnelState::Stopped => Some(Action::Start),
+            TunnelState::Running => Some(Action::Keep),
+            TunnelState::Stopped => Some(Action::Start),
             TunnelState::Failed(_)
                 if status.and_then(|s| s.failure) == Some(FailureKind::HostKeyChanged) =>
             {
@@ -287,6 +291,7 @@ impl Action {
             Action::Cancel => "Cancel",
             Action::Retry => "Retry",
             Action::Review => "Review…",
+            Action::Keep => "Keep running",
         }
     }
 
@@ -295,13 +300,13 @@ impl Action {
             Action::Start => Some(icons::PLAY),
             Action::Stop => Some(icons::SQUARE),
             Action::Retry => Some(icons::ROTATE_CW),
-            Action::Cancel | Action::Review => None,
+            Action::Cancel | Action::Review | Action::Keep => None,
         }
     }
 
     fn command(self, id: &str) -> Command {
         match self {
-            Action::Start | Action::Retry => Command::StartTunnel(id.to_string()),
+            Action::Start | Action::Retry | Action::Keep => Command::StartTunnel(id.to_string()),
             Action::Stop | Action::Cancel => Command::StopTunnel(id.to_string()),
             Action::Review => Command::ReviewChangedKey(id.to_string()),
         }
@@ -749,7 +754,7 @@ impl TunnelsView {
                     row.spacing_mut().item_spacing.x = 10.0;
                     marks::type_mark(&mut row, tunnel.kind, Some(24.0));
                     mark(&mut row, &state);
-                    let action = Action::of(&state, status);
+                    let action = Action::of(&state, status).filter(|a| *a != Action::Keep);
                     let blocked = blocked(tunnel, action, kubectl_missing);
                     let button_width = if action.is_some() { 84.0 } else { 0.0 };
                     let text_width = (row.available_width() - button_width).max(40.0);
@@ -926,8 +931,8 @@ impl TunnelsView {
                 let manual = status.is_some_and(|s| s.owners.contains(&Owner::Manual));
                 if let Some(action) = Action::of(&state, status) {
                     let blocked = blocked(tunnel, Some(action), kubectl_missing);
-                    let tip = (action == Action::Start && state == TunnelState::Running)
-                        .then_some("Started by a group; Start also keeps it up on its own")
+                    let tip = (action == Action::Keep)
+                        .then_some("Runs for a group; this keeps it up when the group stops")
                         .or(blocked);
                     if ui
                         .add_enabled(blocked.is_none(), action.button(false, tip))
@@ -1672,11 +1677,13 @@ fn tunnel_menu(
     let active = !matches!(state, TunnelState::Stopped | TunnelState::Failed(_));
     let mut chosen = None;
     popup::context_menu(response, |menu| {
-        if menu.item(
-            Some(icons::PLAY),
-            "Start",
-            startable && (!manual || !active),
-        ) {
+        // Running for a group only: a manual start keeps it up on its own.
+        let start = if active && !manual {
+            "Keep running"
+        } else {
+            "Start"
+        };
+        if menu.item(Some(icons::PLAY), start, startable && (!manual || !active)) {
             chosen = Some(MenuAction::Command(Box::new(Command::StartTunnel(
                 tunnel_id.into(),
             ))));
@@ -2684,15 +2691,18 @@ mod tests {
     }
 
     #[test]
-    fn a_group_tunnel_keeps_start() {
+    fn a_group_tunnel_offers_keep_running_in_the_detail_only() {
         let mut f = fixture(TunnelState::Running);
         let mut states = (*f.states).clone();
         states.tunnels.get_mut("t-1").unwrap().owners = BTreeSet::from([Owner::Group("g".into())]);
         f.states = Arc::new(states);
-        let mut harness = harness(f, TunnelsView::default());
+        let mut harness = harness(f, selected());
         harness.step();
         harness.get_by_label("Running · group g");
-        harness.get_by_label("Start").click();
+        // No Start on a running row; the detail keeps it up on its own.
+        assert!(harness.query_by_label("Start").is_none());
+        assert_eq!(harness.get_all_by_label("Keep running").count(), 1);
+        harness.get_by_label("Keep running").click();
         harness.step();
         assert_eq!(harness.state().1, [Command::StartTunnel("t-1".into())]);
     }
