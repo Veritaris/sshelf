@@ -76,13 +76,12 @@ impl Lookups {
     }
 }
 
-/// The local port suggested for remote `port` (SPEC.md §10): 18000 + port
-/// below 1024, port + 10000 below 10000, else the port itself; the next one
-/// up while `taken` has it.
+/// The local port suggested for remote `port` (SPEC.md §10): the port
+/// itself, or 18000 + port below 1024 (binding those needs root on Linux and
+/// macOS); the next one up while `taken` has it.
 pub fn suggest_local(port: u16, taken: &[u16]) -> u16 {
     let mut local = match port {
         0..1024 => 18000 + port,
-        1024..10000 => port + 10000,
         _ => port,
     };
     while taken.contains(&local) && local < u16::MAX {
@@ -773,8 +772,11 @@ mod tests {
     fn local_ports_are_suggested_as_the_spec_says() {
         assert_eq!(suggest_local(80, &[]), 18080);
         assert_eq!(suggest_local(443, &[]), 18443);
-        assert_eq!(suggest_local(5432, &[]), 15432);
-        assert_eq!(suggest_local(9090, &[]), 19090);
+        // Above 1023: the same port.
+        assert_eq!(suggest_local(1024, &[]), 1024);
+        assert_eq!(suggest_local(5432, &[]), 5432);
+        assert_eq!(suggest_local(9090, &[]), 9090);
+        assert_eq!(suggest_local(5432, &[5432]), 5433);
         assert_eq!(suggest_local(30080, &[]), 30080);
         // Taken by another tunnel: the next one up.
         assert_eq!(suggest_local(80, &[18080, 18081]), 18082);
