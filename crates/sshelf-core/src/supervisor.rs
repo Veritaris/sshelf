@@ -1410,8 +1410,17 @@ mod tests {
             recorded: None,
             known: BTreeMap::new(),
         };
-        let dep = tunnel("k3s", 1);
-        let mut dependent = tunnel("mail", 2);
+        // Free ports: the due reconnect checks them first (1 and 2 are
+        // privileged on Linux).
+        let free = || {
+            TcpListener::bind(("127.0.0.1", 0))
+                .unwrap()
+                .local_addr()
+                .unwrap()
+                .port()
+        };
+        let dep = tunnel("k3s", free());
+        let mut dependent = tunnel("mail", free());
         dependent.depends_on = vec!["k3s".into()];
         dependent.auto_reconnect = true;
         for (tunnel, due) in [
