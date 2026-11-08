@@ -430,7 +430,11 @@ fn contents_in(ui: &mut Ui, rect: egui::Rect, model: &TrayModel, actions: &mut V
                 marks::type_mark(ui, tunnel.kind, None);
                 ui.add_space(2.0);
                 ui.label(RichText::new(&tunnel.name).size(13.0).color(p.text));
-                let (note, color) = if failed {
+                let (note, color) = if let Some(note) = &tunnel.dep_note {
+                    // "waiting for …", "not started · … failed" (M15).
+                    let color = if failed { p.red } else { p.dim };
+                    (note.to_lowercase(), color)
+                } else if failed {
                     let text = if tunnel.reconnecting {
                         "reconnecting"
                     } else {
@@ -794,6 +798,7 @@ mod tests {
                 manual: true,
                 reconnecting: false,
                 used_by: Vec::new(),
+                dep_note: None,
             }],
             recent: vec![RecentHost::new("web"), RecentHost::new("db")],
             host_key_waiting: true,

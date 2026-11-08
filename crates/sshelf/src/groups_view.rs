@@ -35,8 +35,8 @@ const ROW_GAP: f32 = 2.0;
 /// The editor's labels and fields (board Group-Edit).
 const LABEL: f32 = 150.0;
 const FIELD: f32 = 474.0;
-/// A row of the detail's tunnel table.
-const TUNNEL_ROW: f32 = 44.0;
+/// A row of the detail's tunnel list (M15: the name over *Depends on*).
+const TUNNEL_ROW: f32 = 64.0;
 
 #[derive(Default)]
 pub struct GroupsView {
@@ -46,6 +46,66 @@ pub struct GroupsView {
     confirm_delete: Option<String>,
     /// A tunnel row was clicked: the app shows that tunnel.
     open_tunnel: Option<String>,
+    /// A row being dragged (M15).
+    drag: Option<Drag>,
+    /// The yellow line under a group's list (its id): why a row can't pass
+    /// another, or that the order changed with a dependency.
+    line: Option<(String, String)>,
+    /// Toasts for the app ("Order saved …").
+    notices: Vec<String>,
+}
+
+/// A tunnel row being dragged in a group's list.
+struct Drag {
+    group: String,
+    id: String,
+    /// The order as it would be saved now.
+    order: Vec<String>,
+}
+
+/// What a tunnel row did this frame.
+struct Row {
+    /// Its slot in the list.
+    rect: Rect,
+    grip: egui::Response,
+    focused: bool,
+    retry: bool,
+    /// *Depends on* changed to these.
+    depends_on: Option<Vec<String>>,
+}
+
+/// `order` with the tunnel at `index` moved one place (`step` -1 or 1),
+/// unless it would pass a tunnel it depends on or one that depends on it:
+/// then why, as the yellow line says it.
+fn swap(
+    order: &[String],
+    index: usize,
+    step: isize,
+    file: &sshelf_core::tunnels::TunnelsFile,
+) -> (Option<Vec<String>>, Option<String>) {
+    let Some(other) = index.checked_add_signed(step).filter(|o| *o < order.len()) else {
+        return (None, None);
+    };
+    let (this, that) = (&order[index], &order[other]);
+    let name = |id: &str| tunnels_view::tunnel_name(file, id);
+    if step < 0 && sshelf_core::deps::reaches(file, this, that) {
+        let why = format!(
+            "\u{201c}{}\u{201d} starts after \u{201c}{}\u{201d}, so it stays below.",
+            name(this),
+            name(that)
+        );
+        return (None, Some(why));
+    }
+    if step > 0 && sshelf_core::deps::reaches(file, that, this) {
+        let why = format!(
+            "\u{201c}{}\u{201d} starts after it, so it stays above.",
+            name(that)
+        );
+        return (None, Some(why));
+    }
+    let mut next = order.to_vec();
+    next.swap(index, other);
+    (Some(next), None)
 }
 
 /// A row's second line: "running · 2/2", "degraded · 1/2"; and its colour.
@@ -116,6 +176,11 @@ impl GroupsView {
     /// The tunnel whose row was clicked, once.
     pub fn take_open_tunnel(&mut self) -> Option<String> {
         self.open_tunnel.take()
+    }
+
+    /// Toasts to show, once.
+    pub fn take_notices(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.notices)
     }
 
     /// The editor is open.
@@ -428,7 +493,8 @@ impl GroupsView {
                 });
                 ui.label(
                     RichText::new(
-                        "Starting checks every port first, then starts all tunnels in parallel.",
+                        "Starts tunnels top to bottom, in parallel; a tunnel waits for the ones \
+                         it depends on. Stops in reverse.",
                     )
                     .size(13.0)
                     .color(p.dim),
@@ -481,6 +547,15 @@ impl GroupsView {
                         .font(fonts::semibold(13.0))
                         .color(p.text_strong),
                 );
+                // "drag ⠿ to reorder · start order", the grip as an icon.
+                ui.spacing_mut().item_spacing.x = 4.0;
+                ui.label(RichText::new("drag").size(12.0).color(p.dim));
+                icons::show(ui, icons::GRIP_VERTICAL, 12.0, p.dim);
+                ui.label(
+                    RichText::new("to reorder \u{b7} start order")
+                        .size(12.0)
+                        .color(p.dim),
+                );
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     let tip = if active {
                         "Stop the group before changing its tunnels"
@@ -498,37 +573,187 @@ impl GroupsView {
                     }
                 });
             });
-            for id in &group.tunnels {
-                let Some(tunnel) = data.tunnels.tunnel(id) else {
-                    marks::banner(ui, p.yellow_tint, |ui| {
-                        icons::label(
-                            ui,
-                            icons::TRIANGLE_ALERT,
-                            p.yellow,
-                            RichText::new(format!("Missing tunnel `{id}` (see the orphans)"))
-                                .color(p.yellow),
-                        );
-                    });
-                    continue;
-                };
-                if self.tunnel_row(ui, tunnel, states) {
-                    // Retried as the group's (its failed tunnels), not as a
-                    // manual start.
-                    commands.push(Command::StartGroup(group.id.clone()));
-                }
-            }
+            ui.spacing_mut().item_spacing.y = 8.0;
+            self.tunnel_rows(ui, group, data, states, commands);
         });
         shared_note(ui, group, data, states, active);
     }
 
-    /// One tunnel of the group: mark, name, host, forward, state; a click
-    /// shows it in Tunnels. A failure follows on its own strip, and has a
-    /// *Retry* button after "Failed"; returns whether it was pressed.
-    fn tunnel_row(&mut self, ui: &mut Ui, tunnel: &Tunnel, states: &Snapshot) -> bool {
+    /// The group's tunnels in order (SPEC.md §10 *Group order and
+    /// dependencies*): drag a row by its grip (`Esc` cancels; it can't pass
+    /// a tunnel it depends on or one that depends on it), or `Alt+↑/↓` on a
+    /// focused row; the order is saved at once.
+    fn tunnel_rows(
+        &mut self,
+        ui: &mut Ui,
+        group: &Group,
+        data: &AppData,
+        states: &Snapshot,
+        commands: &mut Vec<Command>,
+    ) {
+        let p = &Palette::ONE_DARK;
+        let file = &data.tunnels;
+        let dragging = self
+            .drag
+            .as_ref()
+            .filter(|d| d.group == group.id)
+            .map(|d| d.order.clone());
+        let order = dragging.clone().unwrap_or_else(|| group.tunnels.clone());
+        if ui.input(|i| i.key_pressed(egui::Key::Escape)) && dragging.is_some() {
+            self.drag = None;
+            self.line = None;
+        }
+        let mut slots = Vec::new();
+        let mut released = false;
+        let mut moved: Option<Vec<String>> = None;
+        for (index, id) in order.iter().enumerate() {
+            let Some(tunnel) = file.tunnel(id) else {
+                marks::banner(ui, p.yellow_tint, |ui| {
+                    icons::label(
+                        ui,
+                        icons::TRIANGLE_ALERT,
+                        p.yellow,
+                        RichText::new(format!("Missing tunnel `{id}` (see the orphans)"))
+                            .color(p.yellow),
+                    );
+                });
+                continue;
+            };
+            let dragged = self.drag.as_ref().is_some_and(|d| &d.id == id) && dragging.is_some();
+            let row = self.tunnel_row(ui, (tunnel, index, dragged), group, data, states);
+            slots.push((id.clone(), row.rect));
+            if let Some(deps) = row.depends_on {
+                let mut after = file.clone();
+                if let Some(t) = after.tunnels.iter_mut().find(|t| &t.id == id) {
+                    t.depends_on = deps.clone();
+                }
+                if sshelf_core::deps::ordered(&group.tunnels, &after) != group.tunnels {
+                    self.line = Some((
+                        group.id.clone(),
+                        "Order updated: every tunnel now sits below the tunnels it depends on."
+                            .into(),
+                    ));
+                }
+                commands.push(Command::SetDependencies {
+                    tunnel_id: id.clone(),
+                    depends_on: deps,
+                });
+            }
+            if row.retry {
+                // Retried as the group's (its failed tunnels), not as a
+                // manual start.
+                commands.push(Command::StartGroup(group.id.clone()));
+            }
+            if row.grip.drag_started() {
+                self.drag = Some(Drag {
+                    group: group.id.clone(),
+                    id: id.clone(),
+                    order: group.tunnels.clone(),
+                });
+            }
+            released |= dragged && row.grip.drag_stopped();
+            // Alt+↑/↓ on a focused row (its grip or the row itself).
+            let focused = row.focused;
+            let step = ui.input_mut(|i| {
+                if !focused {
+                    None
+                } else if i.consume_key(egui::Modifiers::ALT, egui::Key::ArrowUp) {
+                    Some(-1)
+                } else if i.consume_key(egui::Modifiers::ALT, egui::Key::ArrowDown) {
+                    Some(1)
+                } else {
+                    None
+                }
+            });
+            if let Some(step) = step {
+                let (next, blocked) = swap(&order, index, step, file);
+                if let Some(next) = next {
+                    moved = Some(next);
+                }
+                self.line = blocked.map(|b| (group.id.clone(), b));
+            }
+        }
+        // While dragging: the row trades places once the pointer passes a
+        // neighbour's middle, unless a dependency holds it.
+        if let (Some(order), Some(pointer)) = (&dragging, ui.ctx().pointer_interact_pos()) {
+            let at = self
+                .drag
+                .as_ref()
+                .and_then(|d| order.iter().position(|t| *t == d.id));
+            if let Some(at) = at {
+                let step = if at > 0 && pointer.y < slots[at - 1].1.center().y {
+                    Some(-1)
+                } else if at + 1 < slots.len() && pointer.y > slots[at + 1].1.center().y {
+                    Some(1)
+                } else {
+                    None
+                };
+                if let Some(step) = step {
+                    let (next, blocked) = swap(order, at, step, file);
+                    if let (Some(next), Some(drag)) = (next, &mut self.drag) {
+                        drag.order = next;
+                    }
+                    self.line = blocked.map(|b| (group.id.clone(), b));
+                }
+            }
+            ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
+            ui.ctx().request_repaint();
+        }
+        if released {
+            moved = self.drag.take().map(|d| d.order);
+        }
+        if let Some(order) = moved.filter(|o| *o != group.tunnels) {
+            self.notices.push(format!(
+                "Order saved \u{b7} applies the next time {} starts",
+                group.name
+            ));
+            commands.push(Command::ReorderGroup {
+                group_id: group.id.clone(),
+                tunnels: order,
+            });
+        }
+        // The yellow line under the list: why a row stopped, or that the
+        // order changed with a dependency.
+        if let Some((_, text)) = self.line.as_ref().filter(|(g, _)| *g == group.id) {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                icons::show(ui, icons::TRIANGLE_ALERT, 14.0, p.yellow);
+                ui.label(RichText::new(text).size(12.0).color(p.yellow));
+            });
+        }
+    }
+
+    /// One tunnel of the group (64 px): grip, status mark, type mark, the
+    /// name over *Depends on*, host, first forward, state; a click shows it
+    /// in Tunnels. A failure follows on its own strip, and has a *Retry*
+    /// button after "Failed". `dragged`: drawn lifted, with the Magenta
+    /// outline.
+    fn tunnel_row(
+        &mut self,
+        ui: &mut Ui,
+        (tunnel, index, dragged): (&Tunnel, usize, bool),
+        group: &Group,
+        data: &AppData,
+        states: &Snapshot,
+    ) -> Row {
         let p = &Palette::ONE_DARK;
         let state = states.state(&tunnel.id);
-        let (rect, response) =
-            ui.allocate_exact_size(vec2(ui.available_width(), TUNNEL_ROW), Sense::click());
+        let status = states.tunnels.get(&tunnel.id);
+        let (slot, _) =
+            ui.allocate_exact_size(vec2(ui.available_width(), TUNNEL_ROW), Sense::hover());
+        // Rows slide to their new place (the list motion).
+        let rect = motion::tween_rect(
+            ui.ctx(),
+            Id::unique(("group_row", &tunnel.id)),
+            index,
+            slot,
+            timing::SLIDE,
+        );
+        let response = ui.interact(
+            rect,
+            Id::unique(("group_row_click", &tunnel.id)),
+            Sense::click(),
+        );
         response.widget_info(|| WidgetInfo::labeled(Role::Link, true, &tunnel.name));
         let hover = motion::fade(
             ui.ctx(),
@@ -537,50 +762,105 @@ impl GroupsView {
             timing::HOVER,
             motion::ease_out,
         );
-        ui.painter().rect_filled(
-            rect,
-            radius::CONTROL,
-            p.surface.lerp_to_gamma(p.selection, hover),
-        );
-        // Columns: mark 16 | name | host | forward 160 | state 96.
-        const GAP: f32 = 12.0;
-        let inner = rect.shrink2(vec2(12.0, 0.0));
-        let flex = ((inner.width() - 16.0 - 160.0 - 96.0 - 4.0 * GAP) / 2.0).max(40.0);
-        let mut mark_ui = ui.new_child(
-            egui::UiBuilder::new()
-                .max_rect(Rect::from_min_size(
-                    pos2(inner.left(), rect.top()),
-                    vec2(16.0, rect.height()),
-                ))
-                .layout(Layout::left_to_right(Align::Center)),
-        );
-        mark(&mut mark_ui, &state);
-        let y = rect.center().y;
-        let mut x = inner.left() + 16.0 + GAP;
-        // The type mark, then the name.
-        let mut type_ui = ui.new_child(
-            egui::UiBuilder::new()
-                .max_rect(Rect::from_min_size(
-                    pos2(x, rect.top()),
-                    vec2(icons::INLINE, rect.height()),
-                ))
-                .layout(Layout::left_to_right(Align::Center)),
-        );
-        marks::type_mark(&mut type_ui, tunnel.kind, None);
-        let named = icons::INLINE + 6.0;
-        let painter = ui.painter();
-        let cell = |x: f32, text: &str, font: FontId, color: Color32, width: f32| {
-            let (text, _) = text::elide(painter, text, &font, width);
-            painter.text(pos2(x, y), Align2::LEFT_CENTER, text, font, color);
+        let fill = if dragged {
+            p.selection
+        } else {
+            p.surface
+                .lerp_to_gamma(p.zebra.lerp_to_gamma(p.selection, 0.3), hover)
         };
-        cell(
-            x + named,
-            &tunnel.name,
-            FontId::proportional(13.0),
+        ui.painter().rect_filled(rect, radius::CONTROL, fill);
+        if dragged {
+            ui.painter().rect_stroke(
+                rect,
+                radius::CONTROL,
+                Stroke::new(1.0, p.accent),
+                egui::StrokeKind::Inside,
+            );
+        }
+        // Columns: grip 16 | mark 8 | type 16 | name flex | host 150 |
+        // forward 120 | state 150.
+        const GAP: f32 = 12.0;
+        let inner = Rect::from_min_max(
+            pos2(rect.left() + 6.0, rect.top()),
+            pos2(rect.right() - 14.0, rect.bottom()),
+        );
+        let flex =
+            (inner.width() - 16.0 - 8.0 - 16.0 - 150.0 - 120.0 - 150.0 - 6.0 * GAP).max(80.0);
+        let child = |ui: &mut Ui, x: f32, width: f32| {
+            ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(Rect::from_min_size(
+                        pos2(x, rect.top()),
+                        vec2(width, rect.height()),
+                    ))
+                    .layout(Layout::left_to_right(Align::Center)),
+            )
+        };
+        // The grip: shown on hover, the handle for dragging.
+        let grip_rect =
+            Rect::from_min_size(pos2(inner.left(), rect.top()), vec2(16.0, rect.height()));
+        let grip = ui.interact(
+            grip_rect,
+            Id::unique(("group_row_grip", &tunnel.id)),
+            Sense::drag(),
+        );
+        let grip_name = format!("Reorder {}", tunnel.name);
+        grip.widget_info(|| WidgetInfo::labeled(Role::Button, true, &grip_name));
+        let shown = motion::fade(
+            ui.ctx(),
+            grip.id.with("shown"),
+            response.hovered() || grip.hovered() || dragged || grip.has_focus(),
+            timing::HOVER,
+            motion::ease_out,
+        );
+        if shown > 0.0 {
+            let color = if dragged { p.accent } else { p.comment };
+            ui.painter().text(
+                grip_rect.center(),
+                Align2::CENTER_CENTER,
+                icons::GRIP_VERTICAL,
+                icons::font(16.0),
+                color.gamma_multiply(shown),
+            );
+        }
+        let grip = grip.on_hover_cursor(CursorIcon::Grab);
+        let mut x = inner.left() + 16.0 + GAP;
+        mark(&mut child(ui, x, 8.0), &state);
+        x += 8.0 + GAP;
+        marks::type_mark(&mut child(ui, x, 16.0), tunnel.kind, None);
+        x += 16.0 + GAP;
+        // The name over *Depends on*.
+        let name_y = rect.top() + 18.0;
+        let painter = ui.painter().clone();
+        let (name, _) = text::elide(&painter, &tunnel.name, &FontId::proportional(14.0), flex);
+        painter.text(
+            pos2(x, name_y),
+            Align2::LEFT_CENTER,
+            name,
+            FontId::proportional(14.0),
             p.text_strong,
-            flex - named,
+        );
+        let mut deps_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(Rect::from_min_size(
+                    pos2(x, rect.top() + 31.0),
+                    vec2(flex, 26.0),
+                ))
+                .layout(Layout::left_to_right(Align::Center)),
+        );
+        let depends_on = tunnels_view::depends_on(
+            &mut deps_ui,
+            tunnel,
+            &data.tunnels,
+            Some(group),
+            flex.min(280.0),
         );
         x += flex + GAP;
+        let y = rect.center().y;
+        let cell = |x: f32, text: &str, font: FontId, color: Color32, width: f32| {
+            let (text, _) = text::elide(&painter, text, &font, width);
+            painter.text(pos2(x, y), Align2::LEFT_CENTER, text, font, color);
+        };
         let privacy = privacy::get(ui.ctx());
         let host = if tunnel.is_kubectl() {
             // Through the filter: hidden names read "namespace N".
@@ -590,26 +870,37 @@ impl GroupsView {
         } else {
             privacy.alias_text(&tunnel.host).into_owned()
         };
-        cell(x, &host, FontId::monospace(13.0), p.dim, flex);
-        x += flex + GAP;
+        cell(x, &host, FontId::monospace(12.0), p.dim, 150.0);
+        x += 150.0 + GAP;
         // A clickable row: a masked forward shows as dots, not a token.
         cell(
             x,
             &forwards_short(tunnel, privacy::get(ui.ctx()).on),
             FontId::monospace(12.0),
             p.text,
-            160.0,
+            120.0,
         );
-        x += 160.0 + GAP;
-        let (label, color) = state_label(&state);
-        let label = capitalized(&label);
-        cell(x, &label, FontId::proportional(12.0), color, 96.0);
+        x += 120.0 + GAP;
+        let (label, color) =
+            tunnels_view::dep_state(tunnel, status, &data.tunnels).unwrap_or_else(|| {
+                let (label, color) = state_label(&state);
+                (capitalized(&label), color)
+            });
+        let failed = matches!(state, TunnelState::Failed(_));
+        cell(
+            x,
+            &label,
+            FontId::proportional(12.0),
+            color,
+            if failed { 150.0 - 34.0 } else { 150.0 },
+        );
         let mut retry = false;
-        if matches!(state, TunnelState::Failed(_)) {
+        if failed {
             // A small ghost button just after the word (drawn over the row,
             // so it takes the click).
+            let (shown, _) = text::elide(&painter, &label, &FontId::proportional(12.0), 116.0);
             let width = painter
-                .layout_no_wrap(label, FontId::proportional(12.0), color)
+                .layout_no_wrap(shown, FontId::proportional(12.0), color)
                 .size()
                 .x;
             let at = Rect::from_center_size(pos2(x + width + 6.0 + 14.0, y), vec2(28.0, 28.0));
@@ -623,6 +914,7 @@ impl GroupsView {
                 .add(Button::icon_only(icons::ROTATE_CW, &name).ghost().small())
                 .clicked();
         }
+        let focused = response.has_focus() || grip.has_focus();
         if popup::tip_below(response, |ui| {
             ui.label("Show in Tunnels");
         })
@@ -659,7 +951,13 @@ impl GroupsView {
                     }
                 });
         }
-        retry
+        Row {
+            rect: slot,
+            grip,
+            focused,
+            retry,
+            depends_on,
+        }
     }
 
     fn editor(&mut self, ui: &mut Ui, data: &AppData, commands: &mut Vec<Command>) {
@@ -1079,6 +1377,166 @@ mod tests {
         let mut view = GroupsView::default();
         view.select(id);
         view
+    }
+
+    /// Work: API, DB, Web; `deps` as (tunnel, what it depends on).
+    fn dev(deps: &[(&str, &[&str])]) -> Arc<AppData> {
+        let mut data = AppData::new(PathBuf::from("app"));
+        for (id, name) in [("t-a", "API"), ("t-b", "DB"), ("t-c", "Web")] {
+            let mut tunnel = Tunnel::ssh(id, name, "h", Vec::new());
+            if let Some((_, on)) = deps.iter().find(|(t, _)| *t == id) {
+                tunnel.depends_on = on.iter().map(|d| d.to_string()).collect();
+            }
+            data.tunnels.upsert_tunnel(tunnel);
+        }
+        data.tunnels.upsert_group(Group {
+            id: "g-1".into(),
+            name: "Work".into(),
+            tunnels: vec!["t-a".into(), "t-b".into(), "t-c".into()],
+            start_on_launch: false,
+            start_deps_without_asking: false,
+        });
+        Arc::new(data)
+    }
+
+    /// Drags `grip` (a node's centre) by `dy` and lets go.
+    fn drag(harness: &mut Harness<'static, (GroupsView, Vec<Command>)>, grip: &str, dy: f32) {
+        let from = harness.get_by_label(grip).rect().center();
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        harness.event(egui::Event::PointerMoved(from));
+        harness.run_steps(2);
+        harness.event(button(from, true));
+        harness.run_steps(2);
+        for step in 1..=8 {
+            let at = from + vec2(0.0, dy * step as f32 / 8.0);
+            harness.event(egui::Event::PointerMoved(at));
+            harness.run_steps(1);
+        }
+        harness.event(button(from + vec2(0.0, dy), false));
+        harness.run_steps(3);
+    }
+
+    #[test]
+    fn dragging_a_row_saves_the_new_order() {
+        let mut harness = harness_with(dev(&[]), Snapshot::default(), selected("g-1"));
+        harness.run_steps(2);
+        harness.get_by_label_contains("to reorder");
+        drag(&mut harness, "Reorder Web", -150.0);
+        assert_eq!(
+            harness.state().1,
+            [Command::ReorderGroup {
+                group_id: "g-1".into(),
+                tunnels: vec!["t-c".into(), "t-a".into(), "t-b".into()],
+            }]
+        );
+        assert_eq!(
+            harness.state_mut().0.take_notices(),
+            ["Order saved \u{b7} applies the next time Work starts"]
+        );
+    }
+
+    #[test]
+    fn a_row_cant_pass_a_tunnel_it_depends_on() {
+        // DB starts after API: dragged up, it stops below API.
+        let mut harness = harness_with(
+            dev(&[("t-b", &["t-a"])]),
+            Snapshot::default(),
+            selected("g-1"),
+        );
+        harness.run_steps(2);
+        drag(&mut harness, "Reorder DB", -150.0);
+        assert!(harness.state().1.is_empty(), "{:?}", harness.state().1);
+        harness.get_by_label(
+            "\u{201c}DB\u{201d} starts after \u{201c}API\u{201d}, so it stays below.",
+        );
+    }
+
+    #[test]
+    fn alt_arrows_move_the_focused_row() {
+        let mut harness = harness_with(dev(&[]), Snapshot::default(), selected("g-1"));
+        harness.run_steps(2);
+        harness.get_by_label("Reorder DB").focus();
+        harness.run_steps(1);
+        harness.key_press_modifiers(egui::Modifiers::ALT, egui::Key::ArrowUp);
+        harness.run_steps(2);
+        assert_eq!(
+            harness.state().1,
+            [Command::ReorderGroup {
+                group_id: "g-1".into(),
+                tunnels: vec!["t-b".into(), "t-a".into(), "t-c".into()],
+            }]
+        );
+    }
+
+    /// API's picker leaves out DB (it starts after API) and says why, with
+    /// the chain; picking Web asks for the new dependencies.
+    #[test]
+    fn depends_on_leaves_out_loops_and_says_why() {
+        let mut harness = harness_with(
+            dev(&[("t-b", &["t-a"])]),
+            Snapshot::default(),
+            selected("g-1"),
+        );
+        harness.run_steps(2);
+        // Nothing yet: the ghost trigger.
+        harness.get_by_label("API starts after").click();
+        harness.run_steps(3);
+        let hint = "\u{201c}DB\u{201d} is hidden: it starts after this tunnel";
+        harness.get_by_label(hint);
+        assert!(test_util::drawn_text(&harness).contains("Web"));
+        assert!(
+            harness
+                .get_all_by_label("DB")
+                .all(|n| n.accesskit_node().role() != accesskit::Role::CheckBox)
+        );
+        harness.get_by_label(hint).hover();
+        harness.run_steps(40);
+        assert!(
+            test_util::drawn_text(&harness).contains("DB  \u{2192}  API"),
+            "{}",
+            test_util::drawn_text(&harness)
+        );
+        harness
+            .get_by_role_and_label(accesskit::Role::CheckBox, "Web")
+            .click();
+        harness.run_steps(2);
+        assert_eq!(
+            harness.state().1.last(),
+            Some(&Command::SetDependencies {
+                tunnel_id: "t-a".into(),
+                depends_on: vec!["t-c".into()],
+            })
+        );
+    }
+
+    /// More dependencies than fit: the rest in a "+N" chip.
+    #[test]
+    fn many_dependencies_collapse_into_plus_n() {
+        let mut data = AppData::new(PathBuf::from("app"));
+        let names = ["first long tunnel", "second long tunnel", "third", "fourth"];
+        for (i, name) in names.iter().enumerate() {
+            data.tunnels
+                .upsert_tunnel(Tunnel::ssh(&format!("t-{i}"), name, "h", Vec::new()));
+        }
+        let mut hub = Tunnel::ssh("t-hub", "hub", "h", Vec::new());
+        hub.depends_on = (0..names.len()).map(|i| format!("t-{i}")).collect();
+        data.tunnels.upsert_tunnel(hub);
+        data.tunnels.upsert_group(Group {
+            id: "g-1".into(),
+            name: "Work".into(),
+            tunnels: vec!["t-hub".into()],
+            start_on_launch: false,
+            start_deps_without_asking: false,
+        });
+        let mut harness = harness_with(Arc::new(data), Snapshot::default(), selected("g-1"));
+        harness.run_steps(3);
+        let drawn = test_util::drawn_text(&harness);
+        assert!(drawn.contains("+3"), "{drawn}");
     }
 
     #[test]

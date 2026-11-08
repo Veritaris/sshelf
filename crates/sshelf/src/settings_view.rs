@@ -176,7 +176,7 @@ impl SettingsView {
                         ui.spacing_mut().item_spacing.y = GAP;
                         self.appearance(ui);
                         self.connect(ui, ssh);
-                        self.window_and_tray(ui, ssh);
+                        self.window_and_tray(ui, (ssh, data), &mut commands);
                         self.privacy(ui, &data.settings);
                     });
                     ui.vertical(|ui| {
@@ -369,7 +369,12 @@ impl SettingsView {
         });
     }
 
-    fn window_and_tray(&mut self, ui: &mut Ui, ssh: Option<&SshInfo>) {
+    fn window_and_tray(
+        &mut self,
+        ui: &mut Ui,
+        (ssh, data): (Option<&SshInfo>, &AppData),
+        commands: &mut Vec<Command>,
+    ) {
         let p = &Palette::ONE_DARK;
         let tray = ssh.map(|s| &s.tray);
         let tray_available = tray.is_some_and(|t| *t == Ok(true));
@@ -462,6 +467,23 @@ impl SettingsView {
                 };
                 ui.add(egui::Label::new(RichText::new(text).size(13.0).color(color)).wrap());
             });
+            // "Don't ask again" for starts with dependencies (M15), at once.
+            let tunnels = &data.tunnels;
+            let remembered = tunnels.tunnels.iter().any(|t| t.start_deps_without_asking)
+                || tunnels.groups.iter().any(|g| g.start_deps_without_asking);
+            let mut forget = Button::new("Forget \u{201c}Don\u{2019}t ask again\u{201d} choices")
+                .ghost()
+                .small();
+            if !remembered {
+                forget = forget.tip("Nothing remembered");
+            }
+            if ui.add_enabled(remembered, forget).clicked() {
+                commands.push(Command::ForgetDontAsk);
+                self.notices.push(
+                    "\u{201c}Don\u{2019}t ask again\u{201d} cleared for all tunnels and groups"
+                        .into(),
+                );
+            }
         });
     }
 
@@ -1413,6 +1435,28 @@ mod tests {
     }
 
     #[test]
+    fn forget_dont_ask_is_enabled_only_with_something_remembered() {
+        let name = "Forget \u{201c}Don\u{2019}t ask again\u{201d} choices";
+        let mut harness = harness(data());
+        harness.run_steps(2);
+        assert!(harness.get_by_label(name).accesskit_node().is_disabled());
+
+        let mut remembered = data();
+        let mut tunnel = sshelf_core::tunnels::Tunnel::ssh("t-1", "API", "h", Vec::new());
+        tunnel.start_deps_without_asking = true;
+        remembered.tunnels.upsert_tunnel(tunnel);
+        let mut harness = self::harness(remembered);
+        harness.run_steps(2);
+        harness.get_by_label(name).click_accesskit();
+        harness.run_steps(2);
+        assert_eq!(harness.state().1, [Command::ForgetDontAsk]);
+        assert_eq!(
+            harness.state_mut().0.take_notices(),
+            ["\u{201c}Don\u{2019}t ask again\u{201d} cleared for all tunnels and groups"]
+        );
+    }
+
+    #[test]
     fn the_update_line_follows_the_checks_state() {
         let line = |s: &UpdateStatus| update_line(Some(s), s.enabled);
         assert_eq!(
@@ -1890,9 +1934,10 @@ mod tests {
         harness.step();
         harness.state_mut().0.reduce_motion = true;
         harness.step();
+        // Through accesskit: the card may sit below the window's fold.
         harness
             .get_by_role_and_label(egui::accesskit::Role::Switch, "Streamer mode")
-            .click();
+            .click_accesskit();
         harness.step();
         assert_eq!(harness.state_mut().0.take_streamer(), Some((true, false)));
         // The core applied it and sent the new data back.

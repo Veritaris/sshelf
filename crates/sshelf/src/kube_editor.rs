@@ -146,6 +146,8 @@ pub struct Env<'a> {
     pub problems: &'a [String],
     /// Scroll *Forward to* into view once (*Pick another pod*).
     pub scroll_to_resource: bool,
+    /// Every tunnel, for *Starts after* (M15).
+    pub tunnels: &'a sshelf_core::tunnels::TunnelsFile,
 }
 
 /// The kubectl fields, in the spec's order (the name comes before, from the
@@ -423,6 +425,7 @@ pub fn form(
             );
         });
     });
+    crate::tunnels_view::starts_after_row(ui, draft, env.tunnels);
 
     ui.add_space(8.0);
     ui.horizontal(|ui| {

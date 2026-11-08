@@ -87,6 +87,19 @@ enum Trigger {
     Button,
     /// An input-like field of this width (form selects).
     Field(f32),
+    /// A 26 px dark strip of this width with a leading icon (a group row's
+    /// *Depends on*, M15).
+    Compact(f32, char),
+}
+
+/// A line above a multi-select's footer with a tooltip (M15: tunnels left
+/// out to avoid a loop, and the chains that would close it).
+pub struct Hint {
+    pub text: String,
+    pub title: String,
+    pub body: String,
+    /// Shown in mono on an inset, one per line.
+    pub chains: Vec<String>,
 }
 
 /// What happened in the open panel this frame.
@@ -137,6 +150,12 @@ pub struct Dropdown<'a, T> {
     caption: Option<String>,
     /// The search text can be used as a value ([`Dropdown::show_typed`]).
     typed: bool,
+    /// A multi-select with nothing selected shows a ghost "+ text" instead
+    /// of its trigger.
+    ghost_empty: Option<&'a str>,
+    /// After "N selected" in the footer, e.g. " · waits until they run".
+    count_suffix: Option<&'a str>,
+    hint: Option<Hint>,
 }
 
 impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
@@ -176,7 +195,34 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
             status: None,
             caption: None,
             typed: false,
+            ghost_empty: None,
+            count_suffix: None,
+            hint: None,
         }
+    }
+
+    /// A 26 px strip `width` wide with `icon` before the chips (M15).
+    pub fn compact(mut self, width: f32, icon: char) -> Self {
+        self.look = Trigger::Compact(width, icon);
+        self
+    }
+
+    /// With nothing selected, a ghost "+ `text`" (M15's "+ Depends on").
+    pub fn ghost_empty(mut self, text: &'a str) -> Self {
+        self.ghost_empty = Some(text);
+        self
+    }
+
+    /// Said after "N selected" in the multi-select's footer.
+    pub fn count_suffix(mut self, text: &'a str) -> Self {
+        self.count_suffix = Some(text);
+        self
+    }
+
+    /// A line above the footer with its tooltip.
+    pub fn hint(mut self, hint: Hint) -> Self {
+        self.hint = Some(hint);
+        self
     }
 
     /// The options are still being listed: a row with the pulsing ring and
@@ -425,6 +471,9 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
             if self.caption.is_some() {
                 footer += CAPTION;
             }
+            if self.hint.is_some() {
+                footer += CAPTION;
+            }
             // The status row and the "Use “…”" row.
             let extra = usize::from(self.status.is_some())
                 + usize::from(self.usable_query(&state.query).is_some());
@@ -479,6 +528,9 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
                             if let Some(caption) = &self.caption {
                                 self.caption(ui, caption);
                             }
+                            if let Some(hint) = &self.hint {
+                                self.hint_line(ui, hint);
+                            }
                             if self.multi {
                                 let shown_count = self.search.map(|_| visible.len());
                                 let (clear, done) = self.footer(ui, selected.len(), shown_count);
@@ -529,6 +581,61 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
         );
     }
 
+    /// The hint above the footer: Lucide `info` and its text; hovering it
+    /// shows the tooltip (title, text, chains in mono on an inset).
+    fn hint_line(&self, ui: &mut Ui, hint: &Hint) {
+        let p = &Palette::ONE_DARK;
+        let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), CAPTION), Sense::hover());
+        ui.painter().hline(
+            (rect.left() - 4.0)..=(rect.right() + 4.0),
+            rect.top() + 4.0,
+            Stroke::new(1.0, p.selection),
+        );
+        let line = Rect::from_min_max(pos2(rect.left() + 8.0, rect.top() + 5.0), rect.max);
+        let response = ui.interact(line, self.id.with("hint"), Sense::hover());
+        response.widget_info(|| WidgetInfo::labeled(Role::Label, true, &hint.text));
+        let color = if response.hovered() {
+            p.text_strong
+        } else {
+            p.dim
+        };
+        ui.painter().text(
+            pos2(line.left() + 7.0, line.center().y),
+            Align2::CENTER_CENTER,
+            icons::INFO,
+            icons::font(14.0),
+            color,
+        );
+        let font = FontId::proportional(12.0);
+        let (shown, _) = text::elide(ui.painter(), &hint.text, &font, line.width() - 24.0);
+        ui.painter().text(
+            pos2(line.left() + 20.0, line.center().y),
+            Align2::LEFT_CENTER,
+            shown,
+            font,
+            color,
+        );
+        popup::tip(response, |ui| {
+            ui.set_max_width(300.0);
+            ui.spacing_mut().item_spacing.y = 6.0;
+            ui.label(egui::RichText::new(&hint.title).color(p.text_strong));
+            ui.label(&hint.body);
+            for chain in &hint.chains {
+                egui::Frame::new()
+                    .fill(p.bg_dark)
+                    .corner_radius(radius::CONTROL)
+                    .inner_margin(Margin::symmetric(8, 4))
+                    .show(ui, |ui| {
+                        ui.label(
+                            egui::RichText::new(chain)
+                                .font(FontId::monospace(11.0))
+                                .color(p.text_strong),
+                        );
+                    });
+            }
+        });
+    }
+
     /// "N selected · M shown", *Clear* and *Done*; returns whether each was
     /// clicked.
     fn footer(&self, ui: &mut Ui, selected: usize, shown: Option<usize>) -> (bool, bool) {
@@ -549,7 +656,9 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
         let done = child.add(Button::new("Done").primary().small()).clicked();
         let clear = child.add(Button::new("Clear").ghost().small()).clicked();
         let mut count = format!("{selected} selected");
-        if let Some(shown) = shown {
+        if let Some(suffix) = self.count_suffix {
+            count.push_str(suffix);
+        } else if let Some(shown) = shown {
             count.push_str(&format!(" · {shown} shown"));
         }
         child.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
@@ -611,14 +720,19 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
     /// open; a multi-select shows `chips` (or the placeholder).
     fn trigger(&self, ui: &mut Ui, open: bool, chips: &[String]) -> Response {
         let p = &Palette::ONE_DARK;
+        if let Some(text) = self.ghost_empty.filter(|_| self.multi && chips.is_empty()) {
+            return self.ghost_trigger(ui, text);
+        }
         let (font, size) = match self.look {
             Trigger::Button => (FontId::proportional(12.0), None),
             Trigger::Field(width) => (self.label_font(), Some(vec2(width, 32.0))),
+            Trigger::Compact(width, _) => (FontId::proportional(12.0), Some(vec2(width, 26.0))),
         };
         let galley = ui
             .painter()
             .layout_no_wrap(self.trigger.clone(), font, p.text);
         let size = size.unwrap_or(vec2(galley.size().x + 10.0 + 6.0 + 14.0 + 8.0, 28.0));
+        let size = vec2(size.x.min(ui.available_width().max(80.0)), size.y);
         let (rect, response) = ui.allocate_exact_size(size, Sense::click());
         let enabled = response.enabled();
         let name = self.name;
@@ -663,6 +777,24 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
                     egui::StrokeKind::Inside,
                 );
             }
+            Trigger::Compact(_, icon) => {
+                painter.rect_filled(rect, radius::CONTROL, p.bg_dark.lerp_to_gamma(p.bg, hover));
+                if open {
+                    painter.rect_stroke(
+                        rect,
+                        radius::CONTROL,
+                        Stroke::new(1.0, p.accent),
+                        egui::StrokeKind::Inside,
+                    );
+                }
+                painter.text(
+                    pos2(rect.left() + 12.0, rect.center().y),
+                    Align2::CENTER_CENTER,
+                    icon,
+                    icons::font(12.0),
+                    p.dim,
+                );
+            }
         }
         if self.multi && !chips.is_empty() {
             self.chips(ui, rect, chips);
@@ -670,6 +802,7 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
             let left = match self.look {
                 Trigger::Button => 10.0,
                 Trigger::Field(_) => 12.0,
+                Trigger::Compact(..) => 24.0,
             };
             let color = if self.multi { p.dim } else { p.text };
             ui.painter().galley(
@@ -690,12 +823,59 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
         } else {
             icons::CHEVRON_DOWN
         };
+        let compact = matches!(self.look, Trigger::Compact(..));
         ui.painter().text(
             pos2(rect.right() - 8.0 - 7.0, rect.center().y),
             Align2::CENTER_CENTER,
             chevron,
-            icons::font(14.0),
-            p.text,
+            icons::font(if compact { 12.0 } else { 14.0 }),
+            if compact { p.dim } else { p.text },
+        );
+        response.on_hover_cursor(CursorIcon::PointingHand)
+    }
+
+    /// A ghost "+ `text`" (nothing selected yet): Lucide `plus` 12 and 12 px
+    /// text, the dark background and strong text on hover.
+    fn ghost_trigger(&self, ui: &mut Ui, text: &str) -> Response {
+        let p = &Palette::ONE_DARK;
+        let font = FontId::proportional(12.0);
+        let galley = ui.painter().layout_no_wrap(text.to_string(), font, p.dim);
+        let (rect, response) = ui.allocate_exact_size(
+            vec2(6.0 + 12.0 + 4.0 + galley.size().x + 8.0, 26.0),
+            Sense::click(),
+        );
+        let enabled = response.enabled();
+        let name = self.name;
+        response.widget_info(|| {
+            let mut info = WidgetInfo::labeled(Role::ComboBox, enabled, name);
+            info.current_text_value = Some(String::new());
+            info
+        });
+        let hover = motion::fade(
+            ui.ctx(),
+            response.id.with("hover"),
+            response.hovered(),
+            timing::HOVER,
+            motion::ease_out,
+        );
+        let color = p.dim.lerp_to_gamma(p.text_strong, hover);
+        let painter = ui.painter();
+        painter.rect_filled(
+            rect,
+            radius::CONTROL,
+            egui::Color32::TRANSPARENT.lerp_to_gamma(p.bg_dark, hover),
+        );
+        painter.text(
+            pos2(rect.left() + 12.0, rect.center().y),
+            Align2::CENTER_CENTER,
+            icons::PLUS,
+            icons::font(12.0),
+            color,
+        );
+        painter.galley(
+            pos2(rect.left() + 22.0, rect.center().y - galley.size().y / 2.0),
+            galley,
+            color,
         );
         response.on_hover_cursor(CursorIcon::PointingHand)
     }
@@ -707,13 +887,18 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
     fn chips(&self, ui: &mut Ui, rect: Rect, labels: &[String]) {
         let p = &Palette::ONE_DARK;
         let ctx = ui.ctx().clone();
-        let font = FontId::proportional(12.0);
-        let plus_font = fonts::semibold(12.0);
+        // Compact: after the icon, 20 px chips of at most 110 px.
+        let (start, chip_height, widest, size) = match self.look {
+            Trigger::Compact(..) => (24.0, 20.0, 110.0, 11.0),
+            _ => (6.0, CHIP, f32::INFINITY, 12.0),
+        };
+        let font = FontId::proportional(size);
+        let plus_font = fonts::semibold(size);
         let painter = ui.painter().clone();
         let known_id = self.id.with("chips_known");
         let known: Option<Vec<String>> = ctx.data(|d| d.get_temp(known_id));
         let right = rect.right() - 30.0;
-        let mut x = rect.left() + 6.0;
+        let mut x = rect.left() + start;
         let plus_width = |n: usize| {
             painter
                 .layout_no_wrap(format!("+{n}"), plus_font.clone(), p.bg_dark)
@@ -730,14 +915,16 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
                 0.0
             };
             let room = right - x - reserve;
-            let (text, cut) = text::elide(&painter, label, &font, (room - 16.0).max(0.0));
+            let limit = (room - 16.0).max(0.0);
+            let (_, cut) = text::elide(&painter, label, &font, limit);
             if shown > 0 && (cut || room < 40.0) {
                 break;
             }
+            let (text, _) = text::elide(&painter, label, &font, limit.min(widest - 16.0));
             let galley = painter.layout_no_wrap(text, font.clone(), p.text_strong);
             let chip = Rect::from_min_size(
-                pos2(x, rect.center().y - CHIP / 2.0),
-                vec2(galley.size().x + 16.0, CHIP),
+                pos2(x, rect.center().y - chip_height / 2.0),
+                vec2(galley.size().x + 16.0, chip_height),
             );
             let id = self.id.with(("chip", label));
             let new = known.as_ref().is_some_and(|k| !k.contains(label));
@@ -762,8 +949,8 @@ impl<'a, T: Copy + PartialEq> Dropdown<'a, T> {
         }
         let galley = painter.layout_no_wrap(format!("+{}", hidden.len()), plus_font, p.bg_dark);
         let chip = Rect::from_min_size(
-            pos2(x, rect.center().y - CHIP / 2.0),
-            vec2(galley.size().x + 16.0, CHIP),
+            pos2(x, rect.center().y - chip_height / 2.0),
+            vec2(galley.size().x + 16.0, chip_height),
         );
         painter.rect_filled(chip, radius::CONTROL, p.accent);
         painter.galley(

@@ -167,6 +167,8 @@ pub struct TunnelRow {
     pub reconnecting: bool,
     /// The groups holding it.
     pub used_by: Vec<String>,
+    /// Its state as dependencies make it ("Waiting for dev k3s api", M15).
+    pub dep_note: Option<String>,
 }
 
 /// A host launched from sshelf: its alias, and how both menus show it (in
@@ -275,6 +277,8 @@ pub fn model(
                         Owner::Manual => None,
                     })
                     .collect(),
+                dep_note: crate::tunnels_view::dep_state(tunnel, Some(status), &data.tunnels)
+                    .map(|(text, _)| text),
             });
         }
     }

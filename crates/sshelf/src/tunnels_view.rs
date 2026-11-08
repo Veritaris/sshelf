@@ -25,7 +25,7 @@ use crate::theme::{Palette, radius, timing};
 use crate::tour::steps;
 use crate::tour::targets::Target;
 use crate::widgets::button::{self, Button};
-use crate::widgets::dropdown::{Choice, Dropdown};
+use crate::widgets::dropdown::{Choice, Dropdown, Hint};
 use crate::widgets::field::TextField;
 use crate::widgets::switch::switch;
 use crate::widgets::{marks, masked, nav, popup, text};
@@ -133,6 +133,112 @@ fn owners_text(owners: &[&Owner], file: &TunnelsFile) -> String {
 pub fn tunnel_name(file: &TunnelsFile, id: &str) -> String {
     file.tunnel(id)
         .map_or_else(|| id.to_string(), |t| t.name.clone())
+}
+
+/// The editor's *Starts after* row, under *Reconnect* (both tunnel types).
+pub fn starts_after_row(ui: &mut Ui, draft: &mut Tunnel, file: &TunnelsFile) {
+    editor_row(ui, ("Starts after", true, LABEL), |ui, _| {
+        let size = vec2(ui.available_width(), 32.0);
+        ui.allocate_ui_with_layout(size, Layout::left_to_right(Align::Center), |ui| {
+            if let Some(deps) = depends_on(ui, draft, file, None, 280.0) {
+                draft.depends_on = deps;
+            }
+        });
+    });
+}
+
+/// *Depends on* (a group row) / *Starts after* (the editor), SPEC.md §10
+/// *Group order and dependencies*: the shared multi-select over every other
+/// tunnel (`group`'s first, then the rest), leaving out those that already
+/// start after `tunnel` (they'd make a loop) with a line that says so.
+/// Returns the new dependencies when they changed.
+pub fn depends_on(
+    ui: &mut Ui,
+    tunnel: &Tunnel,
+    file: &TunnelsFile,
+    group: Option<&sshelf_core::tunnels::Group>,
+    width: f32,
+) -> Option<Vec<String>> {
+    let masked = privacy::get(ui.ctx()).on;
+    let in_group = |id: &str| group.is_some_and(|g| g.tunnels.iter().any(|t| t == id));
+    let mut others: Vec<&Tunnel> = file.tunnels.iter().filter(|t| t.id != tunnel.id).collect();
+    others.sort_by_key(|t| !in_group(&t.id));
+    let (hidden, offered): (Vec<&Tunnel>, Vec<&Tunnel>) = others
+        .into_iter()
+        .partition(|t| sshelf_core::deps::reaches(file, &t.id, &tunnel.id));
+    let ids: Vec<String> = offered.iter().map(|t| t.id.clone()).collect();
+    let choices: Vec<Choice<usize>> = offered
+        .iter()
+        .enumerate()
+        .map(|(i, t)| {
+            let note = if group.is_some() && !in_group(&t.id) {
+                "other group".to_string()
+            } else if t.is_kubectl() {
+                kube_place(t, masked)
+            } else {
+                privacy::get(ui.ctx()).alias_text(&t.host).into_owned()
+            };
+            Choice {
+                icon: Some(if t.is_kubectl() {
+                    icons::SHIP_WHEEL
+                } else {
+                    icons::TERMINAL
+                }),
+                note: Some(note),
+                ..Choice::new(i, &t.name)
+            }
+        })
+        .collect();
+    let mut picked: Vec<usize> = tunnel
+        .depends_on
+        .iter()
+        .filter_map(|d| ids.iter().position(|id| id == d))
+        .collect();
+    let name = format!("{} starts after", tunnel.name);
+    let mut dropdown = Dropdown::with_choices(("depends_on", &tunnel.id), &name, choices, "")
+        .compact(width, icons::CORNER_DOWN_RIGHT)
+        .ghost_empty("Depends on")
+        .searchable("tunnels")
+        .panel_width(340.0)
+        .mono_notes()
+        .count_suffix(" \u{b7} waits until they run");
+    if !hidden.is_empty() {
+        let this = &tunnel.name;
+        let text = match hidden.as_slice() {
+            [one] => format!(
+                "\u{201c}{}\u{201d} is hidden: it starts after this tunnel",
+                one.name
+            ),
+            many => format!(
+                "{} tunnels hidden: they start after this tunnel",
+                many.len()
+            ),
+        };
+        let chains = hidden
+            .iter()
+            .flat_map(|h| sshelf_core::deps::chains(file, &h.id, &tunnel.id))
+            .take(3)
+            .map(|chain| {
+                chain
+                    .iter()
+                    .map(|id| tunnel_name(file, id))
+                    .collect::<Vec<_>>()
+                    .join("  \u{2192}  ")
+            })
+            .collect();
+        dropdown = dropdown.hint(Hint {
+            text,
+            title: "Hidden to avoid a loop".into(),
+            body: format!(
+                "They already start after \u{201c}{this}\u{201d}, so \u{201c}{this}\u{201d} \
+                 can\u{2019}t start after them:"
+            ),
+            chains,
+        });
+    }
+    dropdown
+        .show_multi(ui, &mut picked)
+        .then(|| picked.iter().map(|&i| ids[i].clone()).collect())
 }
 
 /// "40 s", "14 m", "2 h 14 m" since `since`; asks for a repaint when the
@@ -360,6 +466,54 @@ pub fn mark(ui: &mut Ui, state: &TunnelState) {
 
 /// A row's second line and its colour. `kubectl_missing`: kubectl wasn't
 /// found, so a kubectl tunnel can't start.
+/// The state as dependencies make it (SPEC.md §10 *Group order and
+/// dependencies*): "Waiting for dev k3s api", "Not started · dev k3s api
+/// failed", "Dependency loop", "Stopping after dev mailpit", "Running ·
+/// needed by dev mailpit"; `None` for every other state.
+pub fn dep_state(
+    tunnel: &Tunnel,
+    status: Option<&TunnelStatus>,
+    file: &TunnelsFile,
+) -> Option<(String, Color32)> {
+    let p = &Palette::ONE_DARK;
+    let status = status?;
+    let after = status.after.as_deref().map(|id| tunnel_name(file, id));
+    match (&status.state, status.failure) {
+        (TunnelState::Starting, _) if status.pid.is_none() => {
+            Some((format!("Waiting for {}", after?), p.yellow))
+        }
+        (TunnelState::Failed(reason), Some(FailureKind::NotStarted)) => {
+            Some((reason.clone(), p.red))
+        }
+        (TunnelState::Failed(_), Some(FailureKind::DependencyLoop)) => {
+            Some(("Dependency loop".into(), p.red))
+        }
+        (TunnelState::Stopping, _) => Some((format!("Stopping after {}", after?), p.dim)),
+        (TunnelState::Running, _) => {
+            // Held only because something needs it: a tunnel, or a group it
+            // isn't a member of.
+            let mut needers = Vec::new();
+            for owner in &status.owners {
+                match owner {
+                    Owner::NeededBy(id) => needers.push(tunnel_name(file, id)),
+                    Owner::Group(id) => match file.group(id) {
+                        Some(g) if !g.tunnels.contains(&tunnel.id) => needers.push(g.name.clone()),
+                        _ => return None,
+                    },
+                    Owner::Manual => return None,
+                }
+            }
+            (!needers.is_empty()).then(|| {
+                (
+                    format!("Running \u{b7} needed by {}", needers.join(", ")),
+                    p.green,
+                )
+            })
+        }
+        _ => None,
+    }
+}
+
 fn sub_line(
     ctx: &egui::Context,
     tunnel: &Tunnel,
@@ -370,6 +524,9 @@ fn sub_line(
     let p = &Palette::ONE_DARK;
     let state = status.map_or(TunnelState::Stopped, |s| s.state.clone());
     let masked = privacy::get(ctx).on;
+    if let Some(line) = dep_state(tunnel, status, file) {
+        return line;
+    }
     if tunnel.is_kubectl() {
         return kube_sub_line(ctx, tunnel, status, file, kubectl_missing);
     }
@@ -932,6 +1089,32 @@ impl TunnelsView {
                             .color(p.dim),
                     );
                 }
+                // Dependencies both ways (M15), each a link to its tunnel.
+                let needed_by: Vec<String> = data
+                    .tunnels
+                    .tunnels
+                    .iter()
+                    .filter(|t| t.depends_on.contains(&tunnel.id))
+                    .map(|t| t.id.clone())
+                    .collect();
+                for (label, ids) in [
+                    ("Starts after:", &tunnel.depends_on),
+                    ("Needed by:", &needed_by),
+                ] {
+                    if ids.is_empty() {
+                        continue;
+                    }
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        ui.label(RichText::new(label).size(13.0).color(p.dim));
+                        for id in ids {
+                            let name = tunnel_name(&data.tunnels, id);
+                            if button::link(ui, &name, 13.0).clicked() {
+                                self.select(id);
+                            }
+                        }
+                    });
+                }
             });
             ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
@@ -1202,6 +1385,7 @@ impl TunnelsView {
                         taken: taken.clone(),
                         problems: &problems,
                         scroll_to_resource,
+                        tunnels: &data.tunnels,
                     };
                     kube_editor::form(ui, draft, lookups, &env, commands);
                     return;
@@ -1256,6 +1440,7 @@ impl TunnelsView {
                         );
                     });
                 });
+                starts_after_row(ui, draft, &data.tunnels);
 
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
@@ -2276,6 +2461,70 @@ mod tests {
                 target: Some("db:5432".into()),
             }],
         )
+    }
+
+    #[test]
+    fn dependency_states_read_as_the_spec_says() {
+        let mut file = TunnelsFile::default();
+        file.upsert_tunnel(Tunnel::ssh("t-k", "k3s", "h", Vec::new()));
+        file.upsert_tunnel(Tunnel::ssh("t-m", "mailpit", "h", Vec::new()));
+        let k3s = file.tunnel("t-k").unwrap().clone();
+        let status = |state, failure, after: Option<&str>, owners: &[Owner]| TunnelStatus {
+            state,
+            owners: owners.iter().cloned().collect(),
+            log: VecDeque::new(),
+            pid: None,
+            failure,
+            reconnect: None,
+            running_since: None,
+            after: after.map(Into::into),
+        };
+        let text = |s: TunnelStatus| dep_state(&k3s, Some(&s), &file).map(|(t, _)| t);
+        assert_eq!(
+            text(status(TunnelState::Starting, None, Some("t-m"), &[])),
+            Some("Waiting for mailpit".into())
+        );
+        assert_eq!(
+            text(status(
+                TunnelState::Failed("Not started \u{b7} mailpit failed".into()),
+                Some(FailureKind::NotStarted),
+                Some("t-m"),
+                &[],
+            )),
+            Some("Not started \u{b7} mailpit failed".into())
+        );
+        assert_eq!(
+            text(status(
+                TunnelState::Failed("x".into()),
+                Some(FailureKind::DependencyLoop),
+                None,
+                &[],
+            )),
+            Some("Dependency loop".into())
+        );
+        assert_eq!(
+            text(status(TunnelState::Stopping, None, Some("t-m"), &[])),
+            Some("Stopping after mailpit".into())
+        );
+        assert_eq!(
+            text(status(
+                TunnelState::Running,
+                None,
+                None,
+                &[Owner::NeededBy("t-m".into())]
+            )),
+            Some("Running \u{b7} needed by mailpit".into())
+        );
+        // Started by hand too: nothing to add.
+        assert_eq!(
+            text(status(
+                TunnelState::Running,
+                None,
+                None,
+                &[Owner::Manual, Owner::NeededBy("t-m".into())]
+            )),
+            None
+        );
     }
 
     fn fixture(state: TunnelState) -> Fixture {

@@ -366,6 +366,7 @@ fn reset(harness: &mut Harness<'static, SshelfApp>) {
     app.error = None;
     app.close.dismiss();
     app.hostkeys = HostKeyModals::default();
+    app.start_prompts = Default::default();
     app.hosts.editor = Default::default();
     app.tunnels.close_editor();
     app.groups.close_editor();
@@ -506,6 +507,16 @@ fn screens() -> Vec<(&'static str, Setup)> {
                 },
             };
             h.state_mut().hostkeys.on_changed(Arc::new(prompt));
+        }),
+        ("start dialog", |h| {
+            let app = h.state_mut();
+            app.tunnel_states = Some(tunnel_states(TunnelState::Stopped));
+            app.start_prompts
+                .on_prompt(Arc::new(sshelf_core::core::StartPrompt {
+                    id: 3,
+                    target: sshelf_core::core::StartTarget::Tunnel("t-kube".into()),
+                    deps: vec!["t-web".into()],
+                }));
         }),
         ("close dialog", |h| {
             let app = h.state_mut();

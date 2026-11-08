@@ -23,6 +23,7 @@ mod orphans_window;
 mod privacy;
 mod settings_view;
 mod sidebar;
+mod start_prompt;
 mod status_bar;
 #[cfg(test)]
 mod test_util;

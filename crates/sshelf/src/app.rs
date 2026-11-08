@@ -27,6 +27,7 @@ use crate::orphans_window::{self, OrphansWindow};
 use crate::privacy::{self, Privacy};
 use crate::settings_view::SettingsView;
 use crate::sidebar::{self, View};
+use crate::start_prompt::StartPrompts;
 use crate::theme::{self, Palette};
 use crate::toast::Toasts;
 use crate::tour::sandbox::{self, FakeSsh};
@@ -121,6 +122,8 @@ pub struct SshelfApp {
     settings: SettingsView,
     orphans: OrphansWindow,
     hostkeys: HostKeyModals,
+    /// The start dialogs of M15 (dependencies that would start too).
+    start_prompts: StartPrompts,
     close: CloseGuard,
     /// `None` when the platform could not create one.
     tray: Option<Tray>,
@@ -218,6 +221,7 @@ impl SshelfApp {
             settings: SettingsView::default(),
             orphans: OrphansWindow::default(),
             hostkeys: HostKeyModals::default(),
+            start_prompts: StartPrompts::default(),
             close: CloseGuard::default(),
             tray,
             tray_model: TrayModel::default(),
@@ -344,8 +348,11 @@ impl SshelfApp {
                 } => self.hosts.detail.on_resolved(alias, generation, result),
                 Event::Ssh(info) => self.ssh = Some(info),
                 Event::Kubectl(info) => self.kubectl = Some(info),
-                // The dialog comes with M15's UI step.
-                Event::StartPrompt(_) => {}
+                // A start from the tray may need an answer: show the window.
+                Event::StartPrompt(prompt) => {
+                    self.start_prompts.on_prompt(prompt);
+                    close_guard::show(ctx);
+                }
                 Event::Updates(status) => {
                     self.settings.on_updates(status.clone());
                     self.updates = Some(status);
@@ -654,6 +661,9 @@ impl eframe::App for SshelfApp {
                     commands =
                         self.groups
                             .show(ui, self.data.as_deref(), self.tunnel_states.as_deref());
+                    for notice in self.groups.take_notices() {
+                        self.toasts.push(notice);
+                    }
                 }
                 View::Settings => {
                     commands = self.settings.show(
@@ -684,6 +694,11 @@ impl eframe::App for SshelfApp {
             commands.extend(self.orphans.show(ui.ctx(), data, &hosts));
         }
         commands.extend(self.hostkeys.show(ui.ctx()));
+        if let Some(data) = &self.data {
+            let empty = Snapshot::default();
+            let states = self.tunnel_states.as_deref().unwrap_or(&empty);
+            commands.extend(self.start_prompts.show(ui.ctx(), data, states));
+        }
         for notice in self.hostkeys.take_notices() {
             self.toasts.push(notice);
         }

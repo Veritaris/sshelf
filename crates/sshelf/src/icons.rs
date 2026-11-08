@@ -27,12 +27,14 @@ pub const CIRCLE_CHECK: char = '\u{e226}';
 pub const CIRCLE_X: char = '\u{e084}';
 pub const COMPASS: char = '\u{e09b}';
 pub const COPY: char = '\u{e09e}';
+pub const CORNER_DOWN_RIGHT: char = '\u{e0a2}';
 pub const EXTERNAL_LINK: char = '\u{e0b9}';
 pub const EYE: char = '\u{e0ba}';
 pub const EYE_OFF: char = '\u{e0bb}';
 pub const FILE_TEXT: char = '\u{e0cc}';
 pub const FOLDER: char = '\u{e0d7}';
 pub const GIT_COMMIT_HORIZONTAL: char = '\u{e0e3}';
+pub const GRIP_VERTICAL: char = '\u{e0eb}';
 pub const INFO: char = '\u{e0f9}';
 pub const KEY_ROUND: char = '\u{e4a3}';
 pub const LAYERS: char = '\u{e529}';
@@ -76,12 +78,14 @@ pub const ALL: &[char] = &[
     CIRCLE_X,
     COMPASS,
     COPY,
+    CORNER_DOWN_RIGHT,
     EXTERNAL_LINK,
     EYE,
     EYE_OFF,
     FILE_TEXT,
     FOLDER,
     GIT_COMMIT_HORIZONTAL,
+    GRIP_VERTICAL,
     INFO,
     KEY_ROUND,
     LAYERS,
