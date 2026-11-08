@@ -65,7 +65,7 @@ Location: the platform config directory for `sshelf` (via `directories`). Human-
 |---|---|
 | `settings.toml` | ssh binary override, terminal template, close behavior choice, UI prefs, onboarding tour state (`tour`, M10), streamer mode (`streamer_mode`, `streamer_hide_aliases`, M11), kubectl override (`kubectl_path`, M13), update check (`update_check`, `update_check_noted`, M14) |
 | `hosts.toml` | Per-host metadata keyed by alias: tags, notes, favorite, color, display order |
-| `tunnels.toml` | Tunnel definitions and groups (version 2 from M13, for kubectl tunnels) |
+| `tunnels.toml` | Tunnel definitions and groups (version 2 from M13, for kubectl tunnels; version 3 from M15, for dependencies) |
 | `history.toml` | Recent connections launched from the app (for the tray menu) |
 | `updates.toml` | The update check's state (M14): last check time and result, ETag, the latest release (version, URL, date), the skipped version. Written by sshelf only |
 | `running.toml` | The tunnels running now: their ssh process (pid, start time, arguments) and owners. Written by the supervisor whenever that changes, empty after a clean quit; read once at start to take tunnels over after a crash (§7 *Surviving a crash*, M12) |
@@ -225,12 +225,50 @@ ssh -v -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o BatchMode=yes
 ### Supervisor semantics
 
 - **Owners and reference counting (from day one):** a tunnel's process runs while at least one owner holds it. Owners are: a manual start, or a group. Starting the same tunnel twice never spawns a second process.
-- **Start group:** pre-check all ports first; if any conflict, report it and start nothing. Otherwise start tunnels in parallel.
+- **Start group:** pre-check all ports first; if any conflict, report it and start nothing. Otherwise start tunnels in parallel (from M15: in the group's order, each waiting for its dependencies, §7 *Order and dependencies*).
 - **Partial failure:** remaining tunnels keep running; the group shows **degraded** (e.g. 2/3) with a *Retry failed* action.
 - **Stop group:** releases the group's ownership; a tunnel stops only when no owners remain. If a tunnel stays up, show why ("still used by: Work on staging").
 - States per tunnel: `Stopped`, `Starting`, `Running`, `Stopping`, `Failed(reason)`, plus host key / auth sub-states (§9). `Failed` keeps the tunnel's owners and shows ssh's last non-debug stderr line; starting it (or its group) again retries it. A start that arrives while a tunnel is `Stopping` runs once the old process has exited, so the two never compete for a port.
 - The last 200 stderr lines per tunnel are kept in memory (not persisted).
 - Tunnels stop when the app quits (no detached background processes). After a crash, see *Surviving a crash*.
+
+### Order and dependencies (milestone 15)
+
+A group's tunnels have an order the user sets by dragging, and a tunnel can depend on other tunnels: it starts only once they are Running. UI: §10 *Group order and dependencies*.
+
+```toml
+version = 3
+
+[[tunnel]]
+id = "t-6b1d0e42"
+name = "dev mailpit"
+type = "kubectl"
+depends_on = ["t-3f9a1c07"]          # tunnel ids; missing = none
+start_deps_without_asking = true     # "Don't ask again"; missing = false
+# …
+
+[[group]]
+id = "g-5b07c9e1"
+name = "Dev"
+tunnels = ["t-a0c3d1e8", "t-3f9a1c07", "t-6b1d0e42", "t-9e77b210"]  # list order = start order
+start_deps_without_asking = false    # the group's own "Don't ask again"
+```
+
+- **File version:** `tunnels.toml` becomes version 3; the v2 → v3 migration changes nothing but the version (with the backup, §3), so an older sshelf opens it read-only instead of dropping the dependencies when it rewrites the file.
+- **Order:** a group's `tunnels` list is its order. It must keep every tunnel below the tunnels it depends on; when a dependency is added, the list is reordered stably (each tunnel moved down just enough), and a hand-edited file that breaks the rule is fixed on load without rewriting it.
+- **Dependencies** belong to the tunnel and apply everywhere: in every group, and when the tunnel is started alone. A dependency may be a tunnel outside the group. Loops are not allowed: the UI never offers one, and a hand-edited file with a loop loads but its tunnels show "Dependency loop" and none of them starts.
+- **Start group:** the port pre-check covers every tunnel that will start, outside dependencies included. Then the tunnels start in list order without waiting for each other, except that a tunnel whose dependencies are not all *Running* waits for them (*Waiting for X*, a sub-state of *Starting*). Tunnels without dependencies start at once, as before.
+  - **Outside dependencies** start too, owned by the group ("needed by Dev"), after the dialog (§10) unless the group's `start_deps_without_asking` is set. A group with *Start with sshelf* starts them without asking.
+- **Failure:** when a dependency fails, or is itself not started, its waiting dependents are not started: `Failed(NotStarted { dependency })`, "Not started · dev k3s api failed" (no process, no auto-reconnect). The group is degraded. *Retry failed* retries the failed tunnels and the not-started ones in order. If a dependency recovers by itself (auto-reconnect), the dependents still waiting start then.
+- **Drops while running:** a dependency that drops does not stop its dependents. A dependent that exits and has auto-reconnect waits until its dependencies are *Running* again before its next attempt (the countdown shows "waiting for dev k3s api").
+- **Stop group:** bottom-up. A tunnel is stopped only after every running tunnel that depends on it has exited ("Stopping after dev mailpit"); unrelated tunnels stop at once. Owners still apply: a tunnel that another owner holds keeps running.
+- **Starting a tunnel alone** (Tunnels, the tray, a group's tunnel row) whose dependencies aren't all Running: unless `start_deps_without_asking` is set on it, the dialog asks first (§10). On *Start*, each dependency not running gets an owner `NeededBy(tunnel id)` and starts first; a failed one is retried. The tunnel waits for them as in a group.
+  - **NeededBy owners** are released when the dependent stops (by any path); a dependency then stops when no owners remain, as usual. Stopping a tunnel that a running dependent needs keeps it up ("Running · needed by dev mailpit"), like a tunnel shared by two groups.
+  - From the tray, the window is shown for the dialog (like a host-key prompt, §10 *Close behavior*).
+- **"Don't ask again"** is cleared (`start_deps_without_asking = false`) whenever that tunnel's `depends_on` changes, or, for a group, whenever the set of its outside dependencies changes. *Settings › Window & tray › Forget “Don’t ask again” choices* clears all of them.
+- **Deleting a tunnel** removes its id from every `depends_on` (the delete dialog lists the tunnels that depended on it).
+- **Crash survival (M12):** `running.toml` records `NeededBy` owners like the others.
+- **Not in scope:** dependencies on hosts or ports instead of tunnels; health checks before a dependent starts; ordering the Tunnels list or the Groups list.
 
 ### Surviving a crash (milestone 12)
 
@@ -748,6 +786,28 @@ sshelf shows its own version and says when a newer release is out on GitHub. It 
   - **Toasts:** the close button is 24 px on every toast, the sticky ones too (the boards draw 28 px ghost buttons there; the spec wins); its accessible name is "Close notification", never the toast's text (streamer mode). A message wider than the toast still widens it, the close button after it. Sticky toasts are drawn only outside the tour and fade in like the others.
   - **Rail:** the tooltip reads "Settings · sshelf 0.4.0 is available" before the shortcut (the board puts `Ctrl+4` in the middle); the item's accessible name stays "Settings". The dot fades in 180 ms.
 
+### Group order and dependencies (milestone 15)
+
+The UI for §7 *Order and dependencies*. Reference boards: `Group-Order` (playable: drag, *Depends on*, start / failure / stop, the start-alone dialog) and `Group-Order-States` (drag, the picker, the hidden-loop line and tooltip, row states, both dialogs, rules, data), and the updated `A-Groups`.
+
+- **Group detail:** the description line reads "Starts tunnels top to bottom, in parallel; a tunnel waits for the ones it depends on. Stops in reverse." The *Tunnels in this group* heading adds "drag ⠿ to reorder · start order".
+- **Tunnel rows** (64 px, 8 px corners, `#2C313A`): grip, status mark, type mark, then the name over the *Depends on* control, then host, first forward, state.
+- **Drag to reorder** (group detail only):
+  - Lucide `grip-vertical` 16 (Comment Grey) appears on row hover at the left; cursor `Grab`, `Grabbing` while dragging.
+  - The dragged row gets the selected background `#3E4451` and a 1 px Magenta inset outline (no shadow); the others slide out of the way (180 ms in-out, the list motion); release saves at once (no *Edit*; also while the group runs, applying at its next start) with the toast "Order saved · applies the next time Dev starts". `Esc` cancels. Keyboard: `Alt+↑` / `Alt+↓` move the focused row.
+  - A row can't pass a tunnel it depends on, or one that depends on it: the gap stops there and a Light Yellow line under the list (Lucide `triangle-alert`) says why while dragging: "“dev mailpit” starts after “dev k3s api”, so it stays below."
+- **Depends on** (the row's second line) is the shared multi-select dropdown, searchable (§10 *Dropdown*):
+  - **Trigger:** with no dependencies a ghost "+ Depends on" (Lucide `plus` 12, 11 px text); with some, a 280 px × 26 px trigger: Lucide `corner-down-right` 12, the dependency names as chips (as many as fit, each up to 110 px), the rest in a Magenta "+N" chip whose hover shows them as chips in a tooltip (300 ms), and the chevron. No × on chips: removal is in the panel.
+  - **Panel** (340 px, the component's roll, search, ticks, sliding highlight): every other tunnel, this group's first, then the rest; each row's note on the right is its host, or "other group". Footer: "N selected · waits until they run", *Clear*, *Done*.
+  - **Loops are left out:** tunnels that already start after this one, directly or through others, are not listed. When any are, a line under the list says "2 tunnels hidden: they start after this tunnel" (or "“dev mailpit” is hidden: it starts after this tunnel") with Lucide `info`; hovering it (the standard 400 ms tooltip, above the line) shows "Hidden to avoid a loop", "They already start after “dev k3s api”, so “dev k3s api” can’t start after them:" and each chain in mono on an inset: `dev postgres → dev mailpit → dev k3s api`.
+  - Picking a dependency that sits lower in the list reorders the list (§7) and shows "Order updated: every tunnel now sits below the tunnels it depends on." under it.
+  - The same control is *Starts after* in the tunnel editor (under *Reconnect*); the tunnel detail shows "Starts after: …" and "Needed by: …" lines with links.
+- **States** (also in the Tunnels list, group rows and the tray menu): "Waiting for dev k3s api" (Yellow ring), "Not started · dev k3s api failed" (Red dot), "Running · needed by dev mailpit" (Green dot), "Stopping after dev mailpit" (grey ring), "Dependency loop" (Red dot). The group chip counts as before ("Starting · 3 of 4", "Degraded · 2 of 4").
+- **Start-alone dialog** (standard modal; 500 px): a 36 px Blue tile with `corner-down-right`, "Start “dev mailpit”?", "It depends on a tunnel that isn’t running. sshelf starts it first, then “dev mailpit”, and stops it again when nothing needs it." (plural forms for several), a row per dependency that isn't Running (status mark, type mark, name, host and first forward, its state; "Failed · retried"), the switch "Don’t ask again for “dev mailpit”" (off) with "Asks again if its dependencies change.", *Cancel* (focused) and *Start N tunnels* (primary).
+  - **Group variant:** "Start “Dev”?", "“dev postgres” depends on a tunnel that isn’t in this group. sshelf starts it too, and stops it when Dev stops (unless something else uses it).", the outside tunnels with "needed by dev postgres", "Don’t ask again for “Dev”", *Start group and N more*.
+- **Settings › Window & tray:** *Forget “Don’t ask again” choices* (ghost button; disabled with "Nothing remembered" when none is set), toast "“Don’t ask again” cleared for all tunnels and groups".
+- **Motion:** as everywhere: rows slide 180 ms; the dropdown rolls; chips scale in; status marks cross-fade; *Reduce motion* turns it off.
+
 ## 11. Key generation (milestone 7)
 
 Available when adding/editing a host.
@@ -936,6 +996,26 @@ Each milestone ends with its acceptance criteria met, tests green on all three O
   - **Checker** (no request to GitHub in any test; a local HTTP server or an injected transport): parsing a release JSON fixture; compare (newer, equal, older, `v` prefix, bad tag); `304` with ETag; `403` / `429` waiting until the reset; timeout; dev build and off never request; the 24 h and 1 h schedule with a fake clock.
   - **UI** (`egui_kittest`): every Settings state; the toast's actions; the dot; closing any toast; the first-run toast for an existing user and none for a new one; the tour sandbox never checks.
 - **Done when:** a release build shows its tag and commit in Settings and `--version`, a local build shows `dev`; with an older build installed, the next start shows the toast and dot for the latest release, *Skip* silences it, *What's new* opens the release page; turning the check off stops all requests; every toast can be closed; CI passes on all three OSes.
+
+### M15 — Group order and tunnel dependencies
+- Everything in §7 *Order and dependencies* and §10 *Group order and dependencies*. Reference boards: `docs/design/Group-Order.dc.html` (playable), `Group-Order-States.dc.html`, and the updated `A-Groups`. M15 doesn't depend on M14.
+- Order:
+  1. Model: `depends_on`, `start_deps_without_asking` (tunnels and groups), `tunnels.toml` v3 and its migration, the order rule (stable reorder, fixing on load), loop detection, removing ids on delete.
+  2. Supervisor: the `NeededBy` owner; waiting for dependencies; not-started dependents and *Retry failed*; reconnect waiting for dependencies; bottom-up stop; outside dependencies of a group; `running.toml` with `NeededBy`.
+  3. Core commands and events for start-alone with dependencies (what would start, so the UI can ask), and the remembered choices.
+  4. UI: the group's tunnel rows, drag to reorder (mouse and `Alt+↑/↓`), the *Depends on* control on the shared multi-select (chips, "+N" tooltip, hidden loops and their tooltip), the states, both dialogs, *Starts after* in the tunnel editor and the detail lines, the Settings button.
+- Tests:
+  - **Model:** migration with backup; round trip; reorder on adding a dependency; a file with a broken order or a loop; delete cleans `depends_on`; changing dependencies clears "Don't ask again".
+  - **Supervisor** (`crates/fake-ssh/tests/`, both tunnel types): a dependent starts only after its dependency is Running; a failed dependency leaves dependents not started and *Retry failed* recovers them in order; a dependency that recovers by reconnecting starts its waiting dependents; a dropped dependency doesn't stop dependents and their reconnect waits; stop is bottom-up and respects other owners; start-alone takes and releases `NeededBy`; a group pulls in and releases an outside dependency; crash survival keeps `NeededBy`.
+  - **UI** (`egui_kittest`): drag and `Alt+↑/↓` reorder and persist; a row can't pass its dependency (the yellow line); the picker leaves out loop tunnels and shows the hidden line and tooltip chains; "+N" chips; both dialogs with and without "Don't ask again"; the Settings button.
+- **Done when:** in a group like the owner's Dev (an ssh tunnel to the k3s API and a kubectl tunnel through it), the kubectl tunnel starts only after the ssh one is Running, isn't started when that fails, and stops first; starting it alone asks once and remembers; order and dependencies survive a restart; CI passes on all three OSes.
+- **As built:**
+  - *Not started* and *Dependency loop* are failure kinds of the Failed state (`FailureKind::NotStarted`, `DependencyLoop`) with a reason line ("Not started · k3s failed"), not separate states. Neither reconnects.
+  - A group's outside dependencies are owned by the group itself; "needed by Dev" is derived from that (a group owner on a tunnel that isn't a member).
+  - The order fix on load happens in core's memory only; `tunnels.toml` is rewritten with the fixed order on the next save.
+  - *Depends on* can be changed while the tunnels run; it applies to the next start.
+  - A *Start with sshelf* launch never asks; it starts the outside dependencies.
+  - Board differences (the spec wins): the playable board's 2600 ms toast uses the normal toast timing; the drop target is shown by the rows sliding, without a separate indicator line.
 
 ---
 
