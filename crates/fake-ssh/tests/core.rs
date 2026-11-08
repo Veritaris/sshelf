@@ -12,13 +12,13 @@ mod common;
 #[path = "common/http.rs"]
 mod http;
 
-use sshelf_core::core::{Command, ConfigState, Core, Event, UpdateSource};
+use sshelf_core::core::{Command, ConfigState, Core, Event, StartTarget, UpdateSource};
 use sshelf_core::metadata::{HostMeta, HostsFile};
 use sshelf_core::paths::Paths;
 use sshelf_core::settings::Settings;
 use sshelf_core::storage::Store;
 use sshelf_core::supervisor::{Snapshot, TunnelState};
-use sshelf_core::tunnels::{DEFAULT_BIND, Forward, ForwardKind, Group, Tunnel};
+use sshelf_core::tunnels::{DEFAULT_BIND, Forward, ForwardKind, Group, Tunnel, TunnelsFile};
 
 const WAIT: Duration = Duration::from_secs(10);
 
@@ -231,6 +231,150 @@ fn tunnel_state(events: &Receiver<Event>, id: &str, want: TunnelState) -> Arc<Sn
         Event::Tunnels(s) if s.state(id) == want => Some(s),
         _ => None,
     })
+}
+
+/// M15 through the core: a group is saved in order; starting a tunnel
+/// alone whose dependency isn't running asks first, and "Don't ask again"
+/// is remembered until its dependencies change or it is forgotten; loops
+/// and broken orders are refused.
+#[test]
+fn dependencies_through_the_core() {
+    let tmp = tempfile::tempdir().unwrap();
+    let paths = Paths::new(&tmp.path().join("home"), tmp.path().join("app"));
+    fs::create_dir_all(&paths.ssh_dir).unwrap();
+    fs::write(&paths.ssh_config, "Host ok-k3s\nHost ok-mail\n").unwrap();
+    fs::write(
+        paths.ssh_dir.join("known_hosts"),
+        format!("ok-k3s.example.com {NEW}\nok-mail.example.com {NEW}\n"),
+    )
+    .unwrap();
+    Store::new(&paths.app_dir)
+        .save(&Settings {
+            ssh_path: Some(fake_ssh()),
+            ..Settings::default()
+        })
+        .unwrap();
+    let ssh = |id: &str, host: &str| {
+        Tunnel::ssh(
+            id,
+            id,
+            host,
+            vec![Forward {
+                kind: ForwardKind::L,
+                bind: DEFAULT_BIND.into(),
+                listen: common::hold_port().1,
+                target: Some("localhost:6443".into()),
+            }],
+        )
+    };
+    let k3s = ssh("k3s", "ok-k3s");
+    let mut mail = ssh("mail", "ok-mail");
+    mail.depends_on = vec!["k3s".into()];
+
+    let (core, events) = Core::start(paths.clone(), Arc::new(|| {}));
+    wait_for(&events, "the config", host_aliases);
+    core.send(Command::SaveTunnel(k3s.clone()));
+    core.send(Command::SaveTunnel(mail.clone()));
+    core.send(Command::SaveGroup(Group {
+        id: "dev".into(),
+        name: "Dev".into(),
+        tunnels: vec!["mail".into(), "k3s".into()],
+        start_on_launch: false,
+        start_deps_without_asking: false,
+    }));
+    let data = wait_for(&events, "the group", |e| match e {
+        Event::Data(d) if d.tunnels.group("dev").is_some() => Some(d),
+        _ => None,
+    });
+    // Saved in order: mail below what it depends on.
+    assert_eq!(data.tunnels.group("dev").unwrap().tunnels, ["k3s", "mail"]);
+    assert_eq!(data.tunnels.tunnel("mail").unwrap().depends_on, ["k3s"]);
+
+    // Alone, mail asks first; "Don't ask again" is remembered.
+    core.send(Command::StartTunnel("mail".into()));
+    let prompt = wait_for(&events, "the prompt", |e| match e {
+        Event::StartPrompt(p) => Some(p),
+        _ => None,
+    });
+    assert_eq!(prompt.target, StartTarget::Tunnel("mail".into()));
+    assert_eq!(prompt.deps, ["k3s"]);
+    core.send(Command::ConfirmStart {
+        id: prompt.id,
+        dont_ask: true,
+    });
+    wait_for(&events, "both running", |e| match e {
+        Event::Tunnels(s)
+            if s.state("k3s") == TunnelState::Running
+                && s.state("mail") == TunnelState::Running =>
+        {
+            Some(())
+        }
+        _ => None,
+    });
+    let saved = Store::new(&paths.app_dir).load::<TunnelsFile>().data;
+    assert!(saved.tunnel("mail").unwrap().start_deps_without_asking);
+    core.send(Command::StopTunnel("mail".into()));
+    wait_for(&events, "both stopped", |e| match e {
+        Event::Tunnels(s)
+            if s.state("k3s") == TunnelState::Stopped
+                && s.state("mail") == TunnelState::Stopped =>
+        {
+            Some(())
+        }
+        _ => None,
+    });
+    // Again: no question this time.
+    core.send(Command::StartTunnel("mail".into()));
+    wait_for(&events, "running without asking", |e| match e {
+        Event::StartPrompt(_) => panic!("asked again"),
+        Event::Tunnels(s) if s.state("mail") == TunnelState::Running => Some(()),
+        _ => None,
+    });
+
+    // Forgotten from Settings.
+    core.send(Command::ForgetDontAsk);
+    wait_for(&events, "forgotten", |e| match e {
+        Event::Data(d) if !d.tunnels.tunnel("mail").unwrap().start_deps_without_asking => Some(()),
+        _ => None,
+    });
+
+    // A loop is refused, also while running; the file keeps the old ones.
+    core.send(Command::SetDependencies {
+        tunnel_id: "k3s".into(),
+        depends_on: vec!["mail".into()],
+    });
+    let error = wait_for(&events, "a refused loop", |e| match e {
+        Event::Error(m) => Some(m),
+        _ => None,
+    });
+    assert!(error.contains("starts after it"), "{error}");
+    // A broken order is refused; the right one is saved.
+    core.send(Command::ReorderGroup {
+        group_id: "dev".into(),
+        tunnels: vec!["mail".into(), "k3s".into()],
+    });
+    wait_for(&events, "a refused order", |e| match e {
+        Event::Error(m) => Some(m),
+        _ => None,
+    });
+    // Without the dependency, any order goes.
+    core.send(Command::SetDependencies {
+        tunnel_id: "mail".into(),
+        depends_on: Vec::new(),
+    });
+    wait_for(&events, "no dependencies", |e| match e {
+        Event::Data(d) if d.tunnels.tunnel("mail").unwrap().depends_on.is_empty() => Some(()),
+        _ => None,
+    });
+    core.send(Command::ReorderGroup {
+        group_id: "dev".into(),
+        tunnels: vec!["mail".into(), "k3s".into()],
+    });
+    wait_for(&events, "the new order", |e| match e {
+        Event::Data(d) if d.tunnels.group("dev").unwrap().tunnels == ["mail", "k3s"] => Some(()),
+        _ => None,
+    });
+    drop(core);
 }
 
 #[test]

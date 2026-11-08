@@ -20,6 +20,7 @@ use sshconf::{ConfigSet, HostList, WatchDir};
 
 use crate::agent_service::{self, AgentService};
 use crate::config_edit::{self, Change, ConfigWriter, Edit, Problem};
+use crate::deps;
 use crate::health::{self, Health, HealthReport, HealthSnapshot};
 use crate::history::History;
 use crate::hostkeys::{self, ChangedKey, Keygen, KnownHostsWriter, UnknownKey};
@@ -151,6 +152,27 @@ pub enum Command {
         group_id: String,
         tunnel_id: String,
     },
+    /// Start what a [`StartPrompt`] asked about; `dont_ask` remembers it for
+    /// the tunnel or group ("Don't ask again").
+    ConfirmStart {
+        id: u64,
+        dont_ask: bool,
+    },
+    CancelStart(u64),
+    /// A tunnel's dependencies (M15), saved at once (also while it runs;
+    /// they apply at its next start). Refused if they would make a loop.
+    SetDependencies {
+        tunnel_id: String,
+        depends_on: Vec<String>,
+    },
+    /// A group's order (dragged), saved at once, also while it runs.
+    /// Refused unless every tunnel stays below the ones it depends on.
+    ReorderGroup {
+        group_id: String,
+        tunnels: Vec<String>,
+    },
+    /// Clears every "Don't ask again" (Settings).
+    ForgetDontAsk,
     /// Store the key of a [`HostKeyPrompt`] and continue the start.
     AcceptHostKey(u64),
     /// Do not store the key; the start is abandoned.
@@ -243,6 +265,23 @@ pub struct HostKeyPrompt {
     pub unknown: UnknownKey,
 }
 
+/// A start that would also start tunnels that aren't running (M15): the
+/// tunnel's dependencies, or a group's dependencies outside it. The UI asks
+/// and answers with [`Command::ConfirmStart`] or [`Command::CancelStart`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartPrompt {
+    pub id: u64,
+    pub target: StartTarget,
+    /// The tunnels (ids) it would start too, in start order.
+    pub deps: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StartTarget {
+    Tunnel(String),
+    Group(String),
+}
+
 /// A changed host key waiting for the user's decision (SPEC.md §9).
 #[derive(Debug, Clone)]
 pub struct ChangedKeyPrompt {
@@ -250,6 +289,53 @@ pub struct ChangedKeyPrompt {
     /// What the review is for, e.g. `tunnel “API”` or `host “web”`.
     pub subject: String,
     pub changed: ChangedKey,
+}
+
+/// Sets `id`'s dependencies in `file` (M15): known tunnels other than
+/// itself, never a loop; when they change, its "Don't ask again" and its
+/// groups' are cleared ("asks again if its dependencies change"); every
+/// group is put back in order.
+fn apply_dependencies(
+    file: &mut TunnelsFile,
+    id: &str,
+    depends_on: Vec<String>,
+) -> Result<(), String> {
+    let tunnel = file
+        .tunnel(id)
+        .ok_or_else(|| format!("no tunnel `{id}`"))?
+        .clone();
+    if let Some(unknown) = depends_on
+        .iter()
+        .find(|d| *d == id || file.tunnel(d).is_none())
+    {
+        return Err(format!("\"{}\" can't depend on `{unknown}`", tunnel.name));
+    }
+    let changed = tunnel.depends_on != depends_on;
+    let mut updated = tunnel.clone();
+    updated.depends_on = depends_on;
+    if changed {
+        updated.start_deps_without_asking = false;
+    }
+    file.upsert_tunnel(updated);
+    if deps::in_loop(file).contains(id) {
+        file.upsert_tunnel(tunnel.clone());
+        return Err(format!(
+            "\"{}\" can't depend on a tunnel that starts after it",
+            tunnel.name
+        ));
+    }
+    let ordered: Vec<Vec<String>> = file
+        .groups
+        .iter()
+        .map(|g| deps::ordered(&g.tunnels, file))
+        .collect();
+    for (group, tunnels) in file.groups.iter_mut().zip(ordered) {
+        if changed && group.tunnels.iter().any(|t| t == id) {
+            group.start_deps_without_asking = false;
+        }
+        group.tunnels = tunnels;
+    }
+    Ok(())
 }
 
 /// What a host key check was for.
@@ -308,6 +394,8 @@ pub enum Event {
     Tunnels(Arc<Snapshot>),
     /// A start is waiting for an unknown host key to be accepted.
     HostKeyPrompt(Arc<HostKeyPrompt>),
+    /// Starting this would start tunnels that aren't running: ask (M15).
+    StartPrompt(Arc<StartPrompt>),
     /// A changed host key was found and needs a decision.
     HostKeyChanged(Arc<ChangedKeyPrompt>),
     /// The prompt with this id is settled.
@@ -630,6 +718,8 @@ struct Worker {
     config_writer: ConfigWriter,
     next_prompt: u64,
     unknown_keys: BTreeMap<u64, (StartRequest, UnknownKey)>,
+    /// Starts waiting for an answer to their [`StartPrompt`] (M15).
+    start_prompts: BTreeMap<u64, StartRequest>,
     changed_keys: BTreeMap<u64, (KeyFor, ChangedKey)>,
     health: HealthSnapshot,
     /// Aliases waiting for a free check slot, in order.
@@ -689,6 +779,7 @@ impl Worker {
             config_writer,
             next_prompt: 0,
             unknown_keys: BTreeMap::new(),
+            start_prompts: BTreeMap::new(),
             changed_keys: BTreeMap::new(),
             health: HealthSnapshot::default(),
             health_queue: VecDeque::new(),
@@ -829,7 +920,7 @@ impl Worker {
                 Command::Connect(alias) => self.connect(&alias),
                 Command::SaveTunnel(tunnel) => self.save_tunnel(tunnel),
                 Command::DeleteTunnel(id) => self.delete_tunnel(&id),
-                Command::StartTunnel(id) => self.start(StartRequest::Tunnel(id)),
+                Command::StartTunnel(id) => self.ask_or_start(StartRequest::Tunnel(id)),
                 Command::StopTunnel(id) => self.supervise(Request::Stop {
                     tunnel_id: id,
                     owner: Owner::Manual,
@@ -845,7 +936,46 @@ impl Worker {
                             .ok_or_else(|| format!("no group `{id}`"))
                     });
                 }
-                Command::StartGroup(id) => self.start(StartRequest::Group(id)),
+                Command::StartGroup(id) => self.ask_or_start(StartRequest::Group(id)),
+                Command::ConfirmStart { id, dont_ask } => self.confirm_start(id, dont_ask),
+                Command::CancelStart(id) => {
+                    self.start_prompts.remove(&id);
+                }
+                Command::SetDependencies {
+                    tunnel_id,
+                    depends_on,
+                } => self.set_dependencies(&tunnel_id, depends_on),
+                Command::ReorderGroup { group_id, tunnels } => {
+                    self.change_tunnels(|file, _| {
+                        let group = file
+                            .groups
+                            .iter()
+                            .find(|g| g.id == group_id)
+                            .ok_or_else(|| format!("no group `{group_id}`"))?;
+                        let mut same = tunnels.clone();
+                        same.sort();
+                        let mut was = group.tunnels.clone();
+                        was.sort();
+                        if same != was || deps::ordered(&tunnels, file) != tunnels {
+                            return Err(format!("cannot reorder \"{}\"", group.name));
+                        }
+                        file.groups
+                            .iter_mut()
+                            .find(|g| g.id == group_id)
+                            .expect("found above")
+                            .tunnels = tunnels;
+                        Ok(())
+                    });
+                }
+                Command::ForgetDontAsk => self.change_tunnels(|file, _| {
+                    for tunnel in &mut file.tunnels {
+                        tunnel.start_deps_without_asking = false;
+                    }
+                    for group in &mut file.groups {
+                        group.start_deps_without_asking = false;
+                    }
+                    Ok(())
+                }),
                 Command::AcceptHostKey(id) => self.accept_host_key(id),
                 Command::RejectHostKey(id) => self.reject_host_key(id),
                 Command::ReviewChangedKey(tunnel_id) => self.review_changed_key(tunnel_id),
@@ -1171,9 +1301,103 @@ impl Worker {
                     problems.join("; ")
                 ));
             }
+            // The dependencies go through their own rules (and flags).
+            let id = tunnel.id.clone();
+            let depends_on = tunnel.depends_on.clone();
+            let kept = file.tunnel(&id).map(|t| t.depends_on.clone());
+            let mut tunnel = tunnel;
+            tunnel.depends_on = kept.unwrap_or_default();
             file.upsert_tunnel(tunnel);
-            Ok(())
+            apply_dependencies(file, &id, depends_on)
         });
+    }
+
+    /// Saves `id`'s dependencies (M15): known tunnels only, never a loop; the
+    /// groups holding it are put back in order, and its "Don't ask again"
+    /// (and its groups') is cleared when they change.
+    fn set_dependencies(&mut self, id: &str, depends_on: Vec<String>) {
+        self.change_tunnels(|file, _| apply_dependencies(file, id, depends_on));
+    }
+
+    /// The tunnels `start` would start too that aren't running, if the user
+    /// should be asked first (M15): a tunnel's dependencies, a group's from
+    /// outside it; never with "Don't ask again", nor in the tour.
+    fn needs_asking(&self, start: &StartRequest) -> Option<(StartTarget, Vec<String>)> {
+        if self.sandbox.is_some() {
+            return None;
+        }
+        let file = &self.data.tunnels;
+        let idle = |id: &String| self.tunnel_states.state(id) != TunnelState::Running;
+        let (target, deps) = match start {
+            StartRequest::Tunnel(id) => {
+                let tunnel = file.tunnel(id)?;
+                if tunnel.start_deps_without_asking {
+                    return None;
+                }
+                (StartTarget::Tunnel(id.clone()), deps::closure(file, id))
+            }
+            StartRequest::Group(id) => {
+                let group = file.group(id)?;
+                if group.start_deps_without_asking {
+                    return None;
+                }
+                let mut outside: Vec<String> = Vec::new();
+                for member in &group.tunnels {
+                    for dep in deps::closure(file, member) {
+                        if !group.tunnels.contains(&dep) && !outside.contains(&dep) {
+                            outside.push(dep);
+                        }
+                    }
+                }
+                (StartTarget::Group(id.clone()), outside)
+            }
+            StartRequest::Connect(_) | StartRequest::Review(_) => return None,
+        };
+        let deps: Vec<String> = deps.into_iter().filter(idle).collect();
+        (!deps.is_empty()).then_some((target, deps))
+    }
+
+    /// A start from the user: asks first when it would start more (M15).
+    fn ask_or_start(&mut self, start: StartRequest) {
+        match self.needs_asking(&start) {
+            Some((target, deps)) => {
+                self.next_prompt += 1;
+                let prompt = StartPrompt {
+                    id: self.next_prompt,
+                    target,
+                    deps,
+                };
+                self.start_prompts.insert(prompt.id, start);
+                self.emitter.emit(Event::StartPrompt(Arc::new(prompt)));
+            }
+            None => self.start(start),
+        }
+    }
+
+    fn confirm_start(&mut self, id: u64, dont_ask: bool) {
+        let Some(start) = self.start_prompts.remove(&id) else {
+            return;
+        };
+        if dont_ask {
+            let start = start.clone();
+            self.change_tunnels(|file, _| {
+                match &start {
+                    StartRequest::Tunnel(id) => {
+                        if let Some(t) = file.tunnels.iter_mut().find(|t| &t.id == id) {
+                            t.start_deps_without_asking = true;
+                        }
+                    }
+                    StartRequest::Group(id) => {
+                        if let Some(g) = file.groups.iter_mut().find(|g| &g.id == id) {
+                            g.start_deps_without_asking = true;
+                        }
+                    }
+                    StartRequest::Connect(_) | StartRequest::Review(_) => {}
+                }
+                Ok(())
+            });
+        }
+        self.start(start);
     }
 
     fn delete_tunnel(&mut self, id: &str) {
@@ -1202,6 +1426,9 @@ impl Worker {
             if let Some(missing) = group.tunnels.iter().find(|t| file.tunnel(t).is_none()) {
                 return Err(format!("no tunnel `{missing}`"));
             }
+            // Every tunnel below the ones it depends on (M15).
+            let mut group = group;
+            group.tunnels = deps::ordered(&group.tunnels, file);
             file.upsert_group(group);
             Ok(())
         });
@@ -1275,24 +1502,32 @@ impl Worker {
 
     /// The hosts `start` connects to (jump hosts are found from them).
     fn destinations(&self, start: &StartRequest) -> Result<Vec<String>, String> {
-        let mut destinations = match start {
-            StartRequest::Connect(alias) | StartRequest::Review(alias) => vec![alias.clone()],
-            // kubectl tunnels have no host keys.
+        let tunnels = match start {
+            StartRequest::Connect(alias) | StartRequest::Review(alias) => {
+                return Ok(vec![alias.clone()]);
+            }
             StartRequest::Tunnel(_) | StartRequest::Group(_) => match self.launch_request(start)? {
-                Request::Start { tunnel, .. } => vec![tunnel]
-                    .into_iter()
-                    .filter(|t| !t.is_kubectl())
-                    .map(|t| t.host)
-                    .collect(),
-                Request::StartGroup { tunnels, .. } => tunnels
-                    .into_iter()
-                    .filter(|t| !t.is_kubectl())
-                    .map(|t| t.host)
-                    .collect(),
+                Request::Start { tunnel, .. } => vec![tunnel],
+                Request::StartGroup { tunnels, .. } => tunnels,
                 _ => Vec::new(),
             },
         };
-        destinations.dedup();
+        // What they depend on starts too, so its keys are checked first
+        // (M15); kubectl tunnels have no host keys.
+        let file = &self.data.tunnels;
+        let mut destinations: Vec<String> = Vec::new();
+        for tunnel in &tunnels {
+            let along = deps::closure(file, &tunnel.id);
+            let all = along
+                .iter()
+                .filter_map(|id| file.tunnel(id))
+                .chain([tunnel]);
+            for t in all.filter(|t| !t.is_kubectl()) {
+                if !destinations.contains(&t.host) {
+                    destinations.push(t.host.clone());
+                }
+            }
+        }
         Ok(destinations)
     }
 
@@ -2086,5 +2321,47 @@ impl Worker {
             }
             Err(e) => self.error(format!("session started, but {e}")),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// "Asks again if its dependencies change": the tunnel's and its
+    /// groups' "Don't ask again" are cleared; unchanged ones keep them.
+    #[test]
+    fn changing_dependencies_clears_dont_ask_again() {
+        let mut file = TunnelsFile::default();
+        for id in ["k3s", "mail", "other"] {
+            let mut tunnel = Tunnel::ssh(id, id, "h", Vec::new());
+            tunnel.start_deps_without_asking = true;
+            file.upsert_tunnel(tunnel);
+        }
+        file.upsert_group(Group {
+            id: "dev".into(),
+            name: "Dev".into(),
+            tunnels: vec!["mail".into(), "k3s".into()],
+            start_on_launch: false,
+            start_deps_without_asking: true,
+        });
+        apply_dependencies(&mut file, "mail", vec!["k3s".into()]).unwrap();
+        assert!(!file.tunnel("mail").unwrap().start_deps_without_asking);
+        assert!(file.tunnel("other").unwrap().start_deps_without_asking);
+        let dev = file.group("dev").unwrap();
+        assert!(!dev.start_deps_without_asking);
+        // And the group is back in order.
+        assert_eq!(dev.tunnels, ["k3s", "mail"]);
+
+        // The same dependencies again: nothing is cleared.
+        file.tunnels[1].start_deps_without_asking = true;
+        apply_dependencies(&mut file, "mail", vec!["k3s".into()]).unwrap();
+        assert!(file.tunnel("mail").unwrap().start_deps_without_asking);
+        // Unknown ids, itself and loops are refused, leaving the file as
+        // it was.
+        assert!(apply_dependencies(&mut file, "mail", vec!["ghost".into()]).is_err());
+        assert!(apply_dependencies(&mut file, "mail", vec!["mail".into()]).is_err());
+        assert!(apply_dependencies(&mut file, "k3s", vec!["mail".into()]).is_err());
+        assert!(file.tunnel("k3s").unwrap().depends_on.is_empty());
     }
 }

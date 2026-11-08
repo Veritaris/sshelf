@@ -344,6 +344,8 @@ impl SshelfApp {
                 } => self.hosts.detail.on_resolved(alias, generation, result),
                 Event::Ssh(info) => self.ssh = Some(info),
                 Event::Kubectl(info) => self.kubectl = Some(info),
+                // The dialog comes with M15's UI step.
+                Event::StartPrompt(_) => {}
                 Event::Updates(status) => {
                     self.settings.on_updates(status.clone());
                     self.updates = Some(status);
