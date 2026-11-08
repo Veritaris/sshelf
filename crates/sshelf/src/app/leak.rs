@@ -174,6 +174,7 @@ fn app(root: &Path, streamer: bool, hide: bool) -> Harness<'static, SshelfApp> {
                 name: "Work".into(),
                 tunnels: vec!["t-web".into(), "t-kube".into()],
                 start_on_launch: false,
+                start_deps_without_asking: false,
             }],
         })
         .unwrap();

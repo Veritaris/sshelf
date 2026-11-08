@@ -353,6 +353,7 @@ fn a_group_mixes_ssh_and_kubectl() {
         name: "Mixed".into(),
         tunnels: vec!["s".into(), "k".into(), "g".into()],
         start_on_launch: false,
+        start_deps_without_asking: false,
     };
     h.send(Request::StartGroup {
         group: group.clone(),

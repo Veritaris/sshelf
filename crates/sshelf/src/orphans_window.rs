@@ -341,6 +341,7 @@ mod tests {
             name: "Work".into(),
             tunnels: vec!["t-missing".into()],
             start_on_launch: false,
+            start_deps_without_asking: false,
         });
         data.tunnel_orphans = vec![TunnelOrphan {
             tunnel_id: "t-1".into(),

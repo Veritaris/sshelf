@@ -654,7 +654,8 @@ impl Worker {
             hosts_status: hosts.status,
             orphans: Vec::new(),
             relink_targets: Vec::new(),
-            tunnels: tunnels.data,
+            // A hand-edited order is fixed here, not on disk (M15).
+            tunnels: tunnels.data.normalized(),
             tunnels_status: tunnels.status,
             tunnel_orphans: Vec::new(),
             group_orphans: Vec::new(),

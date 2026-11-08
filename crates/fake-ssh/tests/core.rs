@@ -292,6 +292,7 @@ fn tunnels_and_groups_through_the_core() {
         name: "Work".into(),
         tunnels: vec!["t-1".into()],
         start_on_launch: false,
+        start_deps_without_asking: false,
     }));
     wait_for(&events, "the saved group", |e| match e {
         Event::Data(d) if d.tunnels.group("g-1").is_some() => Some(()),
@@ -633,12 +634,14 @@ fn groups_marked_for_launch_start_with_sshelf() {
         name: "At launch".into(),
         tunnels: vec!["t-a".into()],
         start_on_launch: true,
+        start_deps_without_asking: false,
     });
     file.upsert_group(Group {
         id: "g-manual".into(),
         name: "By hand".into(),
         tunnels: vec!["t-b".into()],
         start_on_launch: false,
+        start_deps_without_asking: false,
     });
     store.save(&file).unwrap();
 

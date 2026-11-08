@@ -270,6 +270,12 @@ pub struct Tunnel {
     pub kube: Kube,
     /// Restart after an unexpected drop, with backoff (SPEC.md §7).
     pub auto_reconnect: bool,
+    /// Tunnel ids that must be *Running* before this one starts (SPEC.md §7
+    /// *Order and dependencies*, M15).
+    pub depends_on: Vec<String>,
+    /// Starting it alone starts its dependencies without asking ("Don't ask
+    /// again").
+    pub start_deps_without_asking: bool,
 }
 
 impl Tunnel {
@@ -283,6 +289,8 @@ impl Tunnel {
             forwards,
             kube: Kube::default(),
             auto_reconnect: false,
+            depends_on: Vec::new(),
+            start_deps_without_asking: false,
         }
     }
 
@@ -548,6 +556,10 @@ struct RawTunnel {
     forwards: Vec<RawForward>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     auto_reconnect: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    depends_on: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    start_deps_without_asking: bool,
 }
 
 fn is_ssh(kind: &TunnelType) -> bool {
@@ -598,6 +610,8 @@ impl TryFrom<RawTunnel> for Tunnel {
             address,
             forwards,
             auto_reconnect,
+            depends_on,
+            start_deps_without_asking,
         } = raw;
         let mut tunnel = match kind {
             TunnelType::Ssh => {
@@ -646,6 +660,8 @@ impl TryFrom<RawTunnel> for Tunnel {
             }
         };
         tunnel.auto_reconnect = auto_reconnect;
+        tunnel.depends_on = depends_on;
+        tunnel.start_deps_without_asking = start_deps_without_asking;
         Ok(tunnel)
     }
 }
@@ -660,6 +676,8 @@ impl From<Tunnel> for RawTunnel {
             forwards,
             kube,
             auto_reconnect,
+            depends_on,
+            start_deps_without_asking,
         } = tunnel;
         let mut raw = RawTunnel {
             id,
@@ -672,6 +690,8 @@ impl From<Tunnel> for RawTunnel {
             address: None,
             forwards: Vec::new(),
             auto_reconnect,
+            depends_on,
+            start_deps_without_asking,
         };
         match kind {
             TunnelType::Ssh => {
@@ -724,11 +744,16 @@ fn valid_target(target: &str) -> bool {
 pub struct Group {
     pub id: String,
     pub name: String,
-    /// Tunnel ids.
+    /// Tunnel ids, in start order (M15: every tunnel below the ones it
+    /// depends on, see [`crate::deps::ordered`]).
     pub tunnels: Vec<String>,
     /// Started when sshelf starts (SPEC.md §7).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub start_on_launch: bool,
+    /// Starting the group starts its outside dependencies without asking
+    /// ("Don't ask again", M15).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub start_deps_without_asking: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -742,17 +767,19 @@ pub struct TunnelsFile {
 
 impl Versioned for TunnelsFile {
     const FILE: &'static str = "tunnels.toml";
-    /// 2 from M13 (kubectl tunnels): an older sshelf treats a file that may
-    /// hold kubectl tunnels as newer, and read-only.
-    const VERSION: u32 = 2;
+    /// 2 from M13 (kubectl tunnels), 3 from M15 (dependencies): an older
+    /// sshelf treats the file as newer, and read-only, rather than dropping
+    /// what it doesn't know when it rewrites it.
+    const VERSION: u32 = 3;
 
     fn migrations() -> &'static [Migration] {
-        &[v1_to_v2]
+        &[same, same]
     }
 }
 
-/// Nothing but the version changes (SPEC.md §7 *kubectl tunnels*).
-fn v1_to_v2(table: toml::Table) -> Result<toml::Table, String> {
+/// Nothing but the version changes (SPEC.md §7 *kubectl tunnels*, *Order
+/// and dependencies*).
+fn same(table: toml::Table) -> Result<toml::Table, String> {
     Ok(table)
 }
 
@@ -780,14 +807,32 @@ impl TunnelsFile {
         }
     }
 
-    /// Removes the tunnel and its references from every group.
+    /// Removes the tunnel and its references from every group and every
+    /// other tunnel's dependencies.
     pub fn remove_tunnel(&mut self, id: &str) -> bool {
         let before = self.tunnels.len();
         self.tunnels.retain(|t| t.id != id);
         for group in &mut self.groups {
             group.tunnels.retain(|t| t != id);
         }
+        for tunnel in &mut self.tunnels {
+            tunnel.depends_on.retain(|d| d != id);
+        }
         self.tunnels.len() != before
+    }
+
+    /// Every group in start order ([`crate::deps::ordered`]): a hand-edited
+    /// file that breaks the rule is fixed in memory on load, not rewritten.
+    pub fn normalized(mut self) -> Self {
+        let ordered: Vec<Vec<String>> = self
+            .groups
+            .iter()
+            .map(|g| crate::deps::ordered(&g.tunnels, &self))
+            .collect();
+        for (group, tunnels) in self.groups.iter_mut().zip(ordered) {
+            group.tunnels = tunnels;
+        }
+        self
     }
 
     pub fn upsert_group(&mut self, group: Group) {
@@ -988,7 +1033,7 @@ mod tests {
         file.upsert_tunnel(kube_tunnel("", &[(1, "2")]));
         store.save(&file).unwrap();
         let text = std::fs::read_to_string(store.path::<TunnelsFile>()).unwrap();
-        assert!(text.starts_with("version = 2\n"), "{text}");
+        assert!(text.starts_with("version = 3\n"), "{text}");
         assert!(text.contains("type = \"kubectl\""), "{text}");
         assert!(text.contains("resource = \"service/web\""), "{text}");
         assert!(!text.contains("type = \"ssh\""), "{text}");
@@ -997,7 +1042,7 @@ mod tests {
         // By hand: a numeric target, no address, no context.
         std::fs::write(
             store.path::<TunnelsFile>(),
-            "version = 2\n[[tunnel]]\nid = \"t-9\"\nname = \"x\"\ntype = \"kubectl\"\n\
+            "version = 3\n[[tunnel]]\nid = \"t-9\"\nname = \"x\"\ntype = \"kubectl\"\n\
              namespace = \"n\"\nresource = \"pod/p\"\nforwards = [{ listen = 1, target = 80 }]\n",
         )
         .unwrap();
@@ -1055,7 +1100,46 @@ mod tests {
         let backup = tmp.path().join("tunnels.toml.bak-v1");
         assert_eq!(std::fs::read_to_string(backup).unwrap(), v1);
         let text = std::fs::read_to_string(store.path::<TunnelsFile>()).unwrap();
-        assert!(text.starts_with("version = 2\n"), "{text}");
+        assert!(text.starts_with("version = 3\n"), "{text}");
+    }
+
+    /// M15: v2 → v3 changes only the version, with the backup; the new keys
+    /// round-trip and are written only when set.
+    #[test]
+    fn version_2_migrates_and_dependencies_round_trip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut store = Store::new(tmp.path());
+        let v2 =
+            "version = 2\n[[tunnel]]\nid = \"t-1\"\nname = \"x\"\nhost = \"h\"\nforwards = []\n";
+        std::fs::write(store.path::<TunnelsFile>(), v2).unwrap();
+        let mut loaded = store.load::<TunnelsFile>();
+        assert!(matches!(
+            loaded.status,
+            crate::storage::LoadStatus::Migrated { from: 2, .. }
+        ));
+        let backup = tmp.path().join("tunnels.toml.bak-v2");
+        assert_eq!(std::fs::read_to_string(backup).unwrap(), v2);
+        let text = std::fs::read_to_string(store.path::<TunnelsFile>()).unwrap();
+        assert!(
+            !text.contains("depends_on") && !text.contains("without_asking"),
+            "{text}"
+        );
+
+        let mut dependent = Tunnel::ssh("t-2", "y", "h", Vec::new());
+        dependent.depends_on = vec!["t-1".into()];
+        dependent.start_deps_without_asking = true;
+        loaded.data.upsert_tunnel(dependent);
+        loaded.data.upsert_group(Group {
+            id: "g-1".into(),
+            name: "Dev".into(),
+            tunnels: vec!["t-1".into(), "t-2".into()],
+            start_on_launch: false,
+            start_deps_without_asking: true,
+        });
+        store.save(&loaded.data).unwrap();
+        let text = std::fs::read_to_string(store.path::<TunnelsFile>()).unwrap();
+        assert!(text.contains("depends_on = [\"t-1\"]"), "{text}");
+        assert_eq!(store.load::<TunnelsFile>().data, loaded.data);
     }
 
     #[test]
@@ -1063,7 +1147,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut store = Store::new(tmp.path());
         let v3 =
-            "version = 3\n[[tunnel]]\nid = \"t-1\"\nname = \"x\"\nhost = \"h\"\nforwards = []\n";
+            "version = 4\n[[tunnel]]\nid = \"t-1\"\nname = \"x\"\nhost = \"h\"\nforwards = []\n";
         std::fs::write(store.path::<TunnelsFile>(), v3).unwrap();
         let loaded = store.load::<TunnelsFile>();
         assert!(matches!(
@@ -1209,6 +1293,7 @@ mod tests {
             name: "Work".into(),
             tunnels: vec!["t-1".into(), "t-2".into()],
             start_on_launch: false,
+            start_deps_without_asking: false,
         });
         assert_eq!(file.groups_using("t-1").len(), 1);
         assert!(file.remove_tunnel("t-1"));
@@ -1245,10 +1330,11 @@ mod tests {
             name: "Work on prod".into(),
             tunnels: vec!["t-1".into()],
             start_on_launch: true,
+            start_deps_without_asking: false,
         });
         store.save(&file).unwrap();
         let text = std::fs::read_to_string(store.path::<TunnelsFile>()).unwrap();
-        assert!(text.starts_with("version = 2\n"), "{text}");
+        assert!(text.starts_with("version = 3\n"), "{text}");
         assert_eq!(store.load::<TunnelsFile>().data, file);
 
         // The bind address defaults when omitted by hand.

@@ -718,6 +718,7 @@ mod tests {
             name: "Work".into(),
             tunnels: vec!["t-b".into(), "t-c".into()],
             start_on_launch: false,
+            start_deps_without_asking: false,
         });
         data
     }

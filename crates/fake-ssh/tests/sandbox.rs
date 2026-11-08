@@ -92,6 +92,7 @@ fn sandbox() -> Sandbox {
         name: "launch".into(),
         tunnels: vec!["t-web".into()],
         start_on_launch: true,
+        start_deps_without_asking: false,
     });
     Store::new(&paths.app_dir).save(&tunnels).unwrap();
 

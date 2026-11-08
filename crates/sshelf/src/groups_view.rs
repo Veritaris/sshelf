@@ -149,6 +149,7 @@ impl GroupsView {
             name: String::new(),
             tunnels: Vec::new(),
             start_on_launch: false,
+            start_deps_without_asking: false,
         });
     }
 
@@ -1026,12 +1027,14 @@ mod tests {
             name: "Work".into(),
             tunnels: vec!["t-a".into(), "t-b".into()],
             start_on_launch: true,
+            start_deps_without_asking: false,
         });
         data.tunnels.upsert_group(Group {
             id: "g-2".into(),
             name: "Other".into(),
             tunnels: vec!["t-b".into()],
             start_on_launch: false,
+            start_deps_without_asking: false,
         });
         Arc::new(data)
     }
@@ -1218,6 +1221,7 @@ mod tests {
                 name: "New".into(),
                 tunnels: Vec::new(),
                 start_on_launch: false,
+                start_deps_without_asking: false,
             }));
         harness.step();
         harness.get_by_label("Tunnels").click();

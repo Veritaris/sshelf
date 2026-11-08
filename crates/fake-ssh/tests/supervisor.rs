@@ -112,6 +112,7 @@ fn group(id: &str, tunnels: &[&Tunnel]) -> Group {
         name: format!("group {id}"),
         tunnels: tunnels.iter().map(|t| t.id.clone()).collect(),
         start_on_launch: false,
+        start_deps_without_asking: false,
     }
 }
 

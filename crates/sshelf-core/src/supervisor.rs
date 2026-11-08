@@ -306,7 +306,7 @@ pub enum SupervisorEvent {
 }
 
 enum Message {
-    Request(Request),
+    Request(Box<Request>),
     Line {
         id: String,
         generation: u64,
@@ -373,7 +373,7 @@ impl Supervisor {
     }
 
     pub fn send(&self, request: Request) {
-        let _ = self.tx.send(Message::Request(request));
+        let _ = self.tx.send(Message::Request(Box::new(request)));
     }
 }
 
@@ -703,7 +703,7 @@ impl Worker {
     /// `false` on shutdown.
     fn handle(&mut self, message: Message) -> bool {
         match message {
-            Message::Request(request) => self.request(request),
+            Message::Request(request) => self.request(*request),
             Message::Line {
                 id,
                 generation,
@@ -1303,6 +1303,7 @@ mod tests {
             name: "G".into(),
             tunnels: vec!["a".into(), "b".into()],
             start_on_launch: false,
+            start_deps_without_asking: false,
         };
         let snapshot = |a: TunnelStatus, b: TunnelStatus| Snapshot {
             tunnels: [("a".into(), a), ("b".into(), b)].into(),
