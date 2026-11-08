@@ -3114,6 +3114,7 @@ mod tests {
                 failure: None,
                 reconnect: None,
                 running_since: None,
+                after: None,
             },
         );
         harness.state_mut().states = Some(Snapshot { tunnels });

@@ -52,6 +52,7 @@ pub fn owner_key(owner: &Owner) -> String {
     match owner {
         Owner::Manual => "manual".to_string(),
         Owner::Group(id) => format!("group:{id}"),
+        Owner::NeededBy(id) => format!("needed-by:{id}"),
     }
 }
 
@@ -59,6 +60,7 @@ pub fn owner_key(owner: &Owner) -> String {
 pub fn owner_from_key(key: &str) -> Option<Owner> {
     match key.split_once(':') {
         Some(("group", id)) if !id.is_empty() => Some(Owner::Group(id.to_string())),
+        Some(("needed-by", id)) if !id.is_empty() => Some(Owner::NeededBy(id.to_string())),
         None if key == "manual" => Some(Owner::Manual),
         _ => None,
     }
@@ -70,7 +72,11 @@ mod tests {
 
     #[test]
     fn owners_round_trip_and_unknown_keys_are_dropped() {
-        for owner in [Owner::Manual, Owner::Group("g-1".into())] {
+        for owner in [
+            Owner::Manual,
+            Owner::Group("g-1".into()),
+            Owner::NeededBy("t-1".into()),
+        ] {
             assert_eq!(owner_from_key(&owner_key(&owner)), Some(owner));
         }
         assert_eq!(owner_from_key("group:"), None);

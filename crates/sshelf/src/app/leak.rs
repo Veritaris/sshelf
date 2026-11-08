@@ -306,6 +306,7 @@ fn tunnel_states(state: TunnelState) -> Arc<Snapshot> {
                     failure: None,
                     reconnect: None,
                     running_since: None,
+                    after: None,
                 },
             ),
             (
@@ -322,6 +323,7 @@ fn tunnel_states(state: TunnelState) -> Arc<Snapshot> {
                     failure: kube_failure,
                     reconnect: None,
                     running_since: None,
+                    after: None,
                 },
             ),
         ]),

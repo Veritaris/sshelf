@@ -1025,6 +1025,8 @@ impl Worker {
 
     /// Recomputes orphans and sends the app data.
     fn publish_data(&mut self) {
+        // The supervisor starts dependencies along (M15).
+        self.supervise(Request::SetTunnels(self.data.tunnels.tunnels.clone()));
         let empty = HostList::default();
         let hosts = match &self.config.state {
             ConfigState::Loaded { hosts, .. } => Some(hosts),

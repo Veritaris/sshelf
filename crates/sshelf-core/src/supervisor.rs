@@ -38,8 +38,11 @@ const READ_REST: Duration = Duration::from_millis(500);
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Owner {
     Manual,
-    /// Group id.
+    /// Group id. A group also owns the tunnels its members depend on from
+    /// outside it ("needed by Dev", M15).
     Group(String),
+    /// Started because this tunnel (an id) depends on it (M15).
+    NeededBy(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,6 +79,11 @@ pub struct TunnelStatus {
     /// When the current run reached `Running` (its uptime); `None` while it
     /// doesn't run.
     pub running_since: Option<Instant>,
+    /// The tunnel (an id) this one waits on (M15): while `Starting` without
+    /// a process, the dependency it waits for; while `Failed` with
+    /// [`FailureKind::NotStarted`], the one that failed; while `Stopping`,
+    /// the dependent it stops after.
+    pub after: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,6 +115,10 @@ pub enum FailureKind {
     NoContext,
     /// No kubectl binary.
     KubectlMissing,
+    /// A dependency failed or wasn't started, so this one wasn't (M15).
+    NotStarted,
+    /// It depends on itself through others (a hand-edited file, M15).
+    DependencyLoop,
     Other,
 }
 
@@ -286,6 +298,9 @@ pub enum Request {
     SetSsh(Option<Tool>),
     /// kubectl for kubectl tunnels started from now on (M13).
     SetKubectl(Option<Tool>),
+    /// Every tunnel as saved, for their dependencies (M15): a start also
+    /// starts what the tunnel depends on, and waits for it.
+    SetTunnels(Vec<Tunnel>),
     /// Takes over what `running.toml` lists from before a crash, as far as
     /// it is still the same process running the same `tunnels`' ssh (SPEC.md
     /// §7 *Surviving a crash*); the rest is dropped from the file, never
@@ -362,6 +377,7 @@ impl Supervisor {
                     changed: false,
                     record,
                     recorded: None,
+                    known: BTreeMap::new(),
                 }
                 .run(rx)
             })
@@ -431,6 +447,33 @@ struct Entry {
     due: Option<Instant>,
     /// kubectl: the local ports that printed `Forwarding from` in this run.
     ready: BTreeSet<u16>,
+    /// Released while a running tunnel depends on it: it is killed once
+    /// none does (bottom-up stop, M15).
+    hold: bool,
+}
+
+impl Entry {
+    fn new(tunnel: Tunnel) -> Self {
+        Entry {
+            tunnel,
+            status: TunnelStatus {
+                state: TunnelState::Stopped,
+                owners: BTreeSet::new(),
+                log: VecDeque::new(),
+                pid: None,
+                failure: None,
+                reconnect: None,
+                running_since: None,
+                after: None,
+            },
+            process: None,
+            restart: false,
+            attempt: 0,
+            due: None,
+            ready: BTreeSet::new(),
+            hold: false,
+        }
+    }
 }
 
 /// First wait before an automatic restart; it doubles up to the maximum.
@@ -458,6 +501,17 @@ struct Worker {
     /// What it holds now; `None` until `Adopt` has read it (it is left alone
     /// until then).
     recorded: Option<RunningFile>,
+    /// Every tunnel known (`SetTunnels` and the starts), for dependencies.
+    known: BTreeMap<String, Tunnel>,
+}
+
+/// Where a tunnel's dependencies are (M15).
+enum Deps {
+    Ready,
+    /// Waiting for this one (an id).
+    Waiting(String),
+    /// This one failed or wasn't started; the reason line.
+    Blocked(String, String),
 }
 
 impl Worker {
@@ -487,6 +541,7 @@ impl Worker {
                 }
             }
             self.reconnect_due();
+            self.advance();
             self.publish();
             self.write_record();
         }
@@ -631,6 +686,7 @@ impl Worker {
                     failure: None,
                     reconnect: None,
                     running_since: Some(Instant::now()),
+                    after: None,
                 },
                 process: Some(Process {
                     generation,
@@ -641,6 +697,7 @@ impl Worker {
                 attempt: 0,
                 due: None,
                 ready: BTreeSet::new(),
+                hold: false,
             },
         );
         self.changed = true;
@@ -668,12 +725,164 @@ impl Worker {
             }
             let problems = check_ports(&[&entry.tunnel]);
             if problems.is_empty() {
-                self.spawn(&id);
+                // Waits for its dependencies first, if they don't run (M15).
+                self.launch(&id);
             } else {
                 let entry = self.entries.get_mut(&id).expect("a due entry");
                 push_log(&mut entry.status.log, problems.join("; "));
                 self.schedule_reconnect(&id);
             }
+        }
+    }
+
+    /// The saved tunnels plus the ones started, by id.
+    fn known_file(&self) -> crate::tunnels::TunnelsFile {
+        crate::tunnels::TunnelsFile {
+            tunnels: self.known.values().cloned().collect(),
+            groups: Vec::new(),
+        }
+    }
+
+    /// A tunnel's name, for the state lines.
+    fn name(&self, id: &str) -> String {
+        self.known
+            .get(id)
+            .map_or_else(|| id.to_string(), |t| t.name.clone())
+    }
+
+    /// Whether `id`'s dependencies run, are still coming, or won't.
+    fn deps(&self, id: &str) -> Deps {
+        let Some(entry) = self.entries.get(id) else {
+            return Deps::Ready;
+        };
+        for dep in &entry.tunnel.depends_on {
+            if !self.known.contains_key(dep) {
+                continue;
+            }
+            let Some(other) = self.entries.get(dep) else {
+                return Deps::Blocked(
+                    dep.clone(),
+                    format!("Not started \u{b7} {} wasn't started", self.name(dep)),
+                );
+            };
+            match &other.status.state {
+                TunnelState::Running => {}
+                TunnelState::Starting => return Deps::Waiting(dep.clone()),
+                // Reconnecting: the dependents wait for it.
+                TunnelState::Failed(_) if other.due.is_some() => {
+                    return Deps::Waiting(dep.clone());
+                }
+                TunnelState::Failed(_) => {
+                    let how = if other.status.failure == Some(FailureKind::NotStarted) {
+                        "wasn't started"
+                    } else {
+                        "failed"
+                    };
+                    return Deps::Blocked(
+                        dep.clone(),
+                        format!("Not started \u{b7} {} {how}", self.name(dep)),
+                    );
+                }
+                TunnelState::Stopped | TunnelState::Stopping => {
+                    return Deps::Blocked(
+                        dep.clone(),
+                        format!("Not started \u{b7} {} wasn't started", self.name(dep)),
+                    );
+                }
+            }
+        }
+        Deps::Ready
+    }
+
+    /// Whether a running (or starting, or stopping) tunnel depends on `id`.
+    fn live_dependent(&self, id: &str) -> Option<String> {
+        self.entries
+            .iter()
+            .find(|(_, e)| e.process.is_some() && e.tunnel.depends_on.iter().any(|d| d == id))
+            .map(|(other, _)| other.clone())
+    }
+
+    /// Spawns `id` once its dependencies run; until then it is `Starting`
+    /// without a process ("Waiting for …", M15). Without dependencies this
+    /// is a plain spawn, as before.
+    fn launch(&mut self, id: &str) {
+        match self.deps(id) {
+            Deps::Ready => self.spawn(id),
+            Deps::Waiting(dep) | Deps::Blocked(dep, _) => {
+                let name = self.name(&dep);
+                let entry = self.entries.get_mut(id).expect("launch of a known tunnel");
+                entry.status.state = TunnelState::Starting;
+                entry.status.failure = None;
+                entry.status.reconnect = None;
+                entry.status.pid = None;
+                entry.status.after = Some(dep);
+                push_log(&mut entry.status.log, format!("waiting for {name}"));
+                self.changed = true;
+            }
+        }
+    }
+
+    /// Moves what waits on dependencies along (M15): a waiting tunnel spawns
+    /// once they run, or isn't started when one won't; a tunnel held for a
+    /// dependent stops once nothing running depends on it.
+    fn advance(&mut self) {
+        loop {
+            let mut progressed = false;
+            let ids: Vec<String> = self.entries.keys().cloned().collect();
+            for id in ids {
+                let entry = &self.entries[&id];
+                if entry.status.state == TunnelState::Starting && entry.process.is_none() {
+                    match self.deps(&id) {
+                        Deps::Ready => {
+                            let problems = check_ports(&[&self.entries[&id].tunnel]);
+                            if problems.is_empty() {
+                                self.spawn(&id);
+                            } else {
+                                self.fail_as(&id, problems.join("; "), FailureKind::PortInUse);
+                            }
+                            progressed = true;
+                        }
+                        Deps::Blocked(dep, reason) => {
+                            self.fail_as(&id, reason, FailureKind::NotStarted);
+                            self.entries.get_mut(&id).expect("known").status.after = Some(dep);
+                            progressed = true;
+                        }
+                        Deps::Waiting(dep) => {
+                            let entry = self.entries.get_mut(&id).expect("known");
+                            if entry.status.after.as_ref() != Some(&dep) {
+                                entry.status.after = Some(dep);
+                                self.changed = true;
+                            }
+                        }
+                    }
+                } else if entry.hold && self.live_dependent(&id).is_none() {
+                    let entry = self.entries.get_mut(&id).expect("known");
+                    entry.hold = false;
+                    entry.status.after = None;
+                    if let Some(process) = &entry.process {
+                        process.killer.kill();
+                    }
+                    self.changed = true;
+                    progressed = true;
+                }
+            }
+            if !progressed {
+                break;
+            }
+        }
+    }
+
+    /// Releases what `id` needed now that it doesn't run any more.
+    fn release_needed_by(&mut self, id: &str) {
+        let owner = Owner::NeededBy(id.to_string());
+        let ids: Vec<String> = self
+            .entries
+            .iter()
+            .filter(|(_, e)| e.status.owners.contains(&owner))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for other in ids {
+            self.release(&other, &owner);
         }
     }
 
@@ -770,64 +979,108 @@ impl Worker {
                     }
                     self.entries.remove(&tunnel_id);
                     self.changed = true;
+                    self.release_needed_by(&tunnel_id);
                 }
             }
             Request::SetSsh(ssh) => self.ssh = ssh,
             Request::SetKubectl(kubectl) => self.kubectl = kubectl,
+            Request::SetTunnels(tunnels) => {
+                self.known = tunnels.into_iter().map(|t| (t.id.clone(), t)).collect();
+            }
             Request::Adopt { tunnels } => self.adopt(tunnels),
         }
     }
 
     /// Adds `owner` to every tunnel; spawns those not running, or none of
-    /// them when a port is taken.
+    /// them when a port is taken. What they depend on (M15) starts too: a
+    /// group owns it, a tunnel started alone gets `NeededBy`; a tunnel waits
+    /// for its dependencies, and one on a loop never starts.
     fn start(&mut self, tunnels: Vec<Tunnel>, owner: Owner) {
-        let to_spawn: Vec<&Tunnel> = tunnels
-            .iter()
-            .filter(|t| {
-                self.entries.get(&t.id).is_none_or(|e| {
-                    matches!(
-                        e.status.state,
-                        TunnelState::Stopped | TunnelState::Failed(_)
-                    )
-                })
-            })
-            .collect();
+        for tunnel in &tunnels {
+            self.known.insert(tunnel.id.clone(), tunnel.clone());
+        }
+        let file = self.known_file();
+        let looped = crate::deps::in_loop(&file);
+        let asked: Vec<String> = tunnels.iter().map(|t| t.id.clone()).collect();
+        // (tunnel, owner) in start order: the dependencies of what was asked
+        // for come along, each owned by the group or by its dependent.
+        let mut wanted: Vec<(Tunnel, Owner)> =
+            tunnels.into_iter().map(|t| (t, owner.clone())).collect();
+        for id in &asked {
+            let chain = std::iter::once(id.clone()).chain(crate::deps::closure(&file, id));
+            for needer in chain.collect::<Vec<_>>() {
+                let deps = file.tunnel(&needer).map(|t| t.depends_on.clone());
+                for dep in deps.unwrap_or_default() {
+                    let Some(tunnel) = file.tunnel(&dep) else {
+                        continue;
+                    };
+                    if asked.contains(&dep) {
+                        continue;
+                    }
+                    let by = match &owner {
+                        Owner::Group(_) => owner.clone(),
+                        _ => Owner::NeededBy(needer.clone()),
+                    };
+                    if !wanted.iter().any(|(t, o)| t.id == dep && *o == by) {
+                        wanted.push((tunnel.clone(), by));
+                    }
+                }
+            }
+        }
+        let mut to_spawn: Vec<&Tunnel> = Vec::new();
+        for (tunnel, _) in &wanted {
+            let idle = self.entries.get(&tunnel.id).is_none_or(|e| {
+                matches!(
+                    e.status.state,
+                    TunnelState::Stopped | TunnelState::Failed(_)
+                )
+            });
+            if idle && !looped.contains(&tunnel.id) && !to_spawn.iter().any(|t| t.id == tunnel.id) {
+                to_spawn.push(tunnel);
+            }
+        }
         let problems = check_ports(&to_spawn);
         if !problems.is_empty() {
             return self.error(format!("Nothing started: {}", problems.join("; ")));
         }
         let to_spawn: Vec<String> = to_spawn.iter().map(|t| t.id.clone()).collect();
 
-        for tunnel in tunnels {
+        let mut launched = BTreeSet::new();
+        for (tunnel, owner) in wanted {
             let id = tunnel.id.clone();
-            let entry = self.entries.entry(id.clone()).or_insert_with(|| Entry {
-                tunnel: tunnel.clone(),
-                status: TunnelStatus {
-                    state: TunnelState::Stopped,
-                    owners: BTreeSet::new(),
-                    log: VecDeque::new(),
-                    pid: None,
-                    failure: None,
-                    reconnect: None,
-                    running_since: None,
-                },
-                process: None,
-                restart: false,
-                attempt: 0,
-                due: None,
-                ready: BTreeSet::new(),
-            });
-            entry.status.owners.insert(owner.clone());
+            let entry = self
+                .entries
+                .entry(id.clone())
+                .or_insert_with(|| Entry::new(tunnel.clone()));
+            entry.status.owners.insert(owner);
             self.changed = true;
-            if entry.status.state == TunnelState::Stopping {
+            if looped.contains(&id) {
+                entry.tunnel = tunnel;
+                if entry.process.is_none() {
+                    self.fail_as(
+                        &id,
+                        "Dependency loop".to_string(),
+                        FailureKind::DependencyLoop,
+                    );
+                }
+            } else if entry.status.state == TunnelState::Stopping && entry.hold {
+                // Wanted again before its dependents let go: it never stopped.
+                entry.hold = false;
+                entry.status.after = None;
+                entry.status.state = if entry.status.running_since.is_some() {
+                    TunnelState::Running
+                } else {
+                    TunnelState::Starting
+                };
+            } else if entry.status.state == TunnelState::Stopping {
                 entry.tunnel = tunnel;
                 entry.restart = true;
-            } else if to_spawn.contains(&id) {
+            } else if to_spawn.contains(&id) && launched.insert(id.clone()) {
                 // Started by hand: a pending automatic restart is moot.
                 entry.tunnel = tunnel;
                 entry.due = None;
                 entry.attempt = 0;
-                self.spawn(&id);
+                self.launch(&id);
             }
         }
     }
@@ -847,13 +1100,33 @@ impl Worker {
         entry.due = None;
         entry.attempt = 0;
         entry.status.reconnect = None;
-        match &entry.process {
-            Some(process) => {
-                process.killer.kill();
-                entry.status.state = TunnelState::Stopping;
+        entry.status.after = None;
+        let running = entry.process.is_some();
+        if running {
+            // Bottom-up (M15): a tunnel stops after the running ones that
+            // depend on it.
+            match self.live_dependent(id) {
+                Some(dependent) => {
+                    let name = self.name(&dependent);
+                    let entry = self.entries.get_mut(id).expect("known");
+                    entry.hold = true;
+                    entry.status.after = Some(dependent);
+                    entry.status.state = TunnelState::Stopping;
+                    push_log(&mut entry.status.log, format!("stopping after {name}"));
+                }
+                None => {
+                    let entry = self.entries.get_mut(id).expect("known");
+                    if let Some(process) = &entry.process {
+                        process.killer.kill();
+                    }
+                    entry.status.state = TunnelState::Stopping;
+                }
             }
-            None => entry.status.state = TunnelState::Stopped,
+        } else {
+            entry.status.state = TunnelState::Stopped;
         }
+        // Nothing needs what it needed any more.
+        self.release_needed_by(id);
     }
 
     fn spawn(&mut self, id: &str) {
@@ -1038,7 +1311,7 @@ impl Worker {
             if restart {
                 let problems = check_ports(&[&tunnel]);
                 if problems.is_empty() {
-                    self.spawn(id);
+                    self.launch(id);
                 } else {
                     self.fail(id, problems.join("; "));
                 }
@@ -1119,6 +1392,47 @@ mod tests {
     use super::*;
     use crate::tunnels::{DEFAULT_BIND, Forward, ForwardKind};
 
+    /// A dependent's automatic restart, due while its dependency is itself
+    /// reconnecting, waits for it instead of spawning (M15); no process is
+    /// started here.
+    #[test]
+    fn a_due_reconnect_waits_for_a_reconnecting_dependency() {
+        let (tx, _rx) = mpsc::channel();
+        let mut worker = Worker {
+            ssh: None,
+            kubectl: None,
+            tx,
+            on_event: Box::new(|_| {}),
+            entries: BTreeMap::new(),
+            next_generation: 0,
+            changed: false,
+            record: None,
+            recorded: None,
+            known: BTreeMap::new(),
+        };
+        let dep = tunnel("k3s", 1);
+        let mut dependent = tunnel("mail", 2);
+        dependent.depends_on = vec!["k3s".into()];
+        dependent.auto_reconnect = true;
+        for (tunnel, due) in [
+            (dep, Instant::now() + Duration::from_secs(60)),
+            (dependent, Instant::now()),
+        ] {
+            worker.known.insert(tunnel.id.clone(), tunnel.clone());
+            let mut entry = Entry::new(tunnel);
+            entry.status.state = TunnelState::Failed("dropped".into());
+            entry.status.owners.insert(Owner::Manual);
+            entry.due = Some(due);
+            worker.entries.insert(entry.tunnel.id.clone(), entry);
+        }
+        worker.reconnect_due();
+        worker.advance();
+        let mail = &worker.entries["mail"];
+        assert_eq!(mail.status.state, TunnelState::Starting);
+        assert_eq!(mail.status.after.as_deref(), Some("k3s"));
+        assert!(mail.process.is_none());
+    }
+
     fn tunnel(id: &str, port: u16) -> Tunnel {
         Tunnel::ssh(
             id,
@@ -1142,6 +1456,7 @@ mod tests {
             failure: None,
             reconnect: None,
             running_since: None,
+            after: None,
         }
     }
 

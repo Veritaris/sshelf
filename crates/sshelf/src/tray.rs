@@ -271,6 +271,7 @@ pub fn model(
                     .iter()
                     .filter_map(|o| match o {
                         Owner::Group(id) => data.tunnels.group(id).map(|g| g.name.clone()),
+                        Owner::NeededBy(id) => data.tunnels.tunnel(id).map(|t| t.name.clone()),
                         Owner::Manual => None,
                     })
                     .collect(),
@@ -685,6 +686,7 @@ mod tests {
             failure: None,
             reconnect: None,
             running_since: None,
+            after: None,
         }
     }
 

@@ -106,6 +106,7 @@ pub fn owner_names(owners: &[&Owner], file: &TunnelsFile) -> String {
             Owner::Group(id) => file
                 .group(id)
                 .map_or_else(|| format!("group {id}"), |g| format!("\"{}\"", g.name)),
+            Owner::NeededBy(id) => format!("needed by {}", tunnel_name(file, id)),
         })
         .collect::<Vec<_>>()
         .join(", ")
@@ -122,9 +123,16 @@ fn owners_text(owners: &[&Owner], file: &TunnelsFile) -> String {
                 || format!("group {id}"),
                 |g| format!("group \u{201c}{}\u{201d}", g.name),
             ),
+            Owner::NeededBy(id) => format!("needed by {}", tunnel_name(file, id)),
         })
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// A tunnel's name, or its id when it is gone.
+pub fn tunnel_name(file: &TunnelsFile, id: &str) -> String {
+    file.tunnel(id)
+        .map_or_else(|| id.to_string(), |t| t.name.clone())
 }
 
 /// "40 s", "14 m", "2 h 14 m" since `since`; asks for a repaint when the
@@ -2299,6 +2307,7 @@ mod tests {
             failure: None,
             reconnect: None,
             running_since,
+            after: None,
         };
         Fixture {
             config: Arc::new(ConfigSnapshot {
