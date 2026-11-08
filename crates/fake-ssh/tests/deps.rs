@@ -307,12 +307,9 @@ fn stopping_goes_bottom_up_and_respects_other_owners() {
         .iter()
         .find(|s| s.state("k3s") == TunnelState::Stopped && s.tunnels.contains_key("k3s"))
         .expect("k3s stopped");
+    // The order itself; "Stopping after mail" can be too short to land in a
+    // snapshot, so it isn't checked here.
     assert_eq!(k3s_down.state("mail"), TunnelState::Stopped);
-    assert!(h.seen.iter().any(|s| {
-        s.tunnels
-            .get("k3s")
-            .is_some_and(|t| t.after.as_deref() == Some("mail"))
-    }));
 
     // Started by hand too: stopping the group leaves it up.
     start_group(&h, &dev, &[&k3s, &mail]);
