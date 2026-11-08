@@ -84,6 +84,16 @@ pub fn hold_port() -> (TcpListener, u16) {
     for _ in first..last {
         let candidate = port;
         port = if port + 1 >= last { first } else { port + 1 };
+        // macOS lets this bind succeed while another process listens on the
+        // port on all addresses, so a port that answers is skipped too.
+        let answers = std::net::TcpStream::connect_timeout(
+            &std::net::SocketAddr::from(([127, 0, 0, 1], candidate)),
+            std::time::Duration::from_millis(50),
+        )
+        .is_ok();
+        if answers {
+            continue;
+        }
         if let Ok(listener) = TcpListener::bind(("127.0.0.1", candidate)) {
             *state = Some(((first, last), port));
             return (listener, candidate);
