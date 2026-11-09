@@ -591,6 +591,8 @@ fn row(ui: &mut Ui, clickable: bool, add: impl FnOnce(&mut Ui)) -> egui::Respons
             .max_rect(rect)
             .layout(Layout::left_to_right(Align::Center)),
     );
+    // Selectable text would take the hover (text cursor, no row highlight).
+    child.style_mut().interaction.selectable_labels = false;
     add(&mut child);
     if clickable {
         response.on_hover_cursor(CursorIcon::PointingHand)
