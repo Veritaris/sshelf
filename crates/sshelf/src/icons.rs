@@ -135,6 +135,30 @@ pub fn label(ui: &mut Ui, icon: char, color: Color32, text: impl Into<RichText>)
 }
 
 fn paint(ui: &Ui, center: egui::Pos2, icon: char, size: f32, color: Color32) {
-    ui.painter()
-        .text(center, Align2::CENTER_CENTER, icon, font(size), color);
+    centered(ui.painter(), center, icon, size, color);
+}
+
+/// Paints `icon` with its drawn shape centred on `center`. Centring the
+/// text box instead leaves glyphs off by the font's ascent and side bearing.
+pub fn centered(
+    painter: &egui::Painter,
+    center: egui::Pos2,
+    icon: char,
+    size: f32,
+    color: Color32,
+) {
+    let galley = painter.layout_no_wrap(icon.to_string(), font(size), color);
+    let ink = galley.rows.first().and_then(|row| {
+        let glyph = row.glyphs.first()?;
+        let min = row.pos + glyph.pos.to_vec2() + glyph.uv_rect.offset;
+        Some(egui::Rect::from_min_size(min, glyph.uv_rect.size))
+    });
+    match ink {
+        Some(ink) if ink.area() > 0.0 => {
+            painter.galley(center - ink.center().to_vec2(), galley, color);
+        }
+        _ => {
+            painter.text(center, Align2::CENTER_CENTER, icon, font(size), color);
+        }
+    }
 }

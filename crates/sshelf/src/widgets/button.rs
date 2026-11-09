@@ -4,9 +4,7 @@
 //! dialogs), 8 px corners, the hover background fading in 80 ms. An icon is
 //! painted, so it is never part of the accessible name.
 
-use egui::{
-    Align2, Color32, CursorIcon, FontId, Response, Role, Sense, Ui, Widget, WidgetInfo, vec2,
-};
+use egui::{Color32, CursorIcon, FontId, Response, Role, Sense, Ui, Widget, WidgetInfo, vec2};
 
 use crate::theme::{Palette, radius, timing};
 use crate::widgets::{marks, popup};
@@ -212,11 +210,11 @@ impl Widget for Button<'_> {
         match self.lead {
             Lead::None => {}
             Lead::Icon(icon) => {
-                painter.text(
+                icons::centered(
+                    painter,
                     egui::pos2(x + icon_size / 2.0, rect.center().y),
-                    Align2::CENTER_CENTER,
                     icon,
-                    icons::font(icon_size),
+                    icon_size,
                     fg,
                 );
             }

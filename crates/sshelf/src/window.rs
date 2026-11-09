@@ -266,11 +266,11 @@ fn window_button(ui: &mut Ui, icon: char, name: &str, accent: Color32) -> Respon
     };
     let painter = ui.painter();
     painter.rect_filled(rect, radius::CONTROL, fill);
-    painter.text(
+    icons::centered(
+        painter,
         rect.center(),
-        Align2::CENTER_CENTER,
         icon,
-        icons::font(16.0),
+        16.0,
         p.text.lerp_to_gamma(accent, hover),
     );
     response
