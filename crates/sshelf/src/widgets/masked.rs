@@ -141,8 +141,8 @@ pub fn text(ui: &mut Ui, text: &str, style: &Style, wrap: bool) -> Response {
         ui.ctx().request_repaint();
     }
     match (now, under) {
-        (Some(_), _) => response.on_hover_cursor(CursorIcon::Grabbing),
-        (None, Some(_)) => popup::tip(response.on_hover_cursor(CursorIcon::Grab), |ui| {
+        (Some(_), _) => response.on_hover_cursor(CursorIcon::Help),
+        (None, Some(_)) => popup::tip(response.on_hover_cursor(CursorIcon::Help), |ui| {
             ui.label("Hold to reveal");
         }),
         (None, None) => response,
@@ -204,9 +204,9 @@ fn numbered(ui: &mut Ui, shown: &str, real: &str, style: &Style) -> Response {
     }
     painter.galley(pos2(rect.left() + pad, rect.top()), galley, color);
     if remember(ui, id, &response, was) {
-        response.on_hover_cursor(CursorIcon::Grabbing)
+        response.on_hover_cursor(CursorIcon::Help)
     } else {
-        let response = response.on_hover_cursor(CursorIcon::Grab);
+        let response = response.on_hover_cursor(CursorIcon::Help);
         popup::tip(response, |ui| {
             ui.label("Hold to reveal");
         })
@@ -272,9 +272,9 @@ fn token(ui: &mut Ui, shown: &str, real: &str, on_card: bool, peekable: bool) ->
         return response;
     }
     if remember(ui, id, &response, was) {
-        response.on_hover_cursor(CursorIcon::Grabbing)
+        response.on_hover_cursor(CursorIcon::Help)
     } else {
-        let response = response.on_hover_cursor(CursorIcon::Grab);
+        let response = response.on_hover_cursor(CursorIcon::Help);
         popup::tip(response, |ui| {
             ui.label("Hold to reveal");
         })
