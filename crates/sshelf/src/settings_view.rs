@@ -1097,11 +1097,12 @@ fn show_update_line(ui: &mut Ui, line: &UpdateLine) -> Vec<Command> {
         UpdateLine::UpToDate { checked, ahead } => {
             ui.horizontal_top(|ui| {
                 ui.set_min_height(28.0);
-                ui.spacing_mut().item_spacing.x = 8.0;
-                icons::show(ui, icons::CIRCLE_CHECK, 16.0, p.green);
                 ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing.y = 2.0;
+                    // The icon in the text's row, so both centre on one line.
                     ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 8.0;
+                        icons::show(ui, icons::CIRCLE_CHECK, 16.0, p.green);
                         ui.spacing_mut().item_spacing.x = 6.0;
                         ui.label(RichText::new("Up to date").size(13.0).color(p.text));
                         if let Some(at) = checked {
@@ -1109,9 +1110,12 @@ fn show_update_line(ui: &mut Ui, line: &UpdateLine) -> Vec<Command> {
                         }
                     });
                     if let Some((current, latest)) = ahead {
-                        ui.label(small(&format!(
-                            "this build ({current}) is newer than the latest release ({latest})"
-                        )));
+                        ui.horizontal(|ui| {
+                            ui.add_space(24.0);
+                            ui.label(small(&format!(
+                                "this build ({current}) is newer than the latest release ({latest})"
+                            )));
+                        });
                     }
                 });
             });
