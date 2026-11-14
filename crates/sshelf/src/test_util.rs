@@ -48,19 +48,23 @@ pub fn accessible_text<State>(harness: &Harness<'_, State>) -> String {
     out
 }
 
-/// The workspace's fake-ssh binary, beside this test binary's folder
-/// (`target/<profile>/deps/..`): `cargo test --workspace` builds it.
+/// The workspace's fake-ssh binary in `target/<profile>`, a folder above
+/// this test binary (`deps/`, or `build/sshelf/<hash>/` in newer cargo's
+/// layout): `cargo test --workspace` builds it.
 pub fn fake_ssh_binary() -> std::path::PathBuf {
     let exe = std::env::current_exe().unwrap();
-    let dir = exe.parent().and_then(std::path::Path::parent).unwrap();
-    let path = dir.join(format!("fake-ssh{}", std::env::consts::EXE_SUFFIX));
-    assert!(
-        path.is_file(),
-        "this test runs the fake-ssh binary; build it first \
-         (`cargo test --workspace` does): {}",
-        path.display()
-    );
-    path
+    let name = format!("fake-ssh{}", std::env::consts::EXE_SUFFIX);
+    exe.ancestors()
+        .skip(1)
+        .map(|dir| dir.join(&name))
+        .find(|path| path.is_file())
+        .unwrap_or_else(|| {
+            panic!(
+                "this test runs the fake-ssh binary; build it first \
+                 (`cargo test --workspace` does); none above {}",
+                exe.display()
+            )
+        })
 }
 
 /// Presses the primary button at `pos` (held until [`release`]).
