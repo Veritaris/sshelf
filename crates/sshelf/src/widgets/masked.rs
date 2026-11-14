@@ -3,9 +3,9 @@
 //! never the real length) in a pill.
 //!
 //! Pressing a token shows the real value while the button is held, with the
-//! yellow tint; releasing, or the pointer leaving it, hides it again. The
-//! cursor is `Grab` (`Grabbing` while held), and after the standard delay a
-//! tooltip says "Hold to reveal". Accessibility names are the masked text,
+//! yellow tint, drawn above the page so nothing around it moves; releasing,
+//! or the pointer leaving it, hides it again. The cursor is `Help`, and
+//! after the standard delay a tooltip says "Hold to reveal". Accessibility names are the masked text,
 //! never the value. With streamer mode off a value draws as plain text.
 
 use egui::{Color32, CursorIcon, FontId, Id, Response, Role, Sense, Ui, WidgetInfo, pos2, vec2};
@@ -51,7 +51,12 @@ pub fn value(ui: &mut Ui, value: &str, style: &Style) -> Response {
 /// cut with "…").
 pub fn text(ui: &mut Ui, text: &str, style: &Style, wrap: bool) -> Response {
     let privacy = privacy::get(ui.ctx());
-    let plain = |job: egui::text::LayoutJob| egui::Label::new(job).selectable(false);
+    // An explicit wrap mode: in a horizontal layout a Label would extend
+    // past the available width and run under what follows.
+    let plain = |job: egui::text::LayoutJob| {
+        let label = egui::Label::new(job).selectable(false);
+        if wrap { label.wrap() } else { label.truncate() }
+    };
     let mut job = egui::text::LayoutJob::default();
     job.wrap.max_width = ui.available_width();
     if !wrap {
@@ -75,13 +80,6 @@ pub fn text(ui: &mut Ui, text: &str, style: &Style, wrap: bool) -> Response {
     for (index, segment) in segments.iter().enumerate() {
         let (shown, format) = match segment {
             Segment::Plain(s) => ((*s).to_string(), format.clone()),
-            Segment::Token(_, value) | Segment::Alias(value, ..) if held == Some(index) => (
-                (*value).to_string(),
-                egui::TextFormat {
-                    background: p.yellow_tint,
-                    ..egui::TextFormat::simple(style.font.clone(), p.yellow)
-                },
-            ),
             Segment::Token(kind, _) => (
                 format!("\u{2009}{}\u{2009}", kind.label()),
                 egui::TextFormat {
@@ -123,7 +121,20 @@ pub fn text(ui: &mut Ui, text: &str, style: &Style, wrap: bool) -> Response {
             .find(|(_, range)| range.contains(&at))
             .map(|(index, _)| *index)
     });
+    // The held token's value, over its label.
+    let revealed = held.and_then(|index| {
+        let (_, range) = tokens.iter().find(|(i, _)| *i == index)?;
+        let at = galley.pos_from_cursor(egui::text::CCursor::new(range.start));
+        let value = match &segments[index] {
+            Segment::Token(_, value) | Segment::Alias(value, ..) => *value,
+            Segment::Plain(_) => return None,
+        };
+        Some((rect.min + at.min.to_vec2(), at.center().y, value))
+    });
     ui.painter().galley(rect.min, galley, style.color);
+    if let Some((min, mid_y, value)) = revealed {
+        reveal(ui, id, min.x, rect.min.y + mid_y, value, style.font.clone());
+    }
     // Shown while pressed on it; leaving the token hides it.
     let now = if response.is_pointer_button_down_on() {
         under
@@ -173,36 +184,35 @@ fn numbered(ui: &mut Ui, shown: &str, real: &str, style: &Style) -> Response {
     let p = &Palette::ONE_DARK;
     let id = ui.next_auto_id().with("masked_alias");
     let was = held(ui, id);
-    let (text, color) = if was {
-        (real, p.yellow)
-    } else {
-        (shown, style.color)
-    };
     let galley = ui
         .painter()
-        .layout_no_wrap(text.to_string(), style.font.clone(), color);
-    let pad = if was { 4.0 } else { 0.0 };
-    let size = vec2(galley.size().x + pad * 2.0, galley.size().y);
-    let (rect, response) = ui.allocate_exact_size(size, Sense::click_and_drag());
+        .layout_no_wrap(shown.to_string(), style.font.clone(), style.color);
+    let (rect, response) = ui.allocate_exact_size(galley.size(), Sense::click_and_drag());
     let name = shown.to_string();
     response.widget_info(|| WidgetInfo::labeled(Role::Label, true, &name));
     let painter = ui.painter();
-    if was {
-        painter.rect_filled(rect, CORNER, p.yellow_tint);
-    } else {
-        // Dotted: 1 px dots, 3 px apart, just under the text.
-        let y = rect.bottom() - 0.5;
-        let mut x = rect.left();
-        while x < rect.right() {
-            painter.rect_filled(
-                egui::Rect::from_min_size(pos2(x, y - 0.5), vec2(1.0, 1.0)),
-                0.0,
-                p.blue,
-            );
-            x += 3.0;
-        }
+    // Dotted: 1 px dots, 3 px apart, just under the text.
+    let y = rect.bottom() - 0.5;
+    let mut x = rect.left();
+    while x < rect.right() {
+        painter.rect_filled(
+            egui::Rect::from_min_size(pos2(x, y - 0.5), vec2(1.0, 1.0)),
+            0.0,
+            p.blue,
+        );
+        x += 3.0;
     }
-    painter.galley(pos2(rect.left() + pad, rect.top()), galley, color);
+    painter.galley(rect.min, galley, style.color);
+    if was {
+        reveal(
+            ui,
+            id,
+            rect.left() - PAD,
+            rect.center().y,
+            real,
+            style.font.clone(),
+        );
+    }
     if remember(ui, id, &response, was) {
         response.on_hover_cursor(CursorIcon::Help)
     } else {
@@ -218,8 +228,28 @@ pub fn dots(ui: &mut Ui, on_card: bool) -> Response {
     token(ui, DOTS, DOTS, on_card, false)
 }
 
-/// Whether the token with `id` was held last frame: its size follows, so a
-/// pill only ever has the width of the dots or, while held, of the value.
+/// A peeked value on the yellow tint, its left edge and middle at `left` /
+/// `mid_y`, drawn above the page: the layout keeps the masked size, so
+/// revealing never moves or resizes what's around it.
+fn reveal(ui: &Ui, id: Id, left: f32, mid_y: f32, value: &str, font: FontId) {
+    let p = &Palette::ONE_DARK;
+    let painter = ui
+        .ctx()
+        .layer_painter(egui::LayerId::new(egui::Order::Tooltip, id.with("reveal")));
+    let galley = painter.layout_no_wrap(value.to_string(), font, p.yellow);
+    let size = vec2(galley.size().x + PAD * 2.0, galley.size().y.max(HEIGHT));
+    let rect = egui::Rect::from_min_size(pos2(left, mid_y - size.y / 2.0), size);
+    // Opaque under the tint, so the masked text below doesn't show through.
+    painter.rect_filled(rect, CORNER, p.bg_dark);
+    painter.rect_filled(rect, CORNER, p.yellow_tint);
+    painter.galley(
+        pos2(rect.left() + PAD, rect.center().y - galley.size().y / 2.0),
+        galley,
+        p.yellow,
+    );
+}
+
+/// Whether the token with `id` was held last frame.
 fn held(ui: &Ui, id: Id) -> bool {
     ui.ctx().data(|d| d.get_temp::<bool>(id)).unwrap_or(false)
 }
@@ -239,17 +269,11 @@ fn token(ui: &mut Ui, shown: &str, real: &str, on_card: bool, peekable: bool) ->
     let id = ui.next_auto_id().with("masked");
     let was = peekable && held(ui, id);
     let font = FontId::monospace(12.0);
-    let (text, color, fill) = if was {
-        (real, p.yellow, p.yellow_tint)
-    } else {
-        (shown, p.dim, if on_card { p.separator } else { p.surface })
-    };
-    let mut job = egui::text::LayoutJob::simple_singleline(text.to_string(), font.clone(), color);
-    if !was {
-        // The dots get 0.06 em of letter spacing; a peeked value none.
-        if let Some(section) = job.sections.first_mut() {
-            section.format.extra_letter_spacing = font.size * 0.06;
-        }
+    let (color, fill) = (p.dim, if on_card { p.separator } else { p.surface });
+    let mut job = egui::text::LayoutJob::simple_singleline(shown.to_string(), font.clone(), color);
+    // The dots get 0.06 em of letter spacing.
+    if let Some(section) = job.sections.first_mut() {
+        section.format.extra_letter_spacing = font.size * 0.06;
     }
     let galley = ui.fonts_mut(|f| f.layout_job(job));
     let size = vec2(galley.size().x + PAD * 2.0, HEIGHT);
@@ -270,6 +294,9 @@ fn token(ui: &mut Ui, shown: &str, real: &str, on_card: bool, peekable: bool) ->
     );
     if !peekable {
         return response;
+    }
+    if was {
+        reveal(ui, id, rect.left(), rect.center().y, real, font);
     }
     if remember(ui, id, &response, was) {
         response.on_hover_cursor(CursorIcon::Help)
