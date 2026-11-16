@@ -1313,17 +1313,11 @@ fn plus_swatch(ui: &mut Ui) -> Response {
         timing::HOVER,
         motion::ease_out,
     );
-    let painter = ui.painter();
-    painter.circle_stroke(
-        rect.center(),
-        7.5,
-        Stroke::new(1.0, p.border.lerp_to_gamma(p.text, hover)),
-    );
     icons::centered(
-        painter,
+        ui.painter(),
         rect.center(),
-        icons::PLUS,
-        12.0,
+        icons::CIRCLE_PLUS,
+        18.0,
         p.dim.lerp_to_gamma(p.text_strong, hover),
     );
     let response = response.on_hover_cursor(CursorIcon::PointingHand);

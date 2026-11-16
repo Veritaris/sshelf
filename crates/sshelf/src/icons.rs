@@ -24,6 +24,7 @@ pub const CHEVRON_RIGHT: char = '\u{e06f}';
 pub const CHEVRON_UP: char = '\u{e070}';
 pub const CIRCLE_ARROW_UP: char = '\u{e07b}';
 pub const CIRCLE_CHECK: char = '\u{e226}';
+pub const CIRCLE_PLUS: char = '\u{e081}';
 pub const CIRCLE_X: char = '\u{e084}';
 pub const COMPASS: char = '\u{e09b}';
 pub const COPY: char = '\u{e09e}';
@@ -75,6 +76,7 @@ pub const ALL: &[char] = &[
     CHEVRON_UP,
     CIRCLE_ARROW_UP,
     CIRCLE_CHECK,
+    CIRCLE_PLUS,
     CIRCLE_X,
     COMPASS,
     COPY,

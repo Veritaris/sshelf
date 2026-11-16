@@ -16,7 +16,7 @@ Embedded into the `sshelf` binary with `include_bytes!` (see `src/fonts.rs`). SP
 40d692fce188e4471e2b3cba937be967878f631ad3ebbbdcd587687c7ebe0c82  Inter-Regular.ttf
 78a843fade9d4612a5567302fb595b56976eb5fcebf4fea5a5912d638bafcde3  Inter-SemiBold.ttf
 a0bf60ef0f83c5ed4d7a75d45838548b1f6873372dfac88f71804491898d138f  JetBrainsMono-Regular.ttf
-6d348025cef1bd1250dfed43a106fd124743cb0a20daf3abd3e3bc68a622420a  lucide.ttf
+f44d842ab68897381a8be3c72bf99da03ab30007242a14d0924e8886198a210a  lucide.ttf
 23730b56d04bc009e9ecf6a0598ef9d82a3ba4ba055d4d9115976e4a385eff7e  lucide-full.ttf
 ```
 
