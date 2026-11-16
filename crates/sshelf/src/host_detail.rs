@@ -1202,27 +1202,21 @@ fn tag_chip(ui: &mut Ui, tag: &str) -> bool {
     let remove = ui.interact(x_rect, response.id.with("remove"), Sense::click());
     let name = format!("Remove tag {tag}");
     remove.widget_info(|| WidgetInfo::labeled(Role::Button, remove.enabled(), &name));
-    let shown = motion::fade(
+    // Always shown; Red on hover, as the window's close button.
+    let hover = motion::fade(
         ui.ctx(),
         response.id.with("x"),
-        response.contains_pointer() && remove.enabled(),
+        remove.hovered() && remove.enabled(),
         timing::HOVER,
         motion::ease_out,
     );
-    if shown > 0.0 {
-        let color = if remove.hovered() {
-            p.text_strong
-        } else {
-            p.dim
-        };
-        ui.painter().text(
-            x_rect.center(),
-            Align2::CENTER_CENTER,
-            icons::X,
-            icons::font(12.0),
-            color.gamma_multiply(shown),
-        );
-    }
+    icons::centered(
+        ui.painter(),
+        x_rect.center(),
+        icons::X,
+        12.0,
+        p.dim.lerp_to_gamma(p.red, hover),
+    );
     remove.on_hover_cursor(CursorIcon::PointingHand).clicked()
 }
 
@@ -1251,11 +1245,11 @@ fn add_tag_chip(ui: &mut Ui) -> Response {
         radius::CONTROL,
         p.surface.lerp_to_gamma(p.selection, hover),
     );
-    painter.text(
+    icons::centered(
+        painter,
         pos2(rect.left() + 8.0 + 6.0, rect.center().y),
-        Align2::CENTER_CENTER,
         icons::PLUS,
-        icons::font(12.0),
+        12.0,
         p.dim,
     );
     painter.galley(
@@ -1325,11 +1319,11 @@ fn plus_swatch(ui: &mut Ui) -> Response {
         7.5,
         Stroke::new(1.0, p.border.lerp_to_gamma(p.text, hover)),
     );
-    painter.text(
+    icons::centered(
+        painter,
         rect.center(),
-        Align2::CENTER_CENTER,
         icons::PLUS,
-        icons::font(12.0),
+        12.0,
         p.dim.lerp_to_gamma(p.text_strong, hover),
     );
     let response = response.on_hover_cursor(CursorIcon::PointingHand);
