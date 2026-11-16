@@ -423,6 +423,7 @@ Before starting a tunnel, determine the host key state using values from `ssh -G
 - Configurable command template with placeholders, e.g. `{terminal_cmd} {ssh} {alias}` (the default).
   - The template is split into words on whitespace; `"…"` groups a word; there are no escapes and no shell. `{ssh}` (ssh binary path) and `{alias}` are substituted inside words, so an alias never adds arguments or commands.
   - `{terminal_cmd}` is only allowed as the first word: the remaining words run in the detected per-OS terminal. Without it, the template is the full command line of a terminal of the user's choice (e.g. `alacritty -e {ssh} {alias}`).
+  - `{terminal_cmd:iterm}` (M16), also first word only: the remaining words run in a new iTerm2 window (macOS). iTerm2 takes commands only as AppleScript text: sshelf types the command into the window's shell (`create window with default profile`, `write text`), quoted for the shell and then for AppleScript, as for Terminal.app. Any other `{terminal_cmd:…}` name is an error.
 - Per-OS defaults:
   - Windows: Windows Terminal (`wt.exe new-tab --title <alias> …`) if present, otherwise ssh runs directly in a new console window (equivalent to `cmd`, without its quoting rules).
   - macOS: Terminal.app (via `osascript`).
@@ -441,7 +442,7 @@ Before starting a tunnel, determine the host key state using values from `ssh -G
     - *WezTerm* (`start --`) and *Alacritty* (`-e`).
     - Windows Terminal isn't listed: it is the default when installed.
   - Linux: every emulator of the detection list on `PATH`, with its own way of taking a command.
-  - macOS: WezTerm, Alacritty and kitty from `/Applications` (Terminal.app is the default). iTerm2 isn't offered: it only runs commands through AppleScript text, which a template can't quote safely.
+  - macOS, from `/Applications` (Terminal.app is the default): *iTerm2* (`iTerm.app`) as `{terminal_cmd:iterm} {ssh} {alias}`, then WezTerm, Alacritty and kitty. The first Connect through iTerm2 makes macOS ask once whether sshelf may control iTerm (Automation), as for Terminal.app.
 - Templates hold no title word: for other commands (§11) the word `{alias}` expands to all their arguments.
 - The program's path is saved inside the command: a terminal that moves needs picking again.
 - Streamer mode: the dropdown's rows show names only, no paths.
@@ -1035,8 +1036,8 @@ Each milestone ends with its acceptance criteria met, tests green on all three O
 
 ### M16 — Terminal choice
 - Everything in §10 *Terminal choice*. Requested by a user: pick Git Bash or ConEmu on Windows from a list instead of writing the command.
-- Tests: detection on a fake Program Files tree and a fake `PATH` (Windows), a fake `PATH` (Linux) and a fake `/Applications` (macOS), on every OS; each found template runs ssh for Connect and for other commands (no title word); Settings: picking sets the command, *Default* restores it, a hand-made command shows as *Custom command*.
-- **Done when:** on Windows with Git for Windows installed, *Git Bash* is offered and Connect opens an ssh session in its window that takes input; the same for ConEmu where installed; CI passes on all three OSes.
+- Tests: detection on a fake Program Files tree and a fake `PATH` (Windows), a fake `PATH` (Linux) and a fake `/Applications` (macOS), on every OS; each found template runs ssh for Connect and for other commands (no title word); iTerm2's script quotes an alias with quotes and spaces for the shell and for AppleScript, and `{terminal_cmd:<name>}` follows the first-word rules; Settings: picking sets the command, *Default* restores it, a hand-made command shows as *Custom command*.
+- **Done when:** on Windows with Git for Windows installed, *Git Bash* is offered and Connect opens an ssh session in its window that takes input; the same for ConEmu where installed, and for iTerm2 on macOS; CI passes on all three OSes.
 
 ---
 

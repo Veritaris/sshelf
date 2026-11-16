@@ -23,6 +23,8 @@ pub enum TemplateError {
     TerminalCmdNotFirst,
     #[error("no terminal found; set a full terminal command in Settings")]
     NoTerminal,
+    #[error("unknown terminal `{0}`; the named one is `{{terminal_cmd:iterm}}`")]
+    UnknownTerminal(String),
 }
 
 /// How a launched program gets its window on Windows (ignored elsewhere).
@@ -65,6 +67,9 @@ pub enum Terminal {
     WindowsConsole,
     /// Terminal.app via `osascript`.
     MacTerminal,
+    /// iTerm2 via `osascript` (M16): only ever named by the template
+    /// (`{terminal_cmd:iterm}`), never detected as the default.
+    ITerm,
     Linux {
         program: PathBuf,
         style: ExecStyle,
@@ -110,6 +115,7 @@ impl Terminal {
             Terminal::WindowsTerminal(path) => format!("Windows Terminal ({})", path.display()),
             Terminal::WindowsConsole => "console window (Windows Terminal not found)".to_string(),
             Terminal::MacTerminal => "Terminal.app".to_string(),
+            Terminal::ITerm => "iTerm2".to_string(),
             Terminal::Linux { program, .. } => program.display().to_string(),
         }
     }
@@ -147,6 +153,26 @@ impl Terminal {
                         "-e".into(),
                         "tell application \"Terminal\" to activate".into(),
                     ],
+                    console: Console::Inherit,
+                }
+            }
+            Terminal::ITerm => {
+                // Typed into a new window's shell, as Terminal.app's `do
+                // script`: shell-quoted, then escaped for AppleScript.
+                let text = applescript_escape(&shell_join(&command));
+                let lines = [
+                    "tell application \"iTerm\"".to_string(),
+                    "activate".to_string(),
+                    "set w to (create window with default profile)".to_string(),
+                    format!("tell current session of w to write text \"{text}\""),
+                    "end tell".to_string(),
+                ];
+                LaunchPlan {
+                    program: "osascript".into(),
+                    args: lines
+                        .into_iter()
+                        .flat_map(|l| ["-e".to_string(), l])
+                        .collect(),
                     console: Console::Inherit,
                 }
             }
@@ -215,8 +241,8 @@ const WINDOWS_TERMINALS: &[(&str, &[&str], &str)] = &[
 ];
 
 /// macOS apps that take a command: name, the binary inside the bundle, the
-/// words before `{ssh} {alias}`. (iTerm2 only runs commands through
-/// AppleScript text, which a template can't quote safely.)
+/// words before `{ssh} {alias}`. (iTerm2 takes commands only as AppleScript
+/// text: it has its own [`Terminal::ITerm`].)
 const MAC_TERMINALS: &[(&str, &str, &str)] = &[
     ("WezTerm", "WezTerm.app/Contents/MacOS/wezterm", "start --"),
     ("Alacritty", "Alacritty.app/Contents/MacOS/alacritty", "-e"),
@@ -308,23 +334,31 @@ pub fn windows_installed(
     found
 }
 
-/// The apps of the table found in `apps` folders (Terminal.app is the
-/// default, `{terminal_cmd}`).
+/// iTerm2 (driven through AppleScript, so named by the template's first
+/// word), then the apps of the table found in `apps` folders (Terminal.app
+/// is the default, `{terminal_cmd}`).
 pub fn mac_installed(apps: &[PathBuf]) -> Vec<Installed> {
-    MAC_TERMINALS
+    let iterm = apps
         .iter()
-        .filter_map(|&(name, binary, words)| {
-            let path = apps
-                .iter()
-                .map(|a| under(a, binary))
-                .find(|p| p.is_file())?;
-            Some(Installed {
-                name: name.into(),
-                template: full_template(&path, words),
-                path: Some(path),
-            })
+        .map(|a| a.join("iTerm.app"))
+        .find(|p| p.is_dir())
+        .map(|path| Installed {
+            name: "iTerm2".into(),
+            path: Some(path),
+            template: "{terminal_cmd:iterm} {ssh} {alias}".into(),
+        });
+    let table = MAC_TERMINALS.iter().filter_map(|&(name, binary, words)| {
+        let path = apps
+            .iter()
+            .map(|a| under(a, binary))
+            .find(|p| p.is_file())?;
+        Some(Installed {
+            name: name.into(),
+            template: full_template(&path, words),
+            path: Some(path),
         })
-        .collect()
+    });
+    iterm.into_iter().chain(table).collect()
 }
 
 /// Every known Linux emulator on `PATH`, in preference order.
@@ -378,6 +412,25 @@ pub fn split_template(template: &str) -> Result<Vec<String>, TemplateError> {
     Ok(words)
 }
 
+/// The terminal a template's first word names: `{terminal_cmd}` the
+/// detected one, `{terminal_cmd:iterm}` iTerm2; `None` for a full command
+/// line. A `{terminal_cmd…}` anywhere else is an error.
+fn leading_terminal(
+    words: &[String],
+    detected: Option<&Terminal>,
+) -> Result<Option<Terminal>, TemplateError> {
+    if words[1..].iter().any(|w| w.contains("{terminal_cmd")) {
+        return Err(TemplateError::TerminalCmdNotFirst);
+    }
+    match words[0].as_str() {
+        "{terminal_cmd}" => detected.cloned().map(Some).ok_or(TemplateError::NoTerminal),
+        "{terminal_cmd:iterm}" => Ok(Some(Terminal::ITerm)),
+        w if w.starts_with("{terminal_cmd:") => Err(TemplateError::UnknownTerminal(w.into())),
+        w if w.contains("{terminal_cmd") => Err(TemplateError::TerminalCmdNotFirst),
+        _ => Ok(None),
+    }
+}
+
 /// What to run for "Connect" to `alias`.
 pub fn plan(
     template: &str,
@@ -389,19 +442,12 @@ pub fn plan(
     let ssh = ssh.display().to_string();
     let fill = |word: &str| word.replace("{ssh}", &ssh).replace("{alias}", alias);
 
-    if words[0] == "{terminal_cmd}" {
+    if let Some(terminal) = leading_terminal(&words, terminal)? {
         let command: Vec<String> = words[1..].iter().map(|w| fill(w)).collect();
-        if command.iter().any(|w| w == "{terminal_cmd}") {
-            return Err(TemplateError::TerminalCmdNotFirst);
-        }
         if command.is_empty() {
             return Err(TemplateError::Empty);
         }
-        let terminal = terminal.ok_or(TemplateError::NoTerminal)?;
         return Ok(terminal.wrap(command, alias));
-    }
-    if words.iter().any(|w| w.contains("{terminal_cmd}")) {
-        return Err(TemplateError::TerminalCmdNotFirst);
     }
     direct(words.iter().map(|w| fill(w)).collect())
 }
@@ -420,18 +466,11 @@ pub fn plan_command(
 ) -> Result<LaunchPlan, TemplateError> {
     let words = split_template(template)?;
     let program = program.display().to_string();
-    if words[0] == "{terminal_cmd}" {
-        if words[1..].iter().any(|w| w.contains("{terminal_cmd}")) {
-            return Err(TemplateError::TerminalCmdNotFirst);
-        }
-        let terminal = terminal.ok_or(TemplateError::NoTerminal)?;
+    if let Some(terminal) = leading_terminal(&words, terminal)? {
         let command = std::iter::once(program)
             .chain(args.iter().cloned())
             .collect();
         return Ok(terminal.wrap(command, title));
-    }
-    if words.iter().any(|w| w.contains("{terminal_cmd}")) {
-        return Err(TemplateError::TerminalCmdNotFirst);
     }
     let mut command = Vec::new();
     for word in words {
@@ -787,6 +826,62 @@ mod tests {
         assert_eq!(
             found[0].template,
             format!("\"{}\" {{ssh}} {{alias}}", kitty.display())
+        );
+
+        std::fs::create_dir(apps.path().join("iTerm.app")).unwrap();
+        let found = mac_installed(&[apps.path().to_path_buf()]);
+        let names: Vec<&str> = found.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["iTerm2", "kitty"]);
+        assert_eq!(found[0].template, "{terminal_cmd:iterm} {ssh} {alias}");
+    }
+
+    /// iTerm2 types the command into a new window's shell: quoted for the
+    /// shell, then for AppleScript, so an alias can't become code at either
+    /// level. Other commands go the same way.
+    #[test]
+    fn iterm_gets_the_command_quoted_twice() {
+        let template = "{terminal_cmd:iterm} {ssh} {alias}";
+        let plan = plan(template, Path::new("/usr/bin/ssh"), "it's \"x\"", None).unwrap();
+        assert_eq!(plan.program, "osascript");
+        let script: Vec<&str> = plan
+            .args
+            .iter()
+            .skip(1)
+            .step_by(2)
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            script,
+            [
+                "tell application \"iTerm\"",
+                "activate",
+                "set w to (create window with default profile)",
+                r#"tell current session of w to write text "'/usr/bin/ssh' 'it'\\''s \"x\"'""#,
+                "end tell",
+            ]
+        );
+        assert!(plan.args.iter().step_by(2).all(|a| a == "-e"));
+        let add = ["-q".to_string()];
+        let other = plan_command(template, Path::new("ssh-add"), &add, "t", None).unwrap();
+        assert!(other.args[7].ends_with(r#"write text "'ssh-add' '-q'""#));
+    }
+
+    #[test]
+    fn named_terminals_follow_the_first_word_rules() {
+        let ssh = ssh();
+        assert_eq!(
+            plan("{terminal_cmd:konsole} {ssh}", &ssh, "a", None),
+            Err(TemplateError::UnknownTerminal(
+                "{terminal_cmd:konsole}".into()
+            ))
+        );
+        assert_eq!(
+            plan("{ssh} {terminal_cmd:iterm}", &ssh, "a", None),
+            Err(TemplateError::TerminalCmdNotFirst)
+        );
+        assert_eq!(
+            plan("{terminal_cmd:iterm}", &ssh, "a", None),
+            Err(TemplateError::Empty)
         );
     }
 }
