@@ -323,6 +323,45 @@ impl SettingsView {
         let p = &Palette::ONE_DARK;
         card(ui, "Connect", |ui| {
             let detected = ssh.and_then(|s| s.terminal.as_ref());
+            // The terminal picker (M16): picking sets the command below.
+            let installed = ssh.map_or(&[][..], |s| &s.terminals[..]);
+            let streamer = privacy::get(ui.ctx()).on;
+            use crate::widgets::dropdown::Choice;
+            let mut choices = vec![Choice::new(0, "Default")];
+            if !streamer {
+                choices[0].detail = detected.map(|t| t.describe());
+            }
+            for (i, found) in installed.iter().enumerate() {
+                let mut choice = Choice::new(i + 1, found.name.clone());
+                if !streamer {
+                    choice.detail = found.path.as_ref().map(|p| p.display().to_string());
+                }
+                choices.push(choice);
+            }
+            let custom = installed.len() + 1;
+            choices.push(Choice::new(custom, "Custom command"));
+            let current = if self.terminal_command == DEFAULT_TERMINAL_COMMAND {
+                0
+            } else {
+                installed
+                    .iter()
+                    .position(|f| f.template == self.terminal_command)
+                    .map_or(custom, |i| i + 1)
+            };
+            let trigger = choices[current].label.clone();
+            row(ui, "Terminal", |ui| {
+                let picked =
+                    Dropdown::with_choices("settings_terminal", "Terminal", choices, trigger)
+                        .panel_width(320.0)
+                        .show(ui, current);
+                match picked {
+                    Some(0) => self.terminal_command = DEFAULT_TERMINAL_COMMAND.to_string(),
+                    Some(i) if i < custom => {
+                        self.terminal_command = installed[i - 1].template.clone();
+                    }
+                    _ => {}
+                }
+            });
             let problem =
                 terminal::plan(&self.terminal_command, Path::new("ssh"), "alias", detected).err();
             let label = ui.label(RichText::new("Terminal command").size(13.0).color(p.dim));
@@ -1920,6 +1959,50 @@ mod tests {
             ..saved
         };
         assert_eq!(harness.state().1, [Command::SaveSettings(expected)]);
+    }
+
+    /// The terminal picker (M16) sets the command; a hand-made one shows as
+    /// *Custom command*.
+    #[test]
+    fn picking_a_terminal_sets_the_command() {
+        let conemu = r#""C:\Program Files\ConEmu\ConEmu64.exe" -run {ssh} {alias}"#;
+        let ssh = SshInfo {
+            tools: Err("not needed".into()),
+            version: None,
+            agent: None,
+            service: None,
+            terminal: None,
+            terminals: vec![sshelf_core::terminal::Installed {
+                name: "ConEmu".into(),
+                path: Some(r"C:\Program Files\ConEmu\ConEmu64.exe".into()),
+                template: conemu.into(),
+            }],
+            tray: Ok(true),
+        };
+        let mut harness = test_util::harness()
+            .with_size([1100.0, 1400.0])
+            .build_ui_state(
+                move |ui, (view, commands): &mut (SettingsView, Vec<Command>)| {
+                    commands.extend(view.show(ui, Some(&data()), (Some(&ssh), None), None, 0));
+                },
+                (SettingsView::default(), Vec::new()),
+            );
+        harness.run_steps(2);
+        let pick = |harness: &mut egui_kittest::Harness<'_, _>, name: &str| {
+            harness
+                .get_by_role_and_label(egui::accesskit::Role::ComboBox, "Terminal")
+                .click_accesskit();
+            harness.run_steps(3);
+            harness.get_by_label(name).click_accesskit();
+            harness.run_steps(3);
+        };
+        pick(&mut harness, "ConEmu");
+        assert_eq!(harness.state().0.terminal_command, conemu);
+        pick(&mut harness, "Default");
+        assert_eq!(harness.state().0.terminal_command, DEFAULT_TERMINAL_COMMAND);
+        harness.state_mut().0.terminal_command = "alacritty -e {ssh} {alias}".into();
+        harness.run_steps(2);
+        assert!(test_util::drawn_text(&harness).contains("Custom command"));
     }
 
     /// Privacy's switches apply at once: nothing to save, and a later Save of

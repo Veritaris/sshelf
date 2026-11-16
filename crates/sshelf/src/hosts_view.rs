@@ -1394,6 +1394,7 @@ mod tests {
                 })
             }),
             terminal: None,
+            terminals: Vec::new(),
             tray: Ok(true),
         }
     }

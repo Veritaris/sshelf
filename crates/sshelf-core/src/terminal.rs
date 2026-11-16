@@ -151,14 +151,7 @@ impl Terminal {
                 }
             }
             Terminal::Linux { program, style } => {
-                let prefix: &[&str] = match style {
-                    ExecStyle::DashE => &["-e"],
-                    ExecStyle::DoubleDash => &["--"],
-                    ExecStyle::DashX => &["-x"],
-                    ExecStyle::Direct => &[],
-                    ExecStyle::WeztermStart => &["start", "--"],
-                };
-                let mut args: Vec<String> = prefix.iter().map(|s| s.to_string()).collect();
+                let mut args: Vec<String> = style.words().iter().map(|s| s.to_string()).collect();
                 args.extend(command);
                 LaunchPlan {
                     program: program.display().to_string(),
@@ -192,6 +185,161 @@ pub fn linux_terminal(
     LINUX_TERMINALS
         .iter()
         .find_map(|&(name, style)| on_path(name).map(|program| Terminal::Linux { program, style }))
+}
+
+/// A terminal found on this machine, for the Settings picker (SPEC.md §10
+/// *Terminal choice*, M16): picking it sets the terminal command to
+/// `template`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Installed {
+    pub name: String,
+    /// Its program (`None` for the plain console window).
+    pub path: Option<PathBuf>,
+    pub template: String,
+}
+
+/// Windows terminals: name, the program under one of the roots, the words
+/// before `{ssh} {alias}` (no `{alias}` among them: for other commands that
+/// word expands to all their arguments). ConEmu's `-run` takes the rest of
+/// its command line; mintty (Git Bash's window) needs ConPTY for the
+/// Windows ssh.
+const WINDOWS_TERMINALS: &[(&str, &[&str], &str)] = &[
+    ("Git Bash", &["Git/usr/bin/mintty.exe"], "-o ConPTY=true -e"),
+    (
+        "ConEmu",
+        &["ConEmu/ConEmu64.exe", "ConEmu/ConEmu.exe"],
+        "-run",
+    ),
+    ("WezTerm", &["WezTerm/wezterm.exe"], "start --"),
+    ("Alacritty", &["Alacritty/alacritty.exe"], "-e"),
+];
+
+/// macOS apps that take a command: name, the binary inside the bundle, the
+/// words before `{ssh} {alias}`. (iTerm2 only runs commands through
+/// AppleScript text, which a template can't quote safely.)
+const MAC_TERMINALS: &[(&str, &str, &str)] = &[
+    ("WezTerm", "WezTerm.app/Contents/MacOS/wezterm", "start --"),
+    ("Alacritty", "Alacritty.app/Contents/MacOS/alacritty", "-e"),
+    ("kitty", "kitty.app/Contents/MacOS/kitty", ""),
+];
+
+/// `relative` (`/`-separated, as in the tables) under `root`.
+fn under(root: &Path, relative: &str) -> PathBuf {
+    relative
+        .split('/')
+        .fold(root.to_path_buf(), |p, c| p.join(c))
+}
+
+/// `"<path>" <words> {ssh} {alias}`.
+fn full_template(path: &Path, words: &str) -> String {
+    let words = if words.is_empty() {
+        String::new()
+    } else {
+        format!("{words} ")
+    };
+    format!("\"{}\" {words}{{ssh}} {{alias}}", path.display())
+}
+
+impl ExecStyle {
+    fn words(self) -> &'static [&'static str] {
+        match self {
+            ExecStyle::DashE => &["-e"],
+            ExecStyle::DoubleDash => &["--"],
+            ExecStyle::DashX => &["-x"],
+            ExecStyle::Direct => &[],
+            ExecStyle::WeztermStart => &["start", "--"],
+        }
+    }
+}
+
+/// The terminals installed here, for the Settings picker. Found by fixed
+/// places and `PATH`; nothing runs.
+pub fn installed() -> Vec<Installed> {
+    let path_var = env::var_os("PATH").unwrap_or_default();
+    if cfg!(windows) {
+        let mut roots: Vec<PathBuf> = ["ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"]
+            .iter()
+            .filter_map(env::var_os)
+            .map(PathBuf::from)
+            .collect();
+        if let Some(local) = env::var_os("LOCALAPPDATA") {
+            roots.push(Path::new(&local).join("Programs"));
+        }
+        return windows_installed(&roots, |name| find_in_path(name, &path_var));
+    }
+    if cfg!(target_os = "macos") {
+        return mac_installed(&[PathBuf::from("/Applications")]);
+    }
+    linux_installed(|name| find_in_path(name, &path_var))
+}
+
+/// The console window, then the table, under `roots` (the Program Files
+/// folders, then `%LOCALAPPDATA%\Programs`) or else on `PATH`. (Windows
+/// Terminal is the default, `{terminal_cmd}`, when it is installed.)
+pub fn windows_installed(
+    roots: &[PathBuf],
+    on_path: impl Fn(&str) -> Option<PathBuf>,
+) -> Vec<Installed> {
+    let mut found = vec![Installed {
+        name: "Console window".into(),
+        path: None,
+        template: "{ssh} {alias}".into(),
+    }];
+    for &(name, relative, words) in WINDOWS_TERMINALS {
+        let path = roots
+            .iter()
+            .flat_map(|root| relative.iter().map(move |r| under(root, r)))
+            .find(|p| p.is_file())
+            // On PATH by the program's own name (e.g. `wezterm`).
+            .or_else(|| {
+                relative
+                    .iter()
+                    .filter_map(|r| r.rsplit('/').next()?.strip_suffix(".exe"))
+                    .find_map(&on_path)
+            });
+        if let Some(path) = path {
+            found.push(Installed {
+                name: name.into(),
+                template: full_template(&path, words),
+                path: Some(path),
+            });
+        }
+    }
+    found
+}
+
+/// The apps of the table found in `apps` folders (Terminal.app is the
+/// default, `{terminal_cmd}`).
+pub fn mac_installed(apps: &[PathBuf]) -> Vec<Installed> {
+    MAC_TERMINALS
+        .iter()
+        .filter_map(|&(name, binary, words)| {
+            let path = apps
+                .iter()
+                .map(|a| under(a, binary))
+                .find(|p| p.is_file())?;
+            Some(Installed {
+                name: name.into(),
+                template: full_template(&path, words),
+                path: Some(path),
+            })
+        })
+        .collect()
+}
+
+/// Every known Linux emulator on `PATH`, in preference order.
+pub fn linux_installed(on_path: impl Fn(&str) -> Option<PathBuf>) -> Vec<Installed> {
+    LINUX_TERMINALS
+        .iter()
+        .filter_map(|&(name, style)| {
+            let path = on_path(name)?;
+            Some(Installed {
+                name: name.into(),
+                template: full_template(&path, &style.words().join(" ")),
+                path: Some(path),
+            })
+        })
+        .collect()
 }
 
 /// Splits a template into words: whitespace separates, `"…"` groups.
@@ -573,6 +721,72 @@ mod tests {
         assert_eq!(
             plan_command("{terminal_cmd} {ssh}", Path::new("x"), &[], "t", None),
             Err(TemplateError::NoTerminal)
+        );
+    }
+
+    /// An empty file at `relative` (`/`-separated) under `root`.
+    fn touch(root: &Path, relative: &str) -> PathBuf {
+        let path = under(root, relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "").unwrap();
+        path
+    }
+
+    #[test]
+    fn windows_terminals_are_found_in_program_folders_and_on_path() {
+        let (system, user) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let conemu = touch(system.path(), "ConEmu/ConEmu64.exe");
+        let mintty = touch(user.path(), "Git/usr/bin/mintty.exe");
+        let wezterm = PathBuf::from(r"D:\tools\wezterm.exe");
+        let roots = [system.path().to_path_buf(), user.path().to_path_buf()];
+        let found = windows_installed(&roots, |name| (name == "wezterm").then(|| wezterm.clone()));
+        let names: Vec<&str> = found.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["Console window", "Git Bash", "ConEmu", "WezTerm"]);
+        assert_eq!(found[2].path.as_ref(), Some(&conemu));
+
+        // Each template runs ssh in that terminal, for Connect and for other
+        // commands, with no title word that other commands would expand.
+        let ssh = ssh();
+        let connect = plan(&found[1].template, &ssh, "web", None).unwrap();
+        assert_eq!(connect.program, mintty.display().to_string());
+        assert_eq!(
+            connect.args,
+            words(&format!("-o ConPTY=true -e {} web", ssh.display()))
+        );
+        let add = ["-q".to_string(), "key".to_string()];
+        let other = plan_command(&found[2].template, Path::new("ssh-add"), &add, "t", None);
+        assert_eq!(other.unwrap().args, ["-run", "ssh-add", "-q", "key"]);
+        let console = plan(&found[0].template, &ssh, "web", None).unwrap();
+        assert_eq!(console.program, ssh.display().to_string());
+    }
+
+    #[test]
+    fn every_installed_linux_emulator_is_offered() {
+        let found = linux_installed(|name| {
+            ["konsole", "kitty"]
+                .contains(&name)
+                .then(|| PathBuf::from(format!("/usr/bin/{name}")))
+        });
+        let templates: Vec<&str> = found.iter().map(|f| f.template.as_str()).collect();
+        assert_eq!(
+            templates,
+            [
+                "\"/usr/bin/konsole\" -e {ssh} {alias}",
+                "\"/usr/bin/kitty\" {ssh} {alias}"
+            ]
+        );
+    }
+
+    #[test]
+    fn mac_apps_are_found_in_their_bundles() {
+        let apps = tempfile::tempdir().unwrap();
+        let kitty = touch(apps.path(), "kitty.app/Contents/MacOS/kitty");
+        let found = mac_installed(&[apps.path().to_path_buf()]);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].name, "kitty");
+        assert_eq!(
+            found[0].template,
+            format!("\"{}\" {{ssh}} {{alias}}", kitty.display())
         );
     }
 }

@@ -430,6 +430,22 @@ Before starting a tunnel, determine the host key state using values from `ssh -G
 - Other commands run in the terminal the same way (installing a key, `ssh-add` for a passphrase-protected key, §11): with `{terminal_cmd}` the command runs as is in the detected terminal (the template's other words are meant for Connect); a full template gets the program for the word `{ssh}` and the arguments, one word each, for the word `{alias}`.
 - Each launch from the app is recorded in `history.toml` (only app-launched sessions can be tracked; say so in the UI).
 
+### Terminal choice (milestone 16)
+
+- Settings › Connect gets a *Terminal* dropdown above the command: *Default* (the detected terminal, `{terminal_cmd} {ssh} {alias}`), each terminal installed on this machine, and *Custom command*. Picking one sets the terminal command to that terminal's full template; nothing else is stored (no new settings key). A command that matches no entry shows as *Custom command*; the field stays editable.
+- Found by fixed places and `PATH`, in the background with the ssh detection; nothing runs. The tour's sandbox finds none.
+  - Windows (Program Files folders, then `%LOCALAPPDATA%\Programs`, else `PATH` by program name):
+    - *Console window*: `{ssh} {alias}`;
+    - *Git Bash*: `Git\usr\bin\mintty.exe -o ConPTY=true -e {ssh} {alias}` (Git's window only: ssh stays the Windows OpenSSH, §1 rule 10, and needs ConPTY under mintty);
+    - *ConEmu*: `ConEmu\ConEmu64.exe` (or `ConEmu.exe`) `-run {ssh} {alias}`;
+    - *WezTerm* (`start --`) and *Alacritty* (`-e`).
+    - Windows Terminal isn't listed: it is the default when installed.
+  - Linux: every emulator of the detection list on `PATH`, with its own way of taking a command.
+  - macOS: WezTerm, Alacritty and kitty from `/Applications` (Terminal.app is the default). iTerm2 isn't offered: it only runs commands through AppleScript text, which a template can't quote safely.
+- Templates hold no title word: for other commands (§11) the word `{alias}` expands to all their arguments.
+- The program's path is saved inside the command: a terminal that moves needs picking again.
+- Streamer mode: the dropdown's rows show names only, no paths.
+
 ### Close behavior
 
 - If no tunnels are running: close immediately — unless *Minimize to tray* is the remembered choice and a tray is available (then the window hides, as below).
@@ -1016,6 +1032,11 @@ Each milestone ends with its acceptance criteria met, tests green on all three O
   - *Depends on* can be changed while the tunnels run; it applies to the next start.
   - A *Start with sshelf* launch never asks; it starts the outside dependencies.
   - Board differences (the spec wins): the playable board's 2600 ms toast uses the normal toast timing; the drop target is shown by the rows sliding, without a separate indicator line.
+
+### M16 — Terminal choice
+- Everything in §10 *Terminal choice*. Requested by a user: pick Git Bash or ConEmu on Windows from a list instead of writing the command.
+- Tests: detection on a fake Program Files tree and a fake `PATH` (Windows), a fake `PATH` (Linux) and a fake `/Applications` (macOS), on every OS; each found template runs ssh for Connect and for other commands (no title word); Settings: picking sets the command, *Default* restores it, a hand-made command shows as *Custom command*.
+- **Done when:** on Windows with Git for Windows installed, *Git Bash* is offered and Connect opens an ssh session in its window that takes input; the same for ConEmu where installed; CI passes on all three OSes.
 
 ---
 

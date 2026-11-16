@@ -2887,6 +2887,7 @@ mod tests {
             agent: Some(sshelf_core::ssh::AgentStatus::Keys(0)),
             service: None,
             terminal: None,
+            terminals: Vec::new(),
             tray: Ok(true),
         });
         let mut harness = harness(f, selected());

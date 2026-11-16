@@ -207,6 +207,7 @@ mod tests {
                 start_type: sshelf_core::agent_service::StartType::Manual,
             })),
             terminal: None,
+            terminals: Vec::new(),
             tray: Ok(true),
         }
     }

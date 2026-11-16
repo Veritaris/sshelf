@@ -554,6 +554,9 @@ pub struct SshInfo {
     /// Windows only.
     pub service: Option<Result<AgentService, String>>,
     pub terminal: Option<Terminal>,
+    /// The terminals installed here, for the Settings picker (M16; none in
+    /// the tour's sandbox).
+    pub terminals: Vec<terminal::Installed>,
     /// Whether the desktop shows tray icons ([`tray_host::available`]).
     pub tray: Result<bool, String>,
 }
@@ -2063,6 +2066,11 @@ impl Worker {
                 agent,
                 service: sandbox.is_none().then(agent_service::query).flatten(),
                 terminal,
+                terminals: if sandbox.is_none() {
+                    terminal::installed()
+                } else {
+                    Vec::new()
+                },
                 tray: tray_host::available(),
             })));
         });
